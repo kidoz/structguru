@@ -1,0 +1,93 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "structguru"
+version = "0.1.0"
+description = "A loguru-style ergonomic API for structlog"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Aleksandr Pavlov", email = "ckidoz@gmail.com" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Logging",
+    "Typing :: Typed",
+]
+dependencies = [
+    "structlog>=24.1.0",
+    "orjson>=3.9.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/kidoz/structguru"
+Repository = "https://github.com/kidoz/structguru"
+Issues = "https://github.com/kidoz/structguru/issues"
+
+[project.optional-dependencies]
+otel = ["opentelemetry-api>=1.0"]
+celery = ["celery>=5.0"]
+flask = ["flask>=2.0"]
+django = ["django>=4.0"]
+sqlalchemy = ["sqlalchemy>=2.0"]
+grpc = ["grpcio>=1.50"]
+sentry = ["sentry-sdk>=1.0"]
+all = [
+    "structguru[otel,celery,flask,django,sqlalchemy,grpc,sentry]",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "mypy>=1.8",
+    "ruff>=0.4",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/structguru"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 99
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+
+[[tool.mypy.overrides]]
+module = [
+    "opentelemetry",
+    "opentelemetry.*",
+    "celery",
+    "celery.*",
+    "flask",
+    "flask.*",
+    "sentry_sdk",
+    "sentry_sdk.*",
+    "sqlalchemy",
+    "sqlalchemy.*",
+    "grpc",
+    "grpc.*",
+]
+ignore_missing_imports = true
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
