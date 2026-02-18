@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "structguru"
-version = "0.1.0"
+version = "0.1.1"
 description = "A loguru-style ergonomic API for structlog"
 readme = "README.md"
 license = "MIT"
@@ -55,6 +55,9 @@ dev = [
     "pytest-asyncio>=0.23",
     "mypy>=1.8",
     "ruff>=0.4",
+    "pytest-benchmark>=5.2.3",
+    "loguru>=0.7.3",
+    "pytest-cov>=7.0.0",
 ]
 
 [tool.hatch.build.targets.wheel]
