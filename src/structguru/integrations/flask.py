@@ -49,7 +49,11 @@ def setup_flask_logging(
 
         clear_contextvars()
 
-        request_id = request.headers.get(request_id_header) or str(uuid.uuid4())
+        raw_id = request.headers.get(request_id_header, "")
+        if raw_id and len(raw_id) <= 128 and raw_id.isprintable():
+            request_id = raw_id
+        else:
+            request_id = str(uuid.uuid4())
         g.structguru_start_time = time.perf_counter()
         g.structguru_request_id = request_id
 
@@ -64,14 +68,17 @@ def setup_flask_logging(
     def _log_response(response: Any) -> Any:
         from flask import g
 
-        if log_request:
-            duration_ms = (time.perf_counter() - g.structguru_start_time) * 1000
+        start_time = getattr(g, "structguru_start_time", None)
+        if log_request and start_time is not None:
+            duration_ms = (time.perf_counter() - start_time) * 1000
             log.info(
                 "Request completed",
                 status_code=response.status_code,
                 duration_ms=round(duration_ms, 2),
             )
-        response.headers["X-Request-ID"] = g.structguru_request_id
+        request_id = getattr(g, "structguru_request_id", None)
+        if request_id:
+            response.headers[request_id_header] = request_id
         return response
 
     @app.teardown_request  # type: ignore[untyped-decorator]

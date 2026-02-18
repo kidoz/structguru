@@ -53,13 +53,16 @@ class MetricProcessor:
 
         for pattern, callback in self._counters.items():
             if pattern in event:
-                callback(event_dict)
+                try:
+                    callback(event_dict)
+                except Exception:
+                    pass
 
         for pattern, (hist_callback, value_key) in self._histograms.items():
             if pattern in event and value_key in event_dict:
                 try:
                     hist_callback(float(event_dict[value_key]), event_dict)
-                except (ValueError, TypeError):
+                except Exception:
                     pass
 
         return event_dict

@@ -27,9 +27,9 @@ import structlog
 from structlog.contextvars import bind_contextvars, clear_contextvars
 
 from structguru.config import (
-    _build_formatter_processors,
-    _build_shared_processors,
-    _orjson_serializer,
+    build_formatter_processors,
+    build_shared_processors,
+    orjson_serializer,
 )
 
 
@@ -50,10 +50,10 @@ def build_logging_config(
     json_logs:
         ``True`` for JSON, ``False`` for colored console.
     """
-    shared = _build_shared_processors(service)
+    shared = build_shared_processors(service)
 
     renderer: structlog.types.Processor = (
-        structlog.processors.JSONRenderer(serializer=_orjson_serializer)
+        structlog.processors.JSONRenderer(serializer=orjson_serializer)
         if json_logs
         else structlog.dev.ConsoleRenderer(event_key="message")
     )
@@ -64,7 +64,7 @@ def build_logging_config(
         "formatters": {
             "structlog": {
                 "()": structlog.stdlib.ProcessorFormatter,
-                "processors": _build_formatter_processors(renderer, json_mode=json_logs),
+                "processors": build_formatter_processors(renderer, json_mode=json_logs),
                 "foreign_pre_chain": shared,
             },
         },
@@ -96,7 +96,11 @@ class StructguruMiddleware:
     def __call__(self, request: Any) -> Any:
         clear_contextvars()
 
-        request_id: str = request.META.get("HTTP_X_REQUEST_ID", str(uuid.uuid4()))
+        raw_id = request.META.get("HTTP_X_REQUEST_ID", "")
+        if raw_id and len(raw_id) <= 128 and raw_id.isprintable():
+            request_id = raw_id
+        else:
+            request_id = str(uuid.uuid4())
 
         bind_contextvars(
             request_id=request_id,
@@ -110,16 +114,19 @@ class StructguruMiddleware:
 
         start_time = time.perf_counter()
 
-        response = self.get_response(request)
-
-        duration_ms = (time.perf_counter() - start_time) * 1000
-        self.log.info(
-            "Request completed",
-            status_code=response.status_code,
-            duration_ms=round(duration_ms, 2),
-        )
-
-        response["X-Request-ID"] = request_id
-        clear_contextvars()
-
-        return response
+        try:
+            response = self.get_response(request)
+        except Exception:
+            self.log.exception("Request failed")
+            raise
+        else:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            self.log.info(
+                "Request completed",
+                status_code=response.status_code,
+                duration_ms=round(duration_ms, 2),
+            )
+            response["X-Request-ID"] = request_id
+            return response
+        finally:
+            clear_contextvars()

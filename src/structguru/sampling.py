@@ -61,6 +61,12 @@ class RateLimitingProcessor:
         period_seconds: float = 60.0,
         key: str = "event",
     ) -> None:
+        if max_count < 1:
+            msg = f"max_count must be >= 1, got {max_count}"
+            raise ValueError(msg)
+        if period_seconds <= 0:
+            msg = f"period_seconds must be > 0, got {period_seconds}"
+            raise ValueError(msg)
         self._max_count = max_count
         self._period = period_seconds
         self._key_field = key

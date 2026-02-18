@@ -118,6 +118,38 @@ class TestStructguruMiddleware:
         assert called
 
     @pytest.mark.asyncio
+    async def test_websocket_no_false_500(self) -> None:
+        buf = io.StringIO()
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+
+        async def ws_app(scope: dict, receive: Any, send: Any) -> None:
+            await send({"type": "websocket.accept"})
+            await send({"type": "websocket.close", "code": 1000})
+
+        app = StructguruMiddleware(ws_app)
+        scope: dict = {
+            "type": "websocket",
+            "path": "/ws",
+            "headers": [],
+            "client": ("127.0.0.1", 9000),
+        }
+
+        sent: list[dict] = []
+
+        async def _receive() -> dict:
+            return {"type": "websocket.connect"}
+
+        async def _send(m: dict) -> None:
+            sent.append(m)
+
+        await app(scope, _receive, _send)
+
+        output = buf.getvalue()
+        assert "Request completed" in output
+        # WebSocket logs should NOT contain status_code (no false 500).
+        assert "status_code" not in output
+
+    @pytest.mark.asyncio
     async def test_exception_logged(self) -> None:
         buf = io.StringIO()
         configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
@@ -136,3 +168,32 @@ class TestStructguruMiddleware:
 
         output = buf.getvalue()
         assert "Request failed" in output
+
+    @pytest.mark.asyncio
+    async def test_invalid_utf8_request_id_header(self) -> None:
+        buf = io.StringIO()
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+
+        app = StructguruMiddleware(_simple_app)
+        scope: dict = {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": [(b"x-request-id", b"\xff\xfe")],
+            "client": None,
+        }
+        sent: list[dict] = []
+
+        async def _receive() -> dict:
+            return {"type": "http.request"}
+
+        async def _send(m: dict) -> None:
+            sent.append(m)
+
+        await app(scope, _receive, _send)
+
+        # Should not crash; a UUID should be generated instead.
+        output = buf.getvalue()
+        assert "Request completed" in output
+        header_keys = [h[0] for h in sent[0]["headers"]]
+        assert b"x-request-id" in header_keys

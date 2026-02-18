@@ -43,6 +43,18 @@ class TestSamplingProcessor:
 
 
 class TestRateLimitingProcessor:
+    def test_invalid_max_count_raises(self) -> None:
+        with pytest.raises(ValueError, match="max_count must be >= 1"):
+            RateLimitingProcessor(max_count=0)
+        with pytest.raises(ValueError, match="max_count must be >= 1"):
+            RateLimitingProcessor(max_count=-5)
+
+    def test_invalid_period_raises(self) -> None:
+        with pytest.raises(ValueError, match="period_seconds must be > 0"):
+            RateLimitingProcessor(period_seconds=0)
+        with pytest.raises(ValueError, match="period_seconds must be > 0"):
+            RateLimitingProcessor(period_seconds=-1.0)
+
     def test_allows_under_limit(self) -> None:
         proc = RateLimitingProcessor(max_count=5, period_seconds=60.0)
         for _ in range(5):

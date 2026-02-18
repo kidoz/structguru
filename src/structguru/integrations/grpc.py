@@ -15,6 +15,9 @@ Usage::
 
 from __future__ import annotations
 
+import functools
+import uuid
+from collections.abc import Iterator
 from typing import Any
 
 import structlog
@@ -53,8 +56,87 @@ class StructguruInterceptor:
         metadata: dict[str, str] = {}
         for key, value in handler_call_details.invocation_metadata or []:
             metadata[key] = value
-        request_id = metadata.get(self.request_id_key, "")
+        raw_id = metadata.get(self.request_id_key, "")
+        if raw_id and len(raw_id) <= 128 and raw_id.isprintable():
+            request_id = raw_id
+        else:
+            request_id = str(uuid.uuid4())
 
         bind_contextvars(grpc_method=method, request_id=request_id)
 
-        return continuation(handler_call_details)
+        try:
+            handler = continuation(handler_call_details)
+        except Exception:
+            clear_contextvars()
+            raise
+
+        if handler is None:
+            clear_contextvars()
+            return None
+
+        wrapped = _wrap_rpc_handler(handler, method, request_id)
+        # Clear context now; the wrapped handler re-binds it when invoked.
+        # This prevents grpc_method/request_id from leaking into unrelated
+        # logs between intercept_service() returning and the handler executing.
+        clear_contextvars()
+        return wrapped
+
+
+def _wrap_rpc_handler(handler: Any, method: str, request_id: str) -> Any:
+    """Wrap a gRPC handler so context is bound during execution and cleared after."""
+    if handler.unary_unary:
+        handler = _replace_behavior(
+            handler, "unary_unary", method, request_id, streaming_response=False
+        )
+    if handler.unary_stream:
+        handler = _replace_behavior(
+            handler, "unary_stream", method, request_id, streaming_response=True
+        )
+    if handler.stream_unary:
+        handler = _replace_behavior(
+            handler, "stream_unary", method, request_id, streaming_response=False
+        )
+    if handler.stream_stream:
+        handler = _replace_behavior(
+            handler, "stream_stream", method, request_id, streaming_response=True
+        )
+    return handler
+
+
+def _wrap_iterator(it: Iterator[Any], method: str, request_id: str) -> Iterator[Any]:
+    """Wrap a response iterator so context stays bound during iteration."""
+    try:
+        for item in it:
+            clear_contextvars()
+            bind_contextvars(grpc_method=method, request_id=request_id)
+            yield item
+    finally:
+        clear_contextvars()
+
+
+def _replace_behavior(
+    handler: Any, attr: str, method: str, request_id: str, *, streaming_response: bool
+) -> Any:
+    original_fn = getattr(handler, attr)
+
+    @functools.wraps(original_fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        clear_contextvars()
+        bind_contextvars(grpc_method=method, request_id=request_id)
+        try:
+            result = original_fn(*args, **kwargs)
+        except Exception:
+            clear_contextvars()
+            raise
+        if streaming_response:
+            # Don't clear now — context must live through iteration.
+            return _wrap_iterator(result, method, request_id)
+        clear_contextvars()
+        return result
+
+    # gRPC handlers are namedtuple-like; replace the behavior via _replace if
+    # available, otherwise set the attribute directly.
+    if hasattr(handler, "_replace"):
+        return handler._replace(**{attr: wrapper})
+    object.__setattr__(handler, attr, wrapper)
+    return handler

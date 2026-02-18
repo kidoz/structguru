@@ -61,15 +61,36 @@ class RedactingProcessor:
         _method_name: str,
         event_dict: dict[str, Any],
     ) -> dict[str, Any]:
-        for key in list(event_dict):
-            if key.lower() in self._keys:
-                event_dict[key] = self._replacement
-            elif isinstance(event_dict[key], str) and self._patterns:
-                val = event_dict[key]
-                try:
-                    for pattern in self._patterns:
-                        val = pattern.sub(self._replacement, val)
-                except re.error:
-                    pass
-                event_dict[key] = val
+        self._redact_dict(event_dict, set())
         return event_dict
+
+    def _redact_dict(self, d: dict[str, Any], seen: set[int]) -> None:
+        """Recursively redact sensitive keys and apply regex patterns."""
+        obj_id = id(d)
+        if obj_id in seen:
+            return
+        seen.add(obj_id)
+        for key in list(d):
+            if isinstance(key, str) and key.lower() in self._keys:
+                d[key] = self._replacement
+            else:
+                d[key] = self._redact_value(d[key], seen)
+
+    def _redact_value(self, value: Any, seen: set[int]) -> Any:
+        """Redact a single value, recursing into dicts and lists."""
+        if isinstance(value, dict):
+            self._redact_dict(value, seen)
+            return value
+        if isinstance(value, list):
+            obj_id = id(value)
+            if obj_id in seen:
+                return value
+            seen.add(obj_id)
+            return [self._redact_value(item, seen) for item in value]
+        if isinstance(value, str) and self._patterns:
+            try:
+                for pattern in self._patterns:
+                    value = pattern.sub(self._replacement, value)
+            except re.error:
+                pass
+        return value

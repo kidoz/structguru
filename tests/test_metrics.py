@@ -59,3 +59,13 @@ class TestMetricProcessor:
         result = proc(None, "info", {"event": "db.query executed", "duration_ms": "not-a-number"})
         assert len(observations) == 0
         assert "event" in result  # event dict still passed through
+
+    def test_histogram_callback_exception_does_not_break_pipeline(self) -> None:
+        def bad_callback(v: float, ed: dict) -> None:
+            raise RuntimeError("callback exploded")
+
+        proc = MetricProcessor()
+        proc.histogram("db.query", "duration_ms", bad_callback)
+
+        result = proc(None, "info", {"event": "db.query executed", "duration_ms": 10.0})
+        assert "event" in result  # event dict still passed through

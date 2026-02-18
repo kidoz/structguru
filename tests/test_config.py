@@ -6,6 +6,7 @@ import io
 import logging
 from unittest.mock import patch
 
+import pytest
 import structlog
 
 from structguru.config import (
@@ -35,7 +36,8 @@ class TestToLoggingLevel:
         assert _to_logging_level("Info") == logging.INFO
 
     def test_unknown_defaults_to_info(self) -> None:
-        assert _to_logging_level("CUSTOM") == logging.INFO
+        with pytest.warns(UserWarning, match="Unknown log level"):
+            assert _to_logging_level("CUSTOM") == logging.INFO
 
 
 class TestStreamIsatty:
@@ -148,6 +150,18 @@ class TestConfigureStructlog:
         buf = io.StringIO()
         configure_structlog(service="app", level="ERROR", stream=buf)
         assert logging.getLogger().level == logging.ERROR
+
+    def test_reconfigure_closes_old_handlers(self) -> None:
+        buf1 = io.StringIO()
+        configure_structlog(service="app", stream=buf1)
+        old_handlers = list(logging.getLogger().handlers)
+
+        buf2 = io.StringIO()
+        configure_structlog(service="app2", stream=buf2)
+
+        # Old handlers should no longer be on the root logger
+        for h in old_handlers:
+            assert h not in logging.getLogger().handlers
 
 
 class TestSetupStructlog:

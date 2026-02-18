@@ -46,22 +46,38 @@ class ExceptionDictProcessor:
         elif exc_info is True:
             exc_info = sys.exc_info()
 
-        if not isinstance(exc_info, tuple) or exc_info[0] is None:
+        if not isinstance(exc_info, tuple) or len(exc_info) != 3 or exc_info[0] is None:
             return event_dict
 
         exc_type, exc_value, exc_tb = exc_info
 
         frames = []
-        for fs in traceback.extract_tb(exc_tb)[-self._max_frames :]:
-            frame_info: dict[str, Any] = {
-                "filename": fs.filename,
-                "lineno": fs.lineno,
-                "name": fs.name,
-                "line": fs.line,
-            }
-            if self._include_locals and fs.locals:
-                frame_info["locals"] = {k: repr(v) for k, v in fs.locals.items()}
-            frames.append(frame_info)
+        if self._include_locals:
+            # Walk raw traceback to capture local variables, since
+            # traceback.extract_tb() does not populate FrameSummary.locals.
+            raw_frames: list[tuple[Any, int]] = []
+            tb = exc_tb
+            while tb is not None:
+                raw_frames.append((tb.tb_frame, tb.tb_lineno))
+                tb = tb.tb_next
+            for frame_obj, lineno in raw_frames[-self._max_frames :]:
+                frame_info: dict[str, Any] = {
+                    "filename": frame_obj.f_code.co_filename,
+                    "lineno": lineno,
+                    "name": frame_obj.f_code.co_name,
+                    "line": None,
+                    "locals": {k: repr(v) for k, v in frame_obj.f_locals.items()},
+                }
+                frames.append(frame_info)
+        else:
+            for fs in traceback.extract_tb(exc_tb)[-self._max_frames :]:
+                frame_info = {
+                    "filename": fs.filename,
+                    "lineno": fs.lineno,
+                    "name": fs.name,
+                    "line": fs.line,
+                }
+                frames.append(frame_info)
 
         exception_dict: dict[str, Any] = {
             "type": exc_type.__qualname__,
@@ -70,7 +86,9 @@ class ExceptionDictProcessor:
             "frames": frames,
         }
 
-        cause = exc_value.__cause__ or exc_value.__context__
+        cause = exc_value.__cause__
+        if cause is None and not exc_value.__suppress_context__:
+            cause = exc_value.__context__
         if cause is not None:
             exception_dict["cause"] = {
                 "type": type(cause).__qualname__,

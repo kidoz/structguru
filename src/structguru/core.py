@@ -76,23 +76,33 @@ def _safe_format(
     message: Any,
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
-) -> tuple[str, bool]:
+) -> tuple[str, set[str]]:
     """Safely format *message* with ``str.format``, imitating Loguru style.
 
-    Returns a tuple of (formatted_message, consumed). If formatting fails
-    or no placeholders are found, *consumed* is False.
+    Returns a tuple of (formatted_message, consumed_keys). *consumed_keys*
+    contains the kwarg names that were used as format placeholders.
     """
     msg = str(message)
     if not (args or kwargs) or "{" not in msg:
-        return msg, False
+        return msg, set()
 
     try:
-        return msg.format(*args, **kwargs), True
+        import string
+
+        consumed: set[str] = set()
+        for _, field_name, _, _ in string.Formatter().parse(msg):
+            if field_name is not None:
+                # field_name can be "name.attr" or "0" — take the root key
+                root = field_name.split(".")[0].split("[")[0]
+                if root and not root.isdigit():
+                    consumed.add(root)
+        return msg.format(*args, **kwargs), consumed
     except Exception:
-        return msg, False
+        return msg, set()
 
 
 _id_counter = itertools.count(1)
+_id_counter_lock = threading.Lock()
 
 
 @dataclass
@@ -115,18 +125,11 @@ class Logger:
     _handlers: dict[HandlerId, logging.Handler] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    _resolved_name: str | None = field(default=None, repr=False)
-
     # -- structlog bridge ---------------------------------------------------
 
     def _get_structlog_logger(self) -> Any:
         """Return a structlog logger, applying any bound context."""
-        if self.name is not None:
-            name = self.name
-        else:
-            if self._resolved_name is None:
-                object.__setattr__(self, "_resolved_name", _caller_module_name())
-            name = self._resolved_name  # type: ignore[assignment]
+        name = self.name if self.name is not None else _caller_module_name()
         log = structlog.get_logger(name)
         if self._bound:
             log = log.bind(**self._bound)
@@ -198,7 +201,12 @@ class Logger:
     ) -> None:
         """Internal dispatch."""
         structlog_logger = self._get_structlog_logger()
-        formatted_msg, consumed = _safe_format(message, args, kwargs)
+        formatted_msg, consumed_keys = _safe_format(message, args, kwargs)
+
+        # Strip kwargs that were consumed by brace-formatting so they don't
+        # leak into the structured log fields (matches loguru behaviour).
+        for key in consumed_keys:
+            kwargs.pop(key, None)
 
         if self._opt_exc_info is not None:
             kwargs.setdefault("exc_info", self._opt_exc_info)
@@ -206,6 +214,11 @@ class Logger:
             kwargs.setdefault("stack_info", True)
 
         getattr(structlog_logger, method)(formatted_msg, **kwargs)
+
+        # Clear one-shot options after the call (loguru semantics).
+        if self._opt_exc_info is not None or self._opt_stack_info:
+            object.__setattr__(self, "_opt_exc_info", None)
+            object.__setattr__(self, "_opt_stack_info", False)
 
     # -- sink (handler) management ------------------------------------------
 
@@ -234,8 +247,9 @@ class Logger:
         root = logging.getLogger()
         root.addHandler(handler)
 
-        with self._lock:
+        with _id_counter_lock:
             handler_id = next(_id_counter)
+        with self._lock:
             self._handlers[handler_id] = handler
         return handler_id
 
@@ -255,10 +269,9 @@ class Logger:
                 return
 
             handler_to_remove = self._handlers.pop(handler_id, None)
-
-        if handler_to_remove:
-            root.removeHandler(handler_to_remove)
-            handler_to_remove.close()
+            if handler_to_remove:
+                root.removeHandler(handler_to_remove)
+                handler_to_remove.close()
 
 
 logger = Logger()

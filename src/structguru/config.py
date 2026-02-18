@@ -27,9 +27,10 @@ from structguru.processors import (
     ensure_event_is_str,
     normalize_level,
 )
+from structguru.redaction import RedactingProcessor
 
 
-def _orjson_serializer(obj: object, **_kw: object) -> str:
+def orjson_serializer(obj: object, **_kw: object) -> str:
     """Serialize *obj* to a JSON string using orjson."""
     return orjson.dumps(obj).decode()
 
@@ -39,7 +40,15 @@ def _to_logging_level(level_name: str) -> int:
     upper_level = level_name.upper()
     if upper_level == "WARN":
         return logging.WARNING
-    result: int = getattr(logging, upper_level, logging.INFO)
+    result: int | None = getattr(logging, upper_level, None)
+    if not isinstance(result, int):
+        import warnings
+
+        warnings.warn(
+            f"Unknown log level {level_name!r}, falling back to INFO",
+            stacklevel=2,
+        )
+        return logging.INFO
     return result
 
 
@@ -114,8 +123,10 @@ def _stream_isatty(stream: Any) -> bool:
         return False
 
 
-def _build_shared_processors(
+def build_shared_processors(
     service: str,
+    *,
+    redact: bool = True,
 ) -> list[structlog.types.Processor]:
     """Build the shared processor chain used by both structlog and stdlib records."""
     processors: list[structlog.types.Processor] = [
@@ -130,12 +141,14 @@ def _build_shared_processors(
         structlog.processors.StackInfoRenderer(),
         structlog.processors.UnicodeDecoder(),
         ensure_event_is_str,  # type: ignore[list-item]
-        structlog.processors.EventRenamer("message"),
     ]
+    if redact:
+        processors.append(RedactingProcessor())  # type: ignore[arg-type]
+    processors.append(structlog.processors.EventRenamer("message"))
     return processors
 
 
-def _build_formatter_processors(
+def build_formatter_processors(
     renderer: structlog.types.Processor,
     *,
     json_mode: bool = True,
@@ -185,7 +198,7 @@ def configure_structlog(
 
     _install_exc_info_record_factory()
 
-    shared_processors = _build_shared_processors(service)
+    shared_processors = build_shared_processors(service)
 
     structlog.configure(
         processors=[
@@ -200,7 +213,7 @@ def configure_structlog(
     )
 
     renderer: structlog.types.Processor = (
-        structlog.processors.JSONRenderer(serializer=_orjson_serializer)
+        structlog.processors.JSONRenderer(serializer=orjson_serializer)
         if json_logs
         else structlog.dev.ConsoleRenderer(
             colors=_stream_isatty(stream),
@@ -209,13 +222,18 @@ def configure_structlog(
     )
 
     formatter = structlog.stdlib.ProcessorFormatter(
-        processors=_build_formatter_processors(renderer, json_mode=json_logs),
+        processors=build_formatter_processors(renderer, json_mode=json_logs),
         foreign_pre_chain=shared_processors,
     )
 
     root = logging.getLogger()
     if clear_handlers:
-        root.handlers.clear()
+        for h in root.handlers[:]:
+            try:
+                h.close()
+            except Exception:  # noqa: BLE001
+                pass
+            root.removeHandler(h)
     root.setLevel(_to_logging_level(level))
 
     handler = logging.StreamHandler(stream)
@@ -261,10 +279,10 @@ def setup_structlog(
             backupCount=5,
             encoding="utf-8",
         )
-        json_renderer = structlog.processors.JSONRenderer(serializer=_orjson_serializer)
+        json_renderer = structlog.processors.JSONRenderer(serializer=orjson_serializer)
         file_formatter = structlog.stdlib.ProcessorFormatter(
-            processors=_build_formatter_processors(json_renderer),
-            foreign_pre_chain=_build_shared_processors(service),
+            processors=build_formatter_processors(json_renderer),
+            foreign_pre_chain=build_shared_processors(service),
         )
         file_handler.setFormatter(file_formatter)
         logging.getLogger().addHandler(file_handler)

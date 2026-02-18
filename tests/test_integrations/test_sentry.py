@@ -31,8 +31,8 @@ class TestSentryProcessor:
     def test_captures_event_at_error(self) -> None:
         mock_sentry = MagicMock()
         mock_scope = MagicMock()
-        mock_sentry.push_scope.return_value.__enter__ = MagicMock(return_value=mock_scope)
-        mock_sentry.push_scope.return_value.__exit__ = MagicMock(return_value=False)
+        mock_sentry.new_scope.return_value.__enter__ = MagicMock(return_value=mock_scope)
+        mock_sentry.new_scope.return_value.__exit__ = MagicMock(return_value=False)
 
         with patch.dict("sys.modules", {"sentry_sdk": mock_sentry}):
             proc = SentryProcessor(event_level=logging.ERROR)
@@ -43,8 +43,8 @@ class TestSentryProcessor:
     def test_captures_exception_with_exc_info(self) -> None:
         mock_sentry = MagicMock()
         mock_scope = MagicMock()
-        mock_sentry.push_scope.return_value.__enter__ = MagicMock(return_value=mock_scope)
-        mock_sentry.push_scope.return_value.__exit__ = MagicMock(return_value=False)
+        mock_sentry.new_scope.return_value.__enter__ = MagicMock(return_value=mock_scope)
+        mock_sentry.new_scope.return_value.__exit__ = MagicMock(return_value=False)
 
         exc = RuntimeError("boom")
 
@@ -57,8 +57,8 @@ class TestSentryProcessor:
     def test_sets_tags(self) -> None:
         mock_sentry = MagicMock()
         mock_scope = MagicMock()
-        mock_sentry.push_scope.return_value.__enter__ = MagicMock(return_value=mock_scope)
-        mock_sentry.push_scope.return_value.__exit__ = MagicMock(return_value=False)
+        mock_sentry.new_scope.return_value.__enter__ = MagicMock(return_value=mock_scope)
+        mock_sentry.new_scope.return_value.__exit__ = MagicMock(return_value=False)
 
         with patch.dict("sys.modules", {"sentry_sdk": mock_sentry}):
             proc = SentryProcessor(

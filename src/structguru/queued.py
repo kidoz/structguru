@@ -56,9 +56,16 @@ def configure_queued_logging(
     """
     root = logging.getLogger()
 
+    # Already configured — a _PassthroughQueueHandler is present.
+    if any(isinstance(h, _PassthroughQueueHandler) for h in root.handlers):
+        msg = "Queued logging is already configured. Call configure_structlog() to reset first."
+        raise RuntimeError(msg)
+
     if handler is None:
         for h in root.handlers:
-            if not isinstance(h, QueueHandler):
+            # Skip QueueHandlers and internal helpers without a formatter
+            # (e.g. _StructlogMsgFixer) — they are not real output handlers.
+            if not isinstance(h, QueueHandler) and h.formatter is not None:
                 handler = h
                 break
         if handler is None:

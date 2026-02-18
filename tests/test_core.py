@@ -17,49 +17,49 @@ from structguru.core import (
 
 class TestSafeFormat:
     def test_positional_args(self) -> None:
-        msg, consumed = _safe_format("Hello {}", ("world",), {})
+        msg, consumed_keys = _safe_format("Hello {}", ("world",), {})
         assert msg == "Hello world"
-        assert consumed is True
+        assert consumed_keys == set()  # positional args have no named keys
 
     def test_keyword_args(self) -> None:
-        msg, consumed = _safe_format("Hello {name}", (), {"name": "world"})
+        msg, consumed_keys = _safe_format("Hello {name}", (), {"name": "world"})
         assert msg == "Hello world"
-        assert consumed is True
+        assert consumed_keys == {"name"}
 
     def test_no_placeholders(self) -> None:
-        msg, consumed = _safe_format("Hello", ("extra",), {})
+        msg, consumed_keys = _safe_format("Hello", ("extra",), {})
         assert msg == "Hello"
-        assert consumed is False
+        assert consumed_keys == set()
 
     def test_no_args(self) -> None:
-        msg, consumed = _safe_format("Hello {}", (), {})
+        msg, consumed_keys = _safe_format("Hello {}", (), {})
         assert msg == "Hello {}"
-        assert consumed is False
+        assert consumed_keys == set()
 
     def test_format_key_error_returns_original(self) -> None:
-        msg, consumed = _safe_format("Hello {missing}", (), {"other": 1})
+        msg, consumed_keys = _safe_format("Hello {missing}", (), {"other": 1})
         assert msg == "Hello {missing}"
-        assert consumed is False
+        assert consumed_keys == set()
 
     def test_attribute_error_returns_original(self) -> None:
-        msg, consumed = _safe_format("Hello {user.name}", (), {"user": {}})
+        msg, consumed_keys = _safe_format("Hello {user.name}", (), {"user": {}})
         assert msg == "Hello {user.name}"
-        assert consumed is False
+        assert consumed_keys == set()
 
     def test_type_error_returns_original(self) -> None:
-        msg, consumed = _safe_format("{0!x}", (42,), {})
+        msg, consumed_keys = _safe_format("{0!x}", (42,), {})
         assert msg == "{0!x}"
-        assert consumed is False
+        assert consumed_keys == set()
 
     def test_non_string_message(self) -> None:
-        msg, consumed = _safe_format(42, (), {})
+        msg, consumed_keys = _safe_format(42, (), {})
         assert msg == "42"
-        assert consumed is False
+        assert consumed_keys == set()
 
     def test_mixed_args(self) -> None:
-        msg, consumed = _safe_format("{} {name}", ("hi",), {"name": "world"})
+        msg, consumed_keys = _safe_format("{} {name}", ("hi",), {"name": "world"})
         assert msg == "hi world"
-        assert consumed is True
+        assert consumed_keys == {"name"}
 
 
 class TestMakeHandler:

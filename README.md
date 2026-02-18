@@ -83,12 +83,13 @@ logger.fatal("Alias for critical")
 
 ### Brace formatting
 
-Arguments serve double duty — they are used for `str.format` interpolation **and** included as structured fields:
+Arguments used in `str.format` placeholders are consumed by formatting (matching loguru behaviour). Extra kwargs that are **not** in any placeholder are forwarded as structured fields:
 
 ```python
-logger.info("User {user_id} logged in from {ip}", user_id=42, ip="10.0.0.1")
-# message: "User 42 logged in from 10.0.0.1"
-# user_id: 42, ip: "10.0.0.1"
+logger.info("User {user_id} logged in", user_id=42, ip="10.0.0.1")
+# message: "User 42 logged in"
+# ip: "10.0.0.1"  (extra kwarg kept as structured field)
+# user_id is consumed by formatting and not duplicated
 ```
 
 ### Bound context
@@ -174,11 +175,12 @@ configure_structlog(service="myapp", json_logs=False)
 Mask sensitive fields automatically:
 
 ```python
+import re
 from structguru import RedactingProcessor
 
 redactor = RedactingProcessor(
     sensitive_keys=frozenset({"password", "token", "ssn"}),
-    patterns=[r"\b\d{3}-\d{2}-\d{4}\b"],  # SSN pattern
+    patterns=[re.compile(r"\b\d{3}-\d{2}-\d{4}\b")],  # SSN pattern
     replacement="***",
 )
 # Add to your structlog processor chain
@@ -327,11 +329,17 @@ sentry = SentryProcessor(event_level=logging.ERROR, tag_keys=frozenset({"service
 - structlog >= 24.1.0
 - orjson >= 3.9.0
 
+## Documentation & Examples
+
+- **[Integrations Guide](docs/integrations.md)** — Detailed instructions for setting up frameworks.
+- **[Full-stack Example](examples/full_stack_fastapi/main.py)** — FastAPI + Celery + SQLAlchemy in action.
+
 ## Development
 
 ```bash
 uv sync
 uv run pytest
+make bench
 uv run ruff check .
 uv run mypy src/
 ```

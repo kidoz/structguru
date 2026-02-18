@@ -57,7 +57,15 @@ class StructguruMiddleware:
         clear_contextvars()
 
         headers = dict(scope.get("headers", []))
-        request_id = headers.get(self.request_id_header, b"").decode() or str(uuid.uuid4())
+        try:
+            raw_id = headers.get(self.request_id_header, b"").decode()
+        except UnicodeDecodeError:
+            raw_id = ""
+        # Validate: max 128 chars, no control characters.
+        if raw_id and len(raw_id) <= 128 and raw_id.isprintable():
+            request_id = raw_id
+        else:
+            request_id = str(uuid.uuid4())
 
         method = scope.get("method", "WS")
         path = scope.get("path", "")
@@ -73,29 +81,33 @@ class StructguruMiddleware:
 
         log = structlog.get_logger(self.logger_name)
         start_time = time.perf_counter()
-        status_code = 500
+        is_websocket = scope["type"] == "websocket"
+        status_code: int | None = None if is_websocket else 500
 
         async def send_wrapper(message: dict[str, Any]) -> None:
             nonlocal status_code
             if message["type"] == "http.response.start":
                 status_code = message["status"]
                 resp_headers = list(message.get("headers", []))
-                resp_headers.append((b"x-request-id", request_id.encode()))
+                if not any(k == b"x-request-id" for k, _ in resp_headers):
+                    resp_headers.append((b"x-request-id", request_id.encode()))
                 message = {**message, "headers": resp_headers}
             await send(message)
 
+        failed = False
         try:
             await self.app(scope, receive, send_wrapper)
         except Exception:
-            if self.log_request:
-                log.exception("Request failed")
+            failed = True
             raise
         finally:
             if self.log_request:
                 duration_ms = (time.perf_counter() - start_time) * 1000
-                log.info(
-                    "Request completed",
-                    status_code=status_code,
-                    duration_ms=round(duration_ms, 2),
-                )
+                extra: dict[str, Any] = {"duration_ms": round(duration_ms, 2)}
+                if status_code is not None:
+                    extra["status_code"] = status_code
+                if failed:
+                    log.error("Request failed", **extra)
+                else:
+                    log.info("Request completed", **extra)
             clear_contextvars()

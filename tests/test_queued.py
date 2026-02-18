@@ -61,3 +61,14 @@ class TestConfigureQueuedLogging:
             assert any(isinstance(h, QueueHandler) for h in root.handlers)
         finally:
             listener.stop()
+
+    def test_raises_on_second_call(self) -> None:
+        buf = io.StringIO()
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+
+        listener = configure_queued_logging()
+        try:
+            with pytest.raises(RuntimeError, match="already configured"):
+                configure_queued_logging()
+        finally:
+            listener.stop()

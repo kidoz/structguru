@@ -78,7 +78,7 @@ class SentryProcessor:
             )
 
         if level >= self._event_level:
-            with sentry_sdk.push_scope() as scope:
+            with sentry_sdk.new_scope() as scope:
                 for key in self._tag_keys:
                     if key in event_dict:
                         scope.set_tag(key, str(event_dict[key]))
@@ -87,7 +87,20 @@ class SentryProcessor:
 
                 exc_info = event_dict.get("exc_info")
                 if exc_info:
-                    sentry_sdk.capture_exception(exc_info)
+                    # Normalise exc_info to an exception instance for Sentry.
+                    if exc_info is True:
+                        import sys
+
+                        ei = sys.exc_info()
+                        exc = ei[1] if ei[1] is not None else None
+                    elif isinstance(exc_info, tuple):
+                        exc = exc_info[1]
+                    elif isinstance(exc_info, BaseException):
+                        exc = exc_info
+                    else:
+                        exc = None
+                    if exc is not None:
+                        sentry_sdk.capture_exception(exc)
                 else:
                     sentry_sdk.capture_message(
                         str(event_dict.get("event", "")),
