@@ -103,6 +103,17 @@ def test_bench_structguru_formatting(benchmark: Any, benchmark_stream: io.String
         benchmark_stream.truncate()
 
 
+def test_bench_structlog_raw_formatting(benchmark: Any, benchmark_stream: io.StringIO) -> None:
+    """Benchmark raw structlog formatting (manual kwargs)."""
+    log = _setup_structlog_raw(benchmark_stream)
+
+    @benchmark
+    def _() -> None:
+        log.info("Hello world, ID=42", name="world", id=42)
+        benchmark_stream.seek(0)
+        benchmark_stream.truncate()
+
+
 def test_bench_loguru_formatting(benchmark: Any, benchmark_stream: io.StringIO) -> None:
     """Benchmark loguru formatting."""
     log = _setup_loguru_raw(benchmark_stream)
@@ -110,5 +121,29 @@ def test_bench_loguru_formatting(benchmark: Any, benchmark_stream: io.StringIO) 
     @benchmark
     def _() -> None:
         log.info("Hello {name}, ID={id}", name="world", id=42)
+        benchmark_stream.seek(0)
+        benchmark_stream.truncate()
+
+
+def test_bench_structguru_bind(benchmark: Any, benchmark_stream: io.StringIO) -> None:
+    """Benchmark structguru context binding via `bind()`."""
+    configure_structlog(json_logs=True, stream=benchmark_stream)
+    bound_logger = logger.bind(request_id="12345", user_id=42)
+
+    @benchmark
+    def _() -> None:
+        bound_logger.info("With context")
+        benchmark_stream.seek(0)
+        benchmark_stream.truncate()
+
+
+def test_bench_structlog_raw_bind(benchmark: Any, benchmark_stream: io.StringIO) -> None:
+    """Benchmark raw structlog context binding."""
+    log = _setup_structlog_raw(benchmark_stream)
+    bound_logger = log.bind(request_id="12345", user_id=42)
+
+    @benchmark
+    def _() -> None:
+        bound_logger.info("With context")
         benchmark_stream.seek(0)
         benchmark_stream.truncate()
