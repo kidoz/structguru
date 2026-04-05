@@ -1,4 +1,5 @@
 """Memory benchmark for queued logging."""
+
 import gc
 import io
 import time
@@ -30,6 +31,7 @@ def run_benchmark(num_logs: int = 100_000):
     print(f"Logged {num_logs} messages in {duration:.2f}s")
     print(f"Current memory usage: {current / 10**6:.2f} MB")
     print(f"Peak memory usage: {peak / 10**6:.2f} MB")
+
 
 if __name__ == "__main__":
     run_benchmark()
