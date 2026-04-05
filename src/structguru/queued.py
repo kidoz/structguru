@@ -27,6 +27,11 @@ class _PassthroughQueueHandler(QueueHandler):
     A shallow copy of the record is returned so that other handlers on the
     root logger (e.g. ``_StructlogMsgFixer``) cannot mutate the queued copy
     in place before the background thread processes it.
+
+    .. note::
+        Because records are stored as objects (not strings) in an unbounded
+        queue by default, extremely high-volume log bursts can lead to
+        temporary memory spikes (e.g. ~30MB per 100k queued records).
     """
 
     def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
