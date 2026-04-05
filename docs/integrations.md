@@ -23,7 +23,7 @@ from fastapi import FastAPI
 from structguru.integrations.asgi import StructguruMiddleware
 
 app = FastAPI()
-app.add_middleware(StructguruMiddleware, request_id_header="X-Request-ID")
+app.add_middleware(StructguruMiddleware)
 
 @app.get("/")
 async def root():
@@ -35,21 +35,21 @@ async def root():
 ```python
 app.add_middleware(
     StructguruMiddleware,
-    request_id_header="X-Correlation-ID",  # Custom header to read
+    request_id_header="x-correlation-id",  # Custom header to read (must be lowercase)
     logger_name="api.http",                # Custom logger name
-    log_request=True,                       # Log a summary line on completion
+    log_request=True,                      # Log a summary line on completion
 )
 ```
 
-### Configuration Options
-
-- `request_id_header`: (Default: `"x-request-id"`) Case-insensitive header name to read for existing request IDs. If missing, a new UUID is generated.
-- `logger_name`: (Default: `"structguru.asgi"`) Name for the structlog logger used for the completion log.
-- `log_request`: (Default: `True`) Whether to log a summary line (including status code and duration) when each request completes.
+### Context Variables Bound
+- `request_id`: Extracted from header or generated as a UUID4.
+- `method`: HTTP method (e.g., `GET`, `POST`) or `WS` for WebSockets.
+- `path`: The request path.
+- `client_ip`: The client's IP address.
 
 ## Celery
 
-`setup_celery_logging` ensures that task context (like `task_id` and `task_name`) is automatically bound to logs within Celery workers.
+`setup_celery_logging` connects to Celery signals to ensure that task context (like `task_id` and `task_name`) is automatically bound to logs within Celery workers.
 
 ### Basic Usage
 
@@ -58,23 +58,23 @@ from celery import Celery
 from structguru.integrations.celery import setup_celery_logging
 
 app = Celery("tasks")
-setup_celery_logging(propagate_context=True)
+setup_celery_logging()
 ```
 
 ### Context Propagation
 
-When `propagate_context=True`, selected keys from the current `structlog` context are automatically passed via message headers to the worker. You can control which keys are propagated:
+When `propagate_context=True` (the default), selected keys from the producer's `structlog` context are automatically passed via message headers to the worker. You can control which keys are propagated:
 
 ```python
 setup_celery_logging(
     propagate_context=True,
-    context_keys=["request_id", "user_id"],
+    context_keys=["request_id", "user_id"],  # Only propagate these keys
 )
 ```
 
 ## Flask
 
-`setup_flask_logging` configures request ID tracking and logging for Flask applications.
+`setup_flask_logging` registers `before_request` and `after_request` hooks for structured request logging.
 
 ### Basic Usage
 
@@ -83,7 +83,7 @@ from flask import Flask
 from structguru.integrations.flask import setup_flask_logging
 
 app = Flask(__name__)
-setup_flask_logging(app, request_id_header="X-Request-ID")
+setup_flask_logging(app)
 ```
 
 ### Advanced Configuration
@@ -96,6 +96,12 @@ setup_flask_logging(
     log_request=True,
 )
 ```
+
+### Context Variables Bound
+- `request_id`: Extracted from header or generated as a UUID4.
+- `method`: HTTP method.
+- `path`: The request path.
+- `client_ip`: The client's IP address.
 
 ## Django
 
@@ -125,13 +131,13 @@ MIDDLEWARE = [
 
 The middleware automatically:
 - Binds `request_id`, `method`, `path`, and `client_ip`.
-- Binds `user_id` if the user is authenticated.
+- Binds `user_id` if `request.user.pk` is available.
 - Adds `X-Request-ID` to the HTTP response.
 - Logs a summary line with the status code and duration.
 
 ## SQLAlchemy
 
-`setup_query_logging` tracks SQL execution time and logs slow queries.
+`setup_query_logging` attaches event listeners to a SQLAlchemy engine to track SQL execution time and log slow queries.
 
 ### Basic Usage
 
@@ -140,12 +146,12 @@ from sqlalchemy import create_engine
 from structguru.integrations.sqlalchemy import setup_query_logging
 
 engine = create_engine("sqlite:///:memory:")
-setup_query_logging(engine, slow_threshold_ms=100)
+setup_query_logging(engine, slow_threshold_ms=100.0)
 ```
 
 ### Logging All Queries
 
-For local development, you might want to see every query regardless of its duration:
+For local development or debugging, you might want to see every query regardless of its duration:
 
 ```python
 setup_query_logging(engine, slow_threshold_ms=0, log_all=True)
@@ -153,7 +159,7 @@ setup_query_logging(engine, slow_threshold_ms=0, log_all=True)
 
 ## gRPC
 
-Add `StructguruInterceptor` to your gRPC server to bind request context automatically.
+Add `StructguruInterceptor` to your gRPC server to bind request context automatically for both unary and streaming RPCs.
 
 ### Usage
 
@@ -164,31 +170,40 @@ from structguru.integrations.grpc import StructguruInterceptor
 
 server = grpc.server(
     futures.ThreadPoolExecutor(max_workers=10),
-    interceptors=[StructguruInterceptor()],
+    interceptors=[StructguruInterceptor(request_id_key="x-request-id")],
 )
 ```
 
-### Configuration
-
-- `request_id_key`: (Default: `"x-request-id"`) The metadata key to extract for the request ID.
-- `logger_name`: (Default: `"structguru.grpc"`) The logger name for gRPC-related logs.
+### Context Variables Bound
+- `grpc_method`: The gRPC method being called.
+- `request_id`: Extracted from invocation metadata or generated as a UUID4.
 
 ## Sentry
 
-`SentryProcessor` forwards log events as Sentry breadcrumbs or events.
+`SentryProcessor` forwards log events as Sentry breadcrumbs or captured events based on severity.
 
 ### Usage
 
 ```python
 import logging
+import structlog
 from structguru.integrations.sentry import SentryProcessor
 
+# Important: Place RedactingProcessor before SentryProcessor if used.
 sentry_processor = SentryProcessor(
     event_level=logging.ERROR,       # Logs ERROR+ as Sentry events
     breadcrumb_level=logging.INFO,   # Logs INFO+ as Sentry breadcrumbs
+    tag_keys=frozenset({"service"}), # Keys to set as Sentry tags
 )
 
 # Add to your structlog processor chain during configuration
+structlog.configure(
+    processors=[
+        # ... other processors
+        sentry_processor,
+        # ...
+    ]
+)
 ```
 
-**Note:** If `sentry-sdk` is not installed, the `SentryProcessor` will gracefully act as a no-op.
+**Note:** If `sentry-sdk` is not installed, the `SentryProcessor` will gracefully act as a no-op. Exceptions in logs (via `exc_info=True` or `logger.exception`) are automatically normalized and sent to Sentry via `capture_exception`.
