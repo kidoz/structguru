@@ -4,15 +4,26 @@ from __future__ import annotations
 
 import io
 import logging
+import warnings
 from pathlib import Path
+
+import pytest
 
 from structguru.config import configure_structlog
 from structguru.core import (
     Logger,
     _CallableHandler,
+    _format_warning_keys,
     _make_handler,
     _safe_format,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_format_warning_cache() -> None:  # type: ignore[misc]
+    _format_warning_keys.clear()
+    yield  # type: ignore[misc]
+    _format_warning_keys.clear()
 
 
 class TestSafeFormat:
@@ -37,19 +48,44 @@ class TestSafeFormat:
         assert consumed_keys == set()
 
     def test_format_key_error_returns_original(self) -> None:
-        msg, consumed_keys = _safe_format("Hello {missing}", (), {"other": 1})
+        with pytest.warns(UserWarning, match="KeyError"):
+            msg, consumed_keys = _safe_format("Hello {missing}", (), {"other": 1})
         assert msg == "Hello {missing}"
         assert consumed_keys == set()
 
     def test_attribute_error_returns_original(self) -> None:
-        msg, consumed_keys = _safe_format("Hello {user.name}", (), {"user": {}})
+        with pytest.warns(UserWarning, match="AttributeError"):
+            msg, consumed_keys = _safe_format("Hello {user.name}", (), {"user": {}})
         assert msg == "Hello {user.name}"
         assert consumed_keys == set()
 
     def test_type_error_returns_original(self) -> None:
-        msg, consumed_keys = _safe_format("{0!x}", (42,), {})
+        with pytest.warns(UserWarning, match="Unknown conversion"):
+            msg, consumed_keys = _safe_format("{0!x}", (42,), {})
         assert msg == "{0!x}"
         assert consumed_keys == set()
+
+    def test_malformed_braces_warn_and_fallback(self) -> None:
+        with pytest.warns(UserWarning, match="ValueError"):
+            msg, consumed_keys = _safe_format("Hello {unterminated", (), {"name": "x"})
+        assert msg == "Hello {unterminated"
+        assert consumed_keys == set()
+
+    def test_warns_only_once_per_template(self) -> None:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            for _ in range(5):
+                _safe_format("Hello {missing}", (), {"other": 1})
+        format_warnings = [w for w in caught if "failed to format" in str(w.message)]
+        assert len(format_warnings) == 1
+
+    def test_different_templates_each_warn(self) -> None:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _safe_format("A {x}", (), {"other": 1})
+            _safe_format("B {y}", (), {"other": 1})
+        format_warnings = [w for w in caught if "failed to format" in str(w.message)]
+        assert len(format_warnings) == 2
 
     def test_non_string_message(self) -> None:
         msg, consumed_keys = _safe_format(42, (), {})

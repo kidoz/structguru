@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import itertools
 import logging
+import string
 import sys
 import threading
+import warnings
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -72,6 +74,23 @@ def _make_handler(sink: Sink) -> logging.Handler:
     raise TypeError(msg)
 
 
+_format_warning_keys: set[str] = set()
+_format_warning_lock = threading.Lock()
+
+
+def _warn_format_failure(msg: str, exc: BaseException) -> None:
+    """Emit a ``UserWarning`` at most once per unique (template, error type)."""
+    key = f"{type(exc).__name__}:{msg}"
+    with _format_warning_lock:
+        if key in _format_warning_keys:
+            return
+        _format_warning_keys.add(key)
+    warnings.warn(
+        f"structguru: failed to format log message {msg!r}: {type(exc).__name__}: {exc}",
+        stacklevel=4,
+    )
+
+
 def _safe_format(
     message: Any,
     args: tuple[Any, ...],
@@ -81,23 +100,33 @@ def _safe_format(
 
     Returns a tuple of (formatted_message, consumed_keys). *consumed_keys*
     contains the kwarg names that were used as format placeholders.
+
+    Formatting errors (``KeyError``, ``IndexError``, ``ValueError``) fall back
+    to the raw message and emit a one-shot :class:`UserWarning` per template.
     """
     msg = str(message)
     if not (args or kwargs) or "{" not in msg:
         return msg, set()
 
+    consumed: set[str] = set()
     try:
-        import string
-
-        consumed: set[str] = set()
         for _, field_name, _, _ in string.Formatter().parse(msg):
             if field_name is not None:
                 # field_name can be "name.attr" or "0" — take the root key
                 root = field_name.split(".")[0].split("[")[0]
                 if root and not root.isdigit():
                     consumed.add(root)
+    except ValueError as exc:
+        # Malformed brace syntax — surface it but don't break logging.
+        _warn_format_failure(msg, exc)
+        return msg, set()
+
+    try:
         return msg.format(*args, **kwargs), consumed
-    except Exception:
+    except (LookupError, AttributeError, TypeError, ValueError) as exc:
+        # Template/arg mismatch from user code (missing key, bad attribute,
+        # unknown conversion, etc.). Fall back to the raw message.
+        _warn_format_failure(msg, exc)
         return msg, set()
 
 
