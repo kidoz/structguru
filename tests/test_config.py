@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import io
 import logging
+import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -180,3 +183,64 @@ class TestSetupStructlog:
         with patch.dict("os.environ", {"LOG_LEVEL": "DEBUG"}, clear=True):
             setup_structlog(service="myapp")
         assert logging.getLogger().level == logging.DEBUG
+
+    def test_log_path_adds_rotating_file_handler(self, tmp_path: Path) -> None:
+        log_file = tmp_path / "app.log"
+        env = {"LOG_LEVEL": "INFO", "JSON_LOGS": "1", "LOG_PATH": str(log_file)}
+        with patch.dict("os.environ", env, clear=True):
+            setup_structlog(service="myapp")
+
+            root = logging.getLogger()
+            file_handlers = [h for h in root.handlers if isinstance(h, RotatingFileHandler)]
+            assert len(file_handlers) == 1
+            handler = file_handlers[0]
+            assert handler.maxBytes == 50 * 1024 * 1024
+            assert handler.backupCount == 5
+            assert Path(handler.baseFilename) == log_file
+
+            logging.getLogger("test").info("hello-from-log-path")
+            for h in root.handlers:
+                h.flush()
+
+            contents = log_file.read_text(encoding="utf-8")
+            assert "hello-from-log-path" in contents
+            assert '"service":"myapp"' in contents
+
+            handler.close()
+            root.removeHandler(handler)
+
+    def test_excepthook_logs_uncaught_exception(self) -> None:
+        buf = io.StringIO()
+        with patch.dict("os.environ", {"LOG_LEVEL": "ERROR", "JSON_LOGS": "1"}, clear=True):
+            setup_structlog(service="myapp")
+
+        # Redirect the freshly-installed stream handler to our buffer.
+        root = logging.getLogger()
+        for h in root.handlers:
+            if isinstance(h, logging.StreamHandler) and not isinstance(
+                h, logging.handlers.RotatingFileHandler
+            ):
+                h.setStream(buf)  # type: ignore[attr-defined]
+
+        try:
+            raise RuntimeError("kaboom")
+        except RuntimeError:
+            sys.excepthook(*sys.exc_info())  # type: ignore[misc]
+
+        assert "Uncaught exception" in buf.getvalue()
+        assert "kaboom" in buf.getvalue()
+
+    def test_excepthook_passthrough_on_keyboard_interrupt(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            setup_structlog(service="myapp")
+
+        called: list[tuple[type[BaseException], BaseException, object]] = []
+        original = sys.__excepthook__
+        sys.__excepthook__ = lambda et, ev, tb: called.append((et, ev, tb))  # type: ignore[assignment]
+        try:
+            exc = KeyboardInterrupt()
+            sys.excepthook(KeyboardInterrupt, exc, None)  # type: ignore[arg-type]
+        finally:
+            sys.__excepthook__ = original  # type: ignore[assignment]
+
+        assert called and called[0][0] is KeyboardInterrupt
