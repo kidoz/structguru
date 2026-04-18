@@ -2,72 +2,139 @@
 
 from __future__ import annotations
 
-from typing import Any
-from unittest.mock import MagicMock
+import io
 
+import pytest
 from structlog.contextvars import get_contextvars
+
+from structguru.config import configure_structlog
+from structguru.integrations.flask import setup_flask_logging
+
+flask = pytest.importorskip("flask")
+
+
+def _build_app(**kwargs: object) -> flask.Flask:
+    app = flask.Flask(__name__)
+    app.config["TESTING"] = True
+    setup_flask_logging(app, **kwargs)  # type: ignore[arg-type]
+
+    seen: dict[str, dict[str, object]] = {}
+
+    @app.route("/ping")
+    def ping() -> str:
+        seen["ping"] = dict(get_contextvars())
+        return "pong"
+
+    @app.route("/boom")
+    def boom() -> str:
+        raise RuntimeError("boom")
+
+    app.extensions["_structguru_seen"] = seen
+    return app
 
 
 class TestSetupFlaskLogging:
-    def test_registers_hooks(self) -> None:
-        mock_app = MagicMock()
-        registered: dict[str, Any] = {}
+    def test_generates_request_id_and_binds_context(self) -> None:
+        buf = io.StringIO()
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
 
-        mock_app.before_request = MagicMock(
-            side_effect=lambda fn: registered.update({"before_request": fn})
+        app = _build_app()
+        client = app.test_client()
+
+        response = client.get("/ping")
+
+        assert response.status_code == 200
+        assert response.data == b"pong"
+        header_id = response.headers.get("X-Request-ID")
+        assert header_id and len(header_id) > 0
+
+        seen = app.extensions["_structguru_seen"]["ping"]
+        assert seen["method"] == "GET"
+        assert seen["path"] == "/ping"
+        assert seen["request_id"] == header_id
+        assert "client_ip" in seen
+
+        output = buf.getvalue()
+        assert "Request completed" in output
+        assert header_id in output
+
+    def test_reuses_inbound_request_id_header(self) -> None:
+        buf = io.StringIO()
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+
+        app = _build_app()
+        response = app.test_client().get("/ping", headers={"X-Request-ID": "caller-123"})
+
+        assert response.status_code == 200
+        assert response.headers["X-Request-ID"] == "caller-123"
+
+        seen = app.extensions["_structguru_seen"]["ping"]
+        assert seen["request_id"] == "caller-123"
+        assert "caller-123" in buf.getvalue()
+
+    def test_rejects_malformed_inbound_id(self) -> None:
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=io.StringIO())
+
+        app = _build_app()
+        response = app.test_client().get(
+            "/ping",
+            headers={"X-Request-ID": "bad\x00value"},
         )
-        mock_app.after_request = MagicMock(
-            side_effect=lambda fn: registered.update({"after_request": fn})
-        )
-        mock_app.teardown_request = MagicMock(
-            side_effect=lambda fn: registered.update({"teardown_request": fn})
-        )
 
-        from structguru.integrations.flask import setup_flask_logging
+        assert response.status_code == 200
+        issued = response.headers["X-Request-ID"]
+        assert issued != "bad\x00value"
+        assert "\x00" not in issued
 
-        setup_flask_logging(mock_app)
+    def test_rejects_oversized_inbound_id(self) -> None:
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=io.StringIO())
 
-        assert "before_request" in registered
-        assert "after_request" in registered
-        assert "teardown_request" in registered
+        app = _build_app()
+        oversized = "a" * 129
+        response = app.test_client().get("/ping", headers={"X-Request-ID": oversized})
 
-    def test_before_request_binds_context(self) -> None:
-        mock_app = MagicMock()
-        hooks: dict[str, Any] = {}
+        assert response.headers["X-Request-ID"] != oversized
 
-        mock_app.before_request = MagicMock(
-            side_effect=lambda fn: hooks.update({"before_request": fn})
-        )
-        mock_app.after_request = MagicMock(
-            side_effect=lambda fn: hooks.update({"after_request": fn})
-        )
-        mock_app.teardown_request = MagicMock(
-            side_effect=lambda fn: hooks.update({"teardown_request": fn})
-        )
+    def test_honors_custom_request_id_header(self) -> None:
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=io.StringIO())
 
-        from structguru.integrations.flask import setup_flask_logging
+        app = _build_app(request_id_header="X-Trace-Id")
+        response = app.test_client().get("/ping", headers={"X-Trace-Id": "trace-xyz"})
 
-        setup_flask_logging(mock_app)
+        assert response.headers.get("X-Trace-Id") == "trace-xyz"
+        assert response.headers.get("X-Request-ID") is None
 
-        mock_request = MagicMock()
-        mock_request.headers = {"X-Request-ID": "test-id-456"}
-        mock_request.method = "POST"
-        mock_request.path = "/api/users"
-        mock_request.remote_addr = "10.0.0.1"
+    def test_log_request_false_skips_completion_log(self) -> None:
+        buf = io.StringIO()
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
 
-        MagicMock()
+        app = _build_app(log_request=False)
+        response = app.test_client().get("/ping")
 
-        # We can't easily invoke the hook since it uses flask.request internally.
-        # Instead, directly test that bind_contextvars works as expected.
-        from structlog.contextvars import bind_contextvars, clear_contextvars
+        assert response.status_code == 200
+        # Header still propagated, but no completion log line emitted.
+        assert response.headers.get("X-Request-ID")
+        assert "Request completed" not in buf.getvalue()
 
-        clear_contextvars()
-        bind_contextvars(
-            request_id="test-id-456",
-            method="POST",
-            path="/api/users",
-            client_ip="10.0.0.1",
-        )
-        ctx = get_contextvars()
-        assert ctx["request_id"] == "test-id-456"
-        assert ctx["method"] == "POST"
+    def test_teardown_clears_contextvars(self) -> None:
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=io.StringIO())
+
+        app = _build_app()
+        client = app.test_client()
+
+        client.get("/ping")
+        # After the request cycle completes, contextvars must be clean so
+        # subsequent non-request logging doesn't leak request state.
+        assert get_contextvars() == {}
+
+    def test_teardown_clears_context_after_exception(self) -> None:
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=io.StringIO())
+
+        app = _build_app()
+        # Let the test client surface the RuntimeError so the teardown_request
+        # hook is still exercised in the error path.
+        app.config["PROPAGATE_EXCEPTIONS"] = True
+        with pytest.raises(RuntimeError, match="boom"):
+            app.test_client().get("/boom")
+
+        assert get_contextvars() == {}
