@@ -27,7 +27,7 @@ from structguru.processors import (
     ensure_event_is_str,
     normalize_level,
 )
-from structguru.redaction import RedactingProcessor
+from structguru.redaction import RedactingProcessor, strip_redaction_marker
 
 
 def orjson_serializer(obj: object, **_kw: object) -> str:
@@ -144,6 +144,7 @@ def build_shared_processors(
     ]
     if redact:
         processors.append(RedactingProcessor())  # type: ignore[arg-type]
+    processors.append(strip_redaction_marker)  # type: ignore[arg-type]
     processors.append(structlog.processors.EventRenamer("message"))
     return processors
 

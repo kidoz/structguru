@@ -10,6 +10,19 @@ from __future__ import annotations
 import re
 from typing import Any
 
+REDACTED_MARKER_KEY = "_structguru_redacted"
+
+
+def strip_redaction_marker(
+    _logger: Any,
+    _method_name: str,
+    event_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Remove :data:`REDACTED_MARKER_KEY` so it does not reach the renderer."""
+    event_dict.pop(REDACTED_MARKER_KEY, None)
+    return event_dict
+
+
 DEFAULT_SENSITIVE_KEYS: frozenset[str] = frozenset(
     {
         "password",
@@ -62,6 +75,7 @@ class RedactingProcessor:
         event_dict: dict[str, Any],
     ) -> dict[str, Any]:
         self._redact_dict(event_dict, set())
+        event_dict[REDACTED_MARKER_KEY] = True
         return event_dict
 
     def _redact_dict(self, d: dict[str, Any], seen: set[int]) -> None:
