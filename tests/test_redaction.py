@@ -87,3 +87,18 @@ class TestRedactingProcessor:
     def test_default_keys_cover_common_secrets(self) -> None:
         for key in ("password", "token", "api_key", "secret", "authorization", "private_key"):
             assert key in DEFAULT_SENSITIVE_KEYS
+
+    def test_does_not_mutate_user_state(self) -> None:
+        proc = RedactingProcessor()
+        user_state: dict = {"password": "123", "nested": ["secret", {"token": "abc"}]}
+        ed: dict = {"user": user_state}
+        
+        result = proc(None, "info", ed)
+        
+        # Result should be redacted
+        assert result["user"]["password"] == "[REDACTED]"
+        assert result["user"]["nested"][1]["token"] == "[REDACTED]"
+        
+        # Original state must be untouched
+        assert user_state["password"] == "123"
+        assert user_state["nested"][1]["token"] == "abc"

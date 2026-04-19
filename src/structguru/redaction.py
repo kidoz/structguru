@@ -74,33 +74,39 @@ class RedactingProcessor:
         _method_name: str,
         event_dict: dict[str, Any],
     ) -> dict[str, Any]:
-        self._redact_dict(event_dict, set())
-        event_dict[REDACTED_MARKER_KEY] = True
-        return event_dict
+        redacted_dict = self._redact_dict(event_dict, {})
+        redacted_dict[REDACTED_MARKER_KEY] = True
+        return redacted_dict
 
-    def _redact_dict(self, d: dict[str, Any], seen: set[int]) -> None:
-        """Recursively redact sensitive keys and apply regex patterns."""
+    def _redact_dict(self, d: dict[str, Any], seen: dict[int, Any]) -> dict[str, Any]:
+        """Recursively redact sensitive keys and apply regex patterns, returning a new dict."""
         obj_id = id(d)
         if obj_id in seen:
-            return
-        seen.add(obj_id)
-        for key in list(d):
+            return seen[obj_id]  # type: ignore[no-any-return]
+        
+        redacted_dict: dict[str, Any] = {}
+        seen[obj_id] = redacted_dict
+        
+        for key, value in d.items():
             if isinstance(key, str) and key.lower() in self._keys:
-                d[key] = self._replacement
+                redacted_dict[key] = self._replacement
             else:
-                d[key] = self._redact_value(d[key], seen)
+                redacted_dict[key] = self._redact_value(value, seen)
+        return redacted_dict
 
-    def _redact_value(self, value: Any, seen: set[int]) -> Any:
-        """Redact a single value, recursing into dicts and lists."""
+    def _redact_value(self, value: Any, seen: dict[int, Any]) -> Any:
+        """Redact a single value, recursing into dicts and lists, returning new objects."""
         if isinstance(value, dict):
-            self._redact_dict(value, seen)
-            return value
+            return self._redact_dict(value, seen)
         if isinstance(value, list):
             obj_id = id(value)
             if obj_id in seen:
-                return value
-            seen.add(obj_id)
-            return [self._redact_value(item, seen) for item in value]
+                return seen[obj_id]
+            redacted_list: list[Any] = []
+            seen[obj_id] = redacted_list
+            for item in value:
+                redacted_list.append(self._redact_value(item, seen))
+            return redacted_list
         if isinstance(value, str) and self._patterns:
             try:
                 for pattern in self._patterns:
