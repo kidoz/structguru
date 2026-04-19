@@ -19,6 +19,7 @@ import string
 import sys
 import threading
 import warnings
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -74,17 +75,26 @@ def _make_handler(sink: Sink) -> logging.Handler:
     raise TypeError(msg)
 
 
-_format_warning_keys: set[str] = set()
+_FORMAT_WARNING_CACHE_MAX = 256
+_format_warning_keys: OrderedDict[str, None] = OrderedDict()
 _format_warning_lock = threading.Lock()
 
 
 def _warn_format_failure(msg: str, exc: BaseException) -> None:
-    """Emit a ``UserWarning`` at most once per unique (template, error type)."""
+    """Emit a ``UserWarning`` at most once per unique (template, error type).
+
+    The seen-set is bounded by :data:`_FORMAT_WARNING_CACHE_MAX` entries on
+    an LRU-ish basis so long-running processes with many distinct malformed
+    templates do not leak memory.
+    """
     key = f"{type(exc).__name__}:{msg}"
     with _format_warning_lock:
         if key in _format_warning_keys:
+            _format_warning_keys.move_to_end(key)
             return
-        _format_warning_keys.add(key)
+        _format_warning_keys[key] = None
+        if len(_format_warning_keys) > _FORMAT_WARNING_CACHE_MAX:
+            _format_warning_keys.popitem(last=False)
     warnings.warn(
         f"structguru: failed to format log message {msg!r}: {type(exc).__name__}: {exc}",
         stacklevel=4,
@@ -183,7 +193,12 @@ class Logger:
         exception: Any = None,
         stack_info: bool = False,
     ) -> Logger:
-        """Configure one-time options for the next log call."""
+        """Return a child logger with ``exception`` / ``stack_info`` pre-set.
+
+        Matches loguru: the returned logger keeps the flags across every call
+        it makes (not just the next one).  Chain directly
+        (``log.opt(exception=True).error(...)``) for single-shot use.
+        """
         exc_info = exception if exception is not None else self._opt_exc_info
         return replace(self, _opt_exc_info=exc_info, _opt_stack_info=stack_info)
 
@@ -243,11 +258,6 @@ class Logger:
             kwargs.setdefault("stack_info", True)
 
         getattr(structlog_logger, method)(formatted_msg, **kwargs)
-
-        # Clear one-shot options after the call (loguru semantics).
-        if self._opt_exc_info is not None or self._opt_stack_info:
-            object.__setattr__(self, "_opt_exc_info", None)
-            object.__setattr__(self, "_opt_stack_info", False)
 
     # -- sink (handler) management ------------------------------------------
 

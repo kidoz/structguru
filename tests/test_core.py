@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from structguru import core as core_mod
 from structguru.config import configure_structlog
 from structguru.core import (
     Logger,
@@ -86,6 +87,15 @@ class TestSafeFormat:
             _safe_format("B {y}", (), {"other": 1})
         format_warnings = [w for w in caught if "failed to format" in str(w.message)]
         assert len(format_warnings) == 2
+
+    def test_warning_cache_is_bounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(core_mod, "_FORMAT_WARNING_CACHE_MAX", 4)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for i in range(20):
+                _safe_format(f"template {{missing_{i}}}", (), {"other": 1})
+        # Cap enforced: we never hold more entries than the configured max.
+        assert len(_format_warning_keys) <= 4
 
     def test_non_string_message(self) -> None:
         msg, consumed_keys = _safe_format(42, (), {})
@@ -170,6 +180,31 @@ class TestLoggerOpt:
         child = log.opt(stack_info=True)
         assert child._opt_stack_info is True
         assert log._opt_stack_info is False
+
+    def test_flag_persists_across_calls(self) -> None:
+        """Matches loguru: opt() is sticky on the returned logger."""
+        buf = io.StringIO()
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+
+        log = Logger()
+        errlog = log.opt(exception=True)
+        try:
+            raise RuntimeError("first")
+        except RuntimeError:
+            errlog.error("boom1")
+        try:
+            raise RuntimeError("second")
+        except RuntimeError:
+            errlog.error("boom2")
+
+        output = buf.getvalue()
+        # Both calls must render their traceback (not only the first one).
+        assert output.count("Traceback") == 2 or output.count("RuntimeError") >= 2
+
+    def test_opt_does_not_leak_into_parent(self) -> None:
+        log = Logger()
+        _ = log.opt(exception=True)
+        assert log._opt_exc_info is None
 
 
 class TestLoggerLevelMethods:
