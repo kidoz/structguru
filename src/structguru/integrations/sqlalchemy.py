@@ -41,6 +41,7 @@ def setup_query_logging(
     from sqlalchemy import event
 
     log = structlog.get_logger(logger_name)
+    _START_KEY = "structguru_query_start"
 
     @event.listens_for(engine, "before_cursor_execute")  # type: ignore[untyped-decorator]
     def _before_execute(
@@ -51,7 +52,11 @@ def setup_query_logging(
         context: Any,
         executemany: bool,
     ) -> None:
-        conn.info.setdefault("structguru_query_start", []).append(time.perf_counter())
+        # Key the timestamp by the ExecutionContext so an aborted execute
+        # cannot leave orphaned start times behind — a fresh execute either
+        # overwrites its own key or SQLAlchemy discards the context entirely.
+        starts: dict[int, float] = conn.info.setdefault(_START_KEY, {})
+        starts[id(context)] = time.perf_counter()
 
     @event.listens_for(engine, "after_cursor_execute")  # type: ignore[untyped-decorator]
     def _after_execute(
@@ -62,10 +67,12 @@ def setup_query_logging(
         context: Any,
         executemany: bool,
     ) -> None:
-        starts = conn.info.get("structguru_query_start")
+        starts: dict[int, float] | None = conn.info.get(_START_KEY)
         if not starts:
             return
-        start_time = starts.pop()
+        start_time = starts.pop(id(context), None)
+        if start_time is None:
+            return
         duration_ms = (time.perf_counter() - start_time) * 1000
 
         is_slow = duration_ms >= slow_threshold_ms
@@ -77,3 +84,14 @@ def setup_query_logging(
                 duration_ms=round(duration_ms, 2),
                 slow=is_slow,
             )
+
+    @event.listens_for(engine, "handle_error")  # type: ignore[untyped-decorator]
+    def _on_error(ctx: Any) -> None:
+        # When the cursor raises, `after_cursor_execute` is skipped.
+        # Evict the start time so conn.info doesn't grow without bound.
+        conn_info = getattr(getattr(ctx, "connection", None), "info", None)
+        if conn_info is None:
+            return
+        starts = conn_info.get(_START_KEY)
+        if isinstance(starts, dict):
+            starts.pop(id(ctx.execution_context), None)
