@@ -14,17 +14,17 @@ from structguru.config import configure_structlog
 from structguru.core import (
     Logger,
     _CallableHandler,
-    _format_warning_keys,
     _make_handler,
     _safe_format,
+    _warn_format_failure,
 )
 
 
 @pytest.fixture(autouse=True)
 def _reset_format_warning_cache() -> None:  # type: ignore[misc]
-    _format_warning_keys.clear()
+    _warn_format_failure.cache_clear()
     yield  # type: ignore[misc]
-    _format_warning_keys.clear()
+    _warn_format_failure.cache_clear()
 
 
 class TestSafeFormat:
@@ -87,15 +87,6 @@ class TestSafeFormat:
             _safe_format("B {y}", (), {"other": 1})
         format_warnings = [w for w in caught if "failed to format" in str(w.message)]
         assert len(format_warnings) == 2
-
-    def test_warning_cache_is_bounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(core_mod, "_FORMAT_WARNING_CACHE_MAX", 4)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            for i in range(20):
-                _safe_format(f"template {{missing_{i}}}", (), {"other": 1})
-        # Cap enforced: we never hold more entries than the configured max.
-        assert len(_format_warning_keys) <= 4
 
     def test_non_string_message(self) -> None:
         msg, consumed_keys = _safe_format(42, (), {})

@@ -13,6 +13,7 @@ A global ``logger`` instance is exported for convenience::
 
 from __future__ import annotations
 
+import functools
 import itertools
 import logging
 import string
@@ -75,28 +76,26 @@ def _make_handler(sink: Sink) -> logging.Handler:
     raise TypeError(msg)
 
 
-_FORMAT_WARNING_CACHE_MAX = 256
-_format_warning_keys: OrderedDict[str, None] = OrderedDict()
-_format_warning_lock = threading.Lock()
+@functools.lru_cache(maxsize=1024)
+def _extract_format_keys(msg: str) -> frozenset[str] | Exception:
+    """Extract format keys or return an Exception if malformed."""
+    consumed: set[str] = set()
+    try:
+        for _, field_name, _, _ in string.Formatter().parse(msg):
+            if field_name is not None:
+                root = field_name.split(".")[0].split("[")[0]
+                if root and not root.isdigit():
+                    consumed.add(root)
+        return frozenset(consumed)
+    except Exception as exc:
+        return exc
 
 
-def _warn_format_failure(msg: str, exc: BaseException) -> None:
-    """Emit a ``UserWarning`` at most once per unique (template, error type).
-
-    The seen-set is bounded by :data:`_FORMAT_WARNING_CACHE_MAX` entries on
-    an LRU-ish basis so long-running processes with many distinct malformed
-    templates do not leak memory.
-    """
-    key = f"{type(exc).__name__}:{msg}"
-    with _format_warning_lock:
-        if key in _format_warning_keys:
-            _format_warning_keys.move_to_end(key)
-            return
-        _format_warning_keys[key] = None
-        if len(_format_warning_keys) > _FORMAT_WARNING_CACHE_MAX:
-            _format_warning_keys.popitem(last=False)
+@functools.lru_cache(maxsize=256)
+def _warn_format_failure(msg: str, exc_type_name: str, exc_msg: str) -> None:
+    """Emit a ``UserWarning`` at most once per unique (template, error type)."""
     warnings.warn(
-        f"structguru: failed to format log message {msg!r}: {type(exc).__name__}: {exc}",
+        f"structguru: failed to format log message {msg!r}: {exc_type_name}: {exc_msg}",
         stacklevel=4,
     )
 
@@ -118,25 +117,18 @@ def _safe_format(
     if not (args or kwargs) or "{" not in msg:
         return msg, set()
 
-    consumed: set[str] = set()
-    try:
-        for _, field_name, _, _ in string.Formatter().parse(msg):
-            if field_name is not None:
-                # field_name can be "name.attr" or "0" — take the root key
-                root = field_name.split(".")[0].split("[")[0]
-                if root and not root.isdigit():
-                    consumed.add(root)
-    except ValueError as exc:
+    keys_or_exc = _extract_format_keys(msg)
+    if isinstance(keys_or_exc, Exception):
         # Malformed brace syntax — surface it but don't break logging.
-        _warn_format_failure(msg, exc)
+        _warn_format_failure(msg, type(keys_or_exc).__name__, str(keys_or_exc))
         return msg, set()
 
     try:
-        return msg.format(*args, **kwargs), consumed
+        return msg.format(*args, **kwargs), set(keys_or_exc)
     except (LookupError, AttributeError, TypeError, ValueError) as exc:
         # Template/arg mismatch from user code (missing key, bad attribute,
         # unknown conversion, etc.). Fall back to the raw message.
-        _warn_format_failure(msg, exc)
+        _warn_format_failure(msg, type(exc).__name__, str(exc))
         return msg, set()
 
 
