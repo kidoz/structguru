@@ -9,6 +9,7 @@ from __future__ import annotations
 import random
 import threading
 import time
+import warnings
 from collections import defaultdict, deque
 from typing import Any
 
@@ -51,8 +52,14 @@ class RateLimitingProcessor:
     period_seconds:
         Sliding window duration in seconds.
     key:
-        Event-dict key used to group messages (default ``"event"``).
+        Event-dict key used to group messages (default ``"event"``).  If the
+        configured key is absent, the processor falls back to ``"message"``
+        (post-:class:`~structlog.processors.EventRenamer`) and emits a
+        one-shot :class:`UserWarning` so mis-ordered processor chains do not
+        collapse every event into a single bucket.
     """
+
+    _FALLBACK_KEYS = ("message",)
 
     def __init__(
         self,
@@ -74,6 +81,24 @@ class RateLimitingProcessor:
         self._lock = threading.Lock()
         self._cleanup_counter = 0
         self._cleanup_interval = 1000
+        self._fallback_warned = False
+
+    def _extract_key(self, event_dict: dict[str, Any]) -> str:
+        if self._key_field in event_dict:
+            return str(event_dict[self._key_field])
+        for fallback in self._FALLBACK_KEYS:
+            if fallback in event_dict:
+                if not self._fallback_warned:
+                    self._fallback_warned = True
+                    warnings.warn(
+                        f"RateLimitingProcessor: key {self._key_field!r} missing; "
+                        f"falling back to {fallback!r}. Check processor ordering — "
+                        f"place this processor before EventRenamer or set "
+                        f"key={fallback!r} explicitly.",
+                        stacklevel=3,
+                    )
+                return str(event_dict[fallback])
+        return ""
 
     def __call__(
         self,
@@ -81,7 +106,7 @@ class RateLimitingProcessor:
         _method_name: str,
         event_dict: dict[str, Any],
     ) -> dict[str, Any]:
-        event_key = str(event_dict.get(self._key_field, ""))
+        event_key = self._extract_key(event_dict)
         now = time.monotonic()
 
         with self._lock:

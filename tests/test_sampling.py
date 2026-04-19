@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import warnings
 
 import pytest
 import structlog
@@ -81,6 +82,28 @@ class TestRateLimitingProcessor:
             proc(None, "info", {"event": "test"})
         time.sleep(0.06)
         proc(None, "info", {"event": "test"})  # should not raise
+
+    def test_falls_back_to_message_and_warns_once(self) -> None:
+        proc = RateLimitingProcessor(max_count=1, period_seconds=60.0)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            # First call: 'event' key is missing, so we fall back to 'message'.
+            proc(None, "info", {"message": "hello"})
+            proc(None, "info", {"message": "world"})
+            # Second miss on same key must NOT emit another warning.
+            with pytest.raises(structlog.DropEvent):
+                proc(None, "info", {"message": "hello"})
+
+        fallback_warnings = [w for w in caught if "falling back" in str(w.message)]
+        assert len(fallback_warnings) == 1
+
+    def test_missing_key_and_no_fallback_collapses_to_empty_bucket(self) -> None:
+        proc = RateLimitingProcessor(max_count=1, period_seconds=60.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            proc(None, "info", {"unrelated": "x"})
+            with pytest.raises(structlog.DropEvent):
+                proc(None, "info", {"unrelated": "y"})
 
     def test_stale_keys_cleaned_up(self) -> None:
         proc = RateLimitingProcessor(max_count=1, period_seconds=0.01)
