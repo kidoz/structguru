@@ -140,6 +140,79 @@ class TestExceptionDictProcessor:
         assert result["exception"]["cause"]["type"] == "KeyError"
         assert result["exception"]["cause"]["message"] == "'original'"
 
+    def test_include_locals_redacts_sensitive_names(self) -> None:
+        proc = ExceptionDictProcessor(include_locals=True)
+
+        def inner() -> None:
+            password = "hunter2"  # noqa: S105
+            api_key = "sk-live-abc"
+            safe = "ok"
+            _ = (password, api_key, safe)
+            raise ValueError("x")
+
+        try:
+            inner()
+        except ValueError:
+            import sys
+
+            exc_info = sys.exc_info()
+
+        ed: dict = {"event": "fail", "exc_info": exc_info}
+        result = proc(None, "error", ed)
+        locals_ = next(f for f in result["exception"]["frames"] if f["name"] == "inner")["locals"]
+        assert locals_["password"] == "[REDACTED]"
+        assert locals_["api_key"] == "[REDACTED]"
+        assert locals_["safe"] == "'ok'"
+
+    def test_include_locals_truncates_long_repr(self) -> None:
+        proc = ExceptionDictProcessor(include_locals=True, max_local_repr=32)
+
+        def inner() -> None:
+            big = "x" * 500
+            _ = big
+            raise ValueError("x")
+
+        try:
+            inner()
+        except ValueError:
+            import sys
+
+            exc_info = sys.exc_info()
+
+        ed: dict = {"event": "fail", "exc_info": exc_info}
+        result = proc(None, "error", ed)
+        rendered = next(f for f in result["exception"]["frames"] if f["name"] == "inner")[
+            "locals"
+        ]["big"]
+        assert len(rendered) < 100
+        assert rendered.endswith("more>")
+
+    def test_include_locals_handles_broken_repr(self) -> None:
+        class Bad:
+            def __repr__(self) -> str:
+                raise RuntimeError("nope")
+
+        proc = ExceptionDictProcessor(include_locals=True)
+
+        def inner() -> None:
+            weird = Bad()
+            _ = weird
+            raise ValueError("x")
+
+        try:
+            inner()
+        except ValueError:
+            import sys
+
+            exc_info = sys.exc_info()
+
+        ed: dict = {"event": "fail", "exc_info": exc_info}
+        result = proc(None, "error", ed)
+        rendered = next(f for f in result["exception"]["frames"] if f["name"] == "inner")[
+            "locals"
+        ]["weird"]
+        assert "repr failed" in rendered
+
     def test_suppress_context_via_raise_from_none(self) -> None:
         proc = ExceptionDictProcessor()
         try:

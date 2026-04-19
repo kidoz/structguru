@@ -10,6 +10,8 @@ import sys
 import traceback
 from typing import Any
 
+from structguru.redaction import DEFAULT_SENSITIVE_KEYS
+
 
 class ExceptionDictProcessor:
     """Convert ``exc_info`` to a structured dictionary.
@@ -18,8 +20,16 @@ class ExceptionDictProcessor:
     ----------
     include_locals:
         If ``True``, include local variables in each frame (as ``repr``).
+        Values are truncated to *max_local_repr* characters, and locals whose
+        names match *sensitive_keys* are replaced with ``"[REDACTED]"``.
     max_frames:
         Maximum number of traceback frames to include.
+    max_local_repr:
+        Maximum length of each local variable ``repr``; longer values are
+        truncated with a trailing ``"...<N more>"`` marker.
+    sensitive_keys:
+        Local-variable names (lower-cased) to redact when *include_locals* is
+        ``True``.  Defaults to :data:`~structguru.redaction.DEFAULT_SENSITIVE_KEYS`.
     """
 
     def __init__(
@@ -27,9 +37,15 @@ class ExceptionDictProcessor:
         *,
         include_locals: bool = False,
         max_frames: int = 20,
+        max_local_repr: int = 200,
+        sensitive_keys: frozenset[str] | None = None,
     ) -> None:
         self._include_locals = include_locals
         self._max_frames = max_frames
+        self._max_local_repr = max_local_repr
+        self._sensitive_keys = (
+            sensitive_keys if sensitive_keys is not None else DEFAULT_SENSITIVE_KEYS
+        )
 
     def __call__(
         self,
@@ -66,7 +82,7 @@ class ExceptionDictProcessor:
                     "lineno": lineno,
                     "name": frame_obj.f_code.co_name,
                     "line": None,
-                    "locals": {k: repr(v) for k, v in frame_obj.f_locals.items()},
+                    "locals": self._format_locals(frame_obj.f_locals),
                 }
                 frames.append(frame_info)
         else:
@@ -98,3 +114,21 @@ class ExceptionDictProcessor:
         event_dict["exception"] = exception_dict
         event_dict.pop("exc_info", None)
         return event_dict
+
+    def _format_locals(self, raw: dict[str, Any]) -> dict[str, str]:
+        """Redact sensitive names and cap ``repr`` length for each local."""
+        out: dict[str, str] = {}
+        limit = self._max_local_repr
+        for name, value in raw.items():
+            if isinstance(name, str) and name.lower() in self._sensitive_keys:
+                out[name] = "[REDACTED]"
+                continue
+            try:
+                rendered = repr(value)
+            except Exception as exc:  # noqa: BLE001
+                rendered = f"<repr failed: {type(exc).__name__}>"
+            if len(rendered) > limit:
+                remaining = len(rendered) - limit
+                rendered = f"{rendered[:limit]}...<{remaining} more>"
+            out[name] = rendered
+        return out
