@@ -72,3 +72,48 @@ class TestConfigureQueuedLogging:
                 configure_queued_logging()
         finally:
             listener.stop()
+
+    def test_rejects_handler_and_handlers_together(self) -> None:
+        buf = io.StringIO()
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+        root = logging.getLogger()
+        target = root.handlers[0]
+
+        with pytest.raises(ValueError, match="handler= or handlers="):
+            configure_queued_logging(handler=target, handlers=[target])
+
+    def test_queues_all_real_handlers_by_default(self) -> None:
+        buf1 = io.StringIO()
+        buf2 = io.StringIO()
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf1)
+        root = logging.getLogger()
+        extra = logging.StreamHandler(buf2)
+        extra.setFormatter(logging.Formatter("%(message)s"))
+        root.addHandler(extra)
+
+        listener = configure_queued_logging()
+        try:
+            import structlog
+
+            structlog.get_logger("test").info("fan out")
+            time.sleep(0.1)
+            # Both target handlers must have been pulled behind the queue —
+            # only one QueueHandler and the msg-fixer should remain on root.
+            from logging.handlers import QueueHandler
+
+            assert sum(1 for h in root.handlers if isinstance(h, QueueHandler)) == 1
+            assert extra not in root.handlers
+            assert "fan out" in buf1.getvalue()
+        finally:
+            listener.stop()
+
+    def test_bounded_queue_applies_backpressure(self) -> None:
+        buf = io.StringIO()
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+
+        listener = configure_queued_logging(maxsize=4)
+        try:
+            queue_size = listener.queue.maxsize  # type: ignore[attr-defined]
+            assert queue_size == 4
+        finally:
+            listener.stop()

@@ -8,6 +8,7 @@ thread — similar to loguru's ``enqueue=True``.
 from __future__ import annotations
 
 import atexit
+import copy
 import logging
 from logging.handlers import QueueHandler, QueueListener
 from queue import Queue
@@ -29,36 +30,60 @@ class _PassthroughQueueHandler(QueueHandler):
     in place before the background thread processes it.
 
     .. note::
-        Because records are stored as objects (not strings) in an unbounded
-        queue by default, extremely high-volume log bursts can lead to
-        temporary memory spikes (e.g. ~30MB per 100k queued records).
+        Records are stored as objects in the queue.  ``maxsize=0`` (the
+        default for :func:`configure_queued_logging`) means unbounded — under
+        extreme bursts, memory usage can grow (~30MB per 100k queued
+        records).  Pass a positive ``maxsize`` to apply backpressure.
     """
 
     def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
         # Copy the record so sibling handlers cannot mutate our queued copy.
         # Preserve the structlog event-dict in record.msg for ProcessorFormatter.
-        import copy
-
         return copy.copy(record)
+
+
+def _is_output_handler(handler: logging.Handler) -> bool:
+    """True for handlers that should be moved behind the queue."""
+    if isinstance(handler, QueueHandler):
+        return False
+    # Skip internal helpers without a formatter (e.g. _StructlogMsgFixer).
+    return handler.formatter is not None
 
 
 def configure_queued_logging(
     *,
     handler: logging.Handler | None = None,
+    handlers: list[logging.Handler] | None = None,
+    maxsize: int = 0,
 ) -> QueueListener:
-    """Replace *handler* on the root logger with a non-blocking queue pair.
+    """Replace real output handlers on the root logger with a queue pair.
 
-    The original *handler* is moved behind a :class:`QueueListener` so that
-    formatting and I/O happen on a background thread.  If *handler* is
-    ``None``, the first handler on the root logger is used.
+    The target handlers are moved behind a single :class:`QueueListener` so
+    that formatting and I/O happen on a background thread.  The listener is
+    automatically stopped via :func:`atexit.register`.
 
-    The listener is automatically stopped via :func:`atexit.register`.
+    Parameters
+    ----------
+    handler:
+        A single handler to queue.  Mutually exclusive with *handlers*.
+    handlers:
+        An explicit list of handlers to queue.  If both *handler* and
+        *handlers* are ``None`` (default), every handler on the root logger
+        that has a formatter is queued.
+    maxsize:
+        Upper bound on the internal :class:`queue.Queue`.  ``0`` (default)
+        means unbounded; a positive integer applies backpressure — producers
+        block when the queue fills.
 
     Returns
     -------
     QueueListener
         The running listener (useful for manual ``stop()`` in tests).
     """
+    if handler is not None and handlers is not None:
+        msg = "Pass either handler= or handlers=, not both."
+        raise ValueError(msg)
+
     root = logging.getLogger()
 
     # Already configured — a _PassthroughQueueHandler is present.
@@ -66,34 +91,40 @@ def configure_queued_logging(
         msg = "Queued logging is already configured. Call configure_structlog() to reset first."
         raise RuntimeError(msg)
 
-    if handler is None:
-        for h in root.handlers:
-            # Skip QueueHandlers and internal helpers without a formatter
-            # (e.g. _StructlogMsgFixer) — they are not real output handlers.
-            if not isinstance(h, QueueHandler) and h.formatter is not None:
-                handler = h
-                break
-        if handler is None:
-            msg = "No suitable handler found on root logger. Call configure_structlog() first."
-            raise RuntimeError(msg)
+    if handler is not None:
+        targets: list[logging.Handler] = [handler]
+    elif handlers is not None:
+        targets = list(handlers)
+    else:
+        targets = [h for h in root.handlers if _is_output_handler(h)]
 
-    queue: Queue[Any] = Queue(-1)
+    if not targets:
+        msg = "No suitable handler found on root logger. Call configure_structlog() first."
+        raise RuntimeError(msg)
+
+    queue: Queue[Any] = Queue(maxsize)
     queue_handler = _PassthroughQueueHandler(queue)
-    queue_handler.setLevel(handler.level)
+    # Level on the queue handler must be permissive enough to admit every
+    # target's own level; the listener re-evaluates per-handler level below.
+    queue_handler.setLevel(min((h.level for h in targets), default=logging.NOTSET))
 
-    # Replace the target handler in-place so the queue handler occupies the
-    # same position in the handler list.  This matters when sibling handlers
-    # (e.g. _StructlogMsgFixer) run after the original handler and mutate the
-    # LogRecord in place — by inserting at the same index we ensure the queue
-    # handler runs before those siblings and enqueues a clean copy.
-    if handler in root.handlers:
-        idx = root.handlers.index(handler)
-        root.removeHandler(handler)
+    # Replace the first target in-place so the queue handler occupies the
+    # same slot, then remove remaining targets from the root logger.  This
+    # matters when sibling handlers (e.g. _StructlogMsgFixer) run after the
+    # original handlers and mutate the LogRecord in place.
+    first = targets[0]
+    if first in root.handlers:
+        idx = root.handlers.index(first)
+        root.removeHandler(first)
         root.handlers.insert(idx, queue_handler)
     else:
         root.addHandler(queue_handler)
 
-    listener = QueueListener(queue, handler, respect_handler_level=True)
+    for extra in targets[1:]:
+        if extra in root.handlers:
+            root.removeHandler(extra)
+
+    listener = QueueListener(queue, *targets, respect_handler_level=True)
     listener.start()
     atexit.register(listener.stop)
 
