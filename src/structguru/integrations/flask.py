@@ -14,11 +14,12 @@ Usage::
 from __future__ import annotations
 
 import time
-import uuid
 from typing import Any
 
 import structlog
 from structlog.contextvars import bind_contextvars, clear_contextvars
+
+from structguru.integrations._util import coerce_request_id
 
 
 def setup_flask_logging(
@@ -49,11 +50,7 @@ def setup_flask_logging(
 
         clear_contextvars()
 
-        raw_id = request.headers.get(request_id_header, "")
-        if raw_id and len(raw_id) <= 128 and raw_id.isprintable():
-            request_id = raw_id
-        else:
-            request_id = str(uuid.uuid4())
+        request_id = coerce_request_id(request.headers.get(request_id_header, ""))
         g.structguru_start_time = time.perf_counter()
         g.structguru_request_id = request_id
 

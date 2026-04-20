@@ -16,12 +16,13 @@ Usage::
 from __future__ import annotations
 
 import functools
-import uuid
 from collections.abc import Iterator
 from typing import Any
 
 import structlog
 from structlog.contextvars import bind_contextvars, clear_contextvars
+
+from structguru.integrations._util import coerce_request_id
 
 
 class StructguruInterceptor:
@@ -56,11 +57,7 @@ class StructguruInterceptor:
         metadata: dict[str, str] = {}
         for key, value in handler_call_details.invocation_metadata or []:
             metadata[key] = value
-        raw_id = metadata.get(self.request_id_key, "")
-        if raw_id and len(raw_id) <= 128 and raw_id.isprintable():
-            request_id = raw_id
-        else:
-            request_id = str(uuid.uuid4())
+        request_id = coerce_request_id(metadata.get(self.request_id_key, ""))
 
         bind_contextvars(grpc_method=method, request_id=request_id)
 

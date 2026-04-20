@@ -20,7 +20,6 @@ Usage in ``settings.py``::
 from __future__ import annotations
 
 import time
-import uuid
 from typing import Any
 
 import structlog
@@ -31,6 +30,7 @@ from structguru.config import (
     build_shared_processors,
     orjson_serializer,
 )
+from structguru.integrations._util import coerce_request_id
 
 
 def build_logging_config(
@@ -96,11 +96,7 @@ class StructguruMiddleware:
     def __call__(self, request: Any) -> Any:
         clear_contextvars()
 
-        raw_id = request.META.get("HTTP_X_REQUEST_ID", "")
-        if raw_id and len(raw_id) <= 128 and raw_id.isprintable():
-            request_id = raw_id
-        else:
-            request_id = str(uuid.uuid4())
+        request_id = coerce_request_id(request.META.get("HTTP_X_REQUEST_ID", ""))
 
         bind_contextvars(
             request_id=request_id,

@@ -8,12 +8,13 @@ structlog's context variables for every HTTP/WebSocket request.
 from __future__ import annotations
 
 import time
-import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeAlias
 
 import structlog
 from structlog.contextvars import bind_contextvars, clear_contextvars
+
+from structguru.integrations._util import coerce_request_id
 
 Scope: TypeAlias = dict[str, Any]
 Receive: TypeAlias = Callable[[], Awaitable[dict[str, Any]]]
@@ -61,11 +62,7 @@ class StructguruMiddleware:
             raw_id = headers.get(self.request_id_header, b"").decode()
         except UnicodeDecodeError:
             raw_id = ""
-        # Validate: max 128 chars, no control characters.
-        if raw_id and len(raw_id) <= 128 and raw_id.isprintable():
-            request_id = raw_id
-        else:
-            request_id = str(uuid.uuid4())
+        request_id = coerce_request_id(raw_id)
 
         method = scope.get("method", "WS")
         path = scope.get("path", "")
