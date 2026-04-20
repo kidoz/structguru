@@ -191,6 +191,37 @@ class TestStructguruInterceptor:
         # After iteration completes, context should be cleared.
         assert "grpc_method" not in get_contextvars()
 
+    def test_streaming_preserves_handler_bound_context_across_yields(self) -> None:
+        """Handler-bound context (e.g. user_id set during auth) must survive
+        every yield in a streaming response.
+        """
+        clear_contextvars()
+
+        interceptor = StructguruInterceptor()
+        details = _make_handler_details(
+            metadata=[("x-request-id", "stream-ctx")],
+        )
+
+        captured: list[dict] = []
+
+        def fake_unary_stream(request: object, context: object):  # type: ignore[no-untyped-def]
+            # Simulate auth code adding a user_id after the interceptor ran.
+            bind_contextvars(user_id="u-42")
+            for i in range(3):
+                captured.append(dict(get_contextvars()))
+                yield f"item-{i}"
+
+        handler = _make_handler(unary_stream=fake_unary_stream)
+        continuation = MagicMock(return_value=handler)
+
+        result = interceptor.intercept_service(continuation, details)
+        list(result.unary_stream("req", "ctx"))
+
+        assert len(captured) == 3
+        for ctx in captured:
+            assert ctx["request_id"] == "stream-ctx"
+            assert ctx["user_id"] == "u-42"
+
     def test_streaming_partial_consumption_cleans_up_on_close(self) -> None:
         clear_contextvars()
 

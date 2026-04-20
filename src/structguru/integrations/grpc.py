@@ -101,12 +101,16 @@ def _wrap_rpc_handler(handler: Any, method: str, request_id: str) -> Any:
 
 
 def _wrap_iterator(it: Iterator[Any], method: str, request_id: str) -> Iterator[Any]:
-    """Wrap a response iterator so context stays bound during iteration."""
+    """Wrap a response iterator so context stays bound during iteration.
+
+    Context is bound once at entry and cleared once at exit.  We deliberately
+    do NOT rebind on every yielded item, because the handler may enrich the
+    context (e.g. bind ``user_id`` during auth) and we must not wipe those
+    additions between yields.
+    """
+    bind_contextvars(grpc_method=method, request_id=request_id)
     try:
-        for item in it:
-            clear_contextvars()
-            bind_contextvars(grpc_method=method, request_id=request_id)
-            yield item
+        yield from it
     finally:
         clear_contextvars()
 
