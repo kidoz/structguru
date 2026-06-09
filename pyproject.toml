@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "structguru"
-version = "0.1.1"
+version = "0.2.0"
 description = "A loguru-style ergonomic API for structlog"
 readme = "README.md"
 license = "MIT"
@@ -45,19 +45,38 @@ django = ["django>=4.0"]
 sqlalchemy = ["sqlalchemy>=2.0"]
 grpc = ["grpcio>=1.50"]
 sentry = ["sentry-sdk>=1.0"]
+httpx = ["httpx>=0.20"]
+requests = ["requests>=2.0"]
 all = [
-    "structguru[otel,celery,flask,django,sqlalchemy,grpc,sentry]",
+    "structguru[otel,celery,flask,django,sqlalchemy,grpc,sentry,httpx,requests]",
 ]
 
 [dependency-groups]
 dev = [
+    { include-group = "test" },
+    { include-group = "lint" },
+    { include-group = "docs" },
+    { include-group = "bench" },
+]
+test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=7.0.0",
+    "pytest-httpserver>=1.0.0",
+    "responses>=0.25.0",
+]
+lint = [
     "mypy>=1.8",
     "ruff>=0.4",
+]
+docs = [
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9.7.6",
+    "mkdocstrings[python]>=1.0.4",
+]
+bench = [
     "pytest-benchmark>=5.2.3",
     "loguru>=0.7.3",
-    "pytest-cov>=7.0.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -88,6 +107,12 @@ module = [
     "sqlalchemy.*",
     "grpc",
     "grpc.*",
+    "httpx",
+    "httpx.*",
+    "requests",
+    "requests.*",
+    "responses",
+    "pytest_httpserver",
 ]
 ignore_missing_imports = true
 
