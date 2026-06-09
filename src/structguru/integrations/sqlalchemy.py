@@ -43,7 +43,7 @@ def setup_query_logging(
     log = structlog.get_logger(logger_name)
     _START_KEY = "structguru_query_start"
 
-    @event.listens_for(engine, "before_cursor_execute")  # type: ignore[untyped-decorator]
+    @event.listens_for(engine, "before_cursor_execute")
     def _before_execute(
         conn: Any,
         cursor: Any,
@@ -58,7 +58,7 @@ def setup_query_logging(
         starts: dict[int, float] = conn.info.setdefault(_START_KEY, {})
         starts[id(context)] = time.perf_counter()
 
-    @event.listens_for(engine, "after_cursor_execute")  # type: ignore[untyped-decorator]
+    @event.listens_for(engine, "after_cursor_execute")
     def _after_execute(
         conn: Any,
         cursor: Any,
@@ -85,7 +85,7 @@ def setup_query_logging(
                 slow=is_slow,
             )
 
-    @event.listens_for(engine, "handle_error")  # type: ignore[untyped-decorator]
+    @event.listens_for(engine, "handle_error")
     def _on_error(ctx: Any) -> None:
         # When the cursor raises, `after_cursor_execute` is skipped.
         # Evict the start time so conn.info doesn't grow without bound.
