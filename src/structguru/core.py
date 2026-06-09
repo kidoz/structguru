@@ -20,7 +20,6 @@ import string
 import sys
 import threading
 import warnings
-from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -104,7 +103,7 @@ def _safe_format(
     message: Any,
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
-) -> tuple[str, set[str]]:
+) -> tuple[str, frozenset[str]]:
     """Safely format *message* with ``str.format``, imitating Loguru style.
 
     Returns a tuple of (formatted_message, consumed_keys). *consumed_keys*
@@ -113,23 +112,23 @@ def _safe_format(
     Formatting errors (``KeyError``, ``IndexError``, ``ValueError``) fall back
     to the raw message and emit a one-shot :class:`UserWarning` per template.
     """
-    msg = str(message)
+    msg = message if type(message) is str else str(message)
     if not (args or kwargs) or "{" not in msg:
-        return msg, set()
+        return msg, frozenset()
 
     keys_or_exc = _extract_format_keys(msg)
     if isinstance(keys_or_exc, Exception):
         # Malformed brace syntax — surface it but don't break logging.
         _warn_format_failure(msg, type(keys_or_exc).__name__, str(keys_or_exc))
-        return msg, set()
+        return msg, frozenset()
 
     try:
-        return msg.format(*args, **kwargs), set(keys_or_exc)
+        return msg.format(*args, **kwargs), keys_or_exc
     except (LookupError, AttributeError, TypeError, ValueError) as exc:
         # Template/arg mismatch from user code (missing key, bad attribute,
         # unknown conversion, etc.). Fall back to the raw message.
         _warn_format_failure(msg, type(exc).__name__, str(exc))
-        return msg, set()
+        return msg, frozenset()
 
 
 _id_counter = itertools.count(1)
