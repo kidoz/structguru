@@ -8,7 +8,7 @@ structlog's context variables for every HTTP/WebSocket request.
 from __future__ import annotations
 
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, TypeAlias
 
 import structlog
@@ -35,6 +35,8 @@ class StructguruMiddleware:
         Name for the structlog logger used by this middleware.
     log_request:
         If ``True``, log a summary line when each request completes.
+    extract_headers:
+        A list of additional header names to extract and bind to the context.
     """
 
     def __init__(
@@ -44,11 +46,15 @@ class StructguruMiddleware:
         request_id_header: str = "x-request-id",
         logger_name: str = "structguru.asgi",
         log_request: bool = True,
+        extract_headers: Sequence[str] | None = None,
     ) -> None:
         self.app = app
         self.request_id_header = request_id_header.lower().encode()
         self.logger_name = logger_name
         self.log_request = log_request
+        self.extract_headers = (
+            [h.lower().encode() for h in extract_headers] if extract_headers else []
+        )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] not in ("http", "websocket"):
@@ -57,9 +63,10 @@ class StructguruMiddleware:
 
         clear_contextvars()
 
-        headers = dict(scope.get("headers", []))
+        headers = scope.get("headers", [])
+        headers_dict = dict(headers)
         try:
-            raw_id = headers.get(self.request_id_header, b"").decode()
+            raw_id = headers_dict.get(self.request_id_header, b"").decode()
         except UnicodeDecodeError:
             raw_id = ""
         request_id = coerce_request_id(raw_id)
@@ -69,11 +76,21 @@ class StructguruMiddleware:
         client = scope.get("client")
         client_ip = client[0] if client else ""
 
+        extra_context = {}
+        for header_key in self.extract_headers:
+            val = headers_dict.get(header_key)
+            if val is not None:
+                try:
+                    extra_context[header_key.decode()] = val.decode()
+                except UnicodeDecodeError:
+                    pass
+
         bind_contextvars(
             request_id=request_id,
             method=method,
             path=path,
             client_ip=client_ip,
+            **extra_context,
         )
 
         log = structlog.get_logger(self.logger_name)
