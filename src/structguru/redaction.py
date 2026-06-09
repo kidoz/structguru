@@ -83,10 +83,10 @@ class RedactingProcessor:
         obj_id = id(d)
         if obj_id in seen:
             return seen[obj_id]  # type: ignore[no-any-return]
-        
+
         redacted_dict: dict[str, Any] = {}
         seen[obj_id] = redacted_dict
-        
+
         for key, value in d.items():
             if isinstance(key, str) and key.lower() in self._keys:
                 redacted_dict[key] = self._replacement

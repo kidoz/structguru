@@ -92,13 +92,13 @@ class TestRedactingProcessor:
         proc = RedactingProcessor()
         user_state: dict = {"password": "123", "nested": ["secret", {"token": "abc"}]}
         ed: dict = {"user": user_state}
-        
+
         result = proc(None, "info", ed)
-        
+
         # Result should be redacted
         assert result["user"]["password"] == "[REDACTED]"
         assert result["user"]["nested"][1]["token"] == "[REDACTED]"
-        
+
         # Original state must be untouched
         assert user_state["password"] == "123"
         assert user_state["nested"][1]["token"] == "abc"
