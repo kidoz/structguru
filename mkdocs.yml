@@ -1,0 +1,59 @@
+site_name: structguru
+site_description: Loguru-like wrapper for structlog
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - toc.integrate
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            show_source: true
+
+nav:
+  - Home: index.md
+  - Integrations Guide: integrations.md
+  - API Reference:
+    - Overview: api/index.md
+    - Core: api/core.md
+    - Configuration: api/config.md
+    - Processors: api/processors.md
+    - Security & Redaction: api/redaction.md
+    - Performance & Sampling: api/sampling.md
+    - Async & Queued: api/queued.md
+    - Advanced Routing: api/routing.md
+    - Observability (Metrics & OTel):
+      - Metrics: api/metrics.md
+      - OpenTelemetry: api/otel.md
+    - Exceptions: api/exceptions.md
+    - Integrations:
+      - ASGI: api/integrations/asgi.md
+      - Celery: api/integrations/celery.md
+      - Django: api/integrations/django.md
+      - Flask: api/integrations/flask.md
+      - gRPC: api/integrations/grpc.md
+      - HTTPX: api/integrations/httpx.md
+      - Requests: api/integrations/requests.md
+      - Sentry: api/integrations/sentry.md
+      - SQLAlchemy: api/integrations/sqlalchemy.md
+      - Standard Library: api/integrations/stdlib.md

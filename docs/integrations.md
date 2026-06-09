@@ -12,6 +12,63 @@ from structguru import configure_structlog
 configure_structlog(service="myapp", level="INFO", json_logs=True)
 ```
 
+## HTTPX
+
+To log outbound HTTP requests using HTTPX, you can attach event hooks to your client.
+
+```python
+import httpx
+from structguru.integrations.httpx import StructguruHTTPXLoggingHooks
+
+client = httpx.Client(event_hooks=StructguruHTTPXLoggingHooks.get_hooks())
+response = client.get("https://example.com")
+```
+
+The hooks will automatically log request completion and failure, and capture the `X-Request-ID` header if it's set.
+
+## Requests
+
+If you use the `requests` library, you can get a pre-configured `Session` object.
+
+```python
+from structguru.integrations.requests import get_logging_session
+
+session = get_logging_session()
+session.get("https://example.com")
+```
+
+## Standard Library Interception
+
+After `configure_structlog()` (or `setup_structlog()`), standard-library `logging`
+records that reach the **root** logger are already rendered through structguru's
+pipeline — you don't need to do anything for the common case.
+
+`InterceptHandler` is for libraries that configure their **own** handlers and set
+`propagate=False`, so their records never reach the root logger (a common pattern
+in `uvicorn`, `gunicorn`, etc.). Attach it to that specific logger so its output
+flows into the same structured stream:
+
+```python
+import logging
+from structguru.config import configure_structlog
+from structguru.integrations.stdlib import InterceptHandler
+
+configure_structlog(service="myapp", json_logs=True)
+
+access = logging.getLogger("uvicorn.access")
+access.handlers = [InterceptHandler()]
+access.propagate = False  # avoid double-logging via the root handler
+```
+
+Intercepted records are forwarded to the live structguru handler(s), so they
+share the same stream, formatter, and processor chain (redaction, service name,
+timestamps, etc.). If `configure_structlog()` has not been called, the handler
+falls back to rendering JSON on `sys.stdout`.
+
+> **Note:** Do not also add `InterceptHandler` to the root logger while leaving
+> `propagate=True` — the root handler would render the record and the
+> `InterceptHandler` would forward it again, producing duplicate lines.
+
 ## ASGI (FastAPI / Starlette)
 
 The `StructguruMiddleware` provides automatic request ID generation, context binding, and request/response logging. It works with any ASGI framework (FastAPI, Starlette, Litestar, etc.).
@@ -38,6 +95,7 @@ app.add_middleware(
     request_id_header="x-correlation-id",  # Custom header to read (must be lowercase)
     logger_name="api.http",                # Custom logger name
     log_request=True,                      # Log a summary line on completion
+    extract_headers=["x-tenant-id", "x-device-id"], # Additional headers to extract and bind
 )
 ```
 
@@ -46,6 +104,7 @@ app.add_middleware(
 - `method`: HTTP method (e.g., `GET`, `POST`) or `WS` for WebSockets.
 - `path`: The request path.
 - `client_ip`: The client's IP address.
+- Any headers specified in `extract_headers` will be bound as context variables (e.g. `x-tenant-id`).
 
 ## Celery
 
