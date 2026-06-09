@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-from structguru import core as core_mod
 from structguru.config import configure_structlog
 from structguru.core import (
     Logger,
@@ -344,3 +343,52 @@ class TestLoggerIntegration:
         output = buf.getvalue()
         assert "req-123" in output
         assert "in context" in output
+
+
+class TestLoggerCatch:
+    def test_catch_context_manager(self) -> None:
+        buf = io.StringIO()
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+        log = Logger()
+
+        with log.catch(ValueError, message="caught ValueError"):
+            raise ValueError("boom")
+
+        output = buf.getvalue()
+        assert "caught ValueError" in output
+        assert "ValueError: boom" in output
+
+    def test_catch_decorator(self) -> None:
+        buf = io.StringIO()
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+        log = Logger()
+
+        @log.catch(message="decorator error")
+        def failing_func() -> None:
+            raise RuntimeError("crashed")
+
+        failing_func()
+        output = buf.getvalue()
+        assert "decorator error" in output
+        assert "RuntimeError: crashed" in output
+
+    def test_catch_reraise(self) -> None:
+        buf = io.StringIO()
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+        log = Logger()
+
+        with pytest.raises(ValueError):
+            with log.catch(ValueError, message="will reraise", reraise=True):
+                raise ValueError("boom")
+
+        output = buf.getvalue()
+        assert "will reraise" in output
+
+    def test_catch_unmatched_exception_reraises_automatically(self) -> None:
+        buf = io.StringIO()
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+        log = Logger()
+
+        with pytest.raises(RuntimeError):
+            with log.catch(ValueError):
+                raise RuntimeError("boom")

@@ -21,7 +21,7 @@ import sys
 import threading
 import warnings
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ContextDecorator, contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -135,6 +135,38 @@ _id_counter = itertools.count(1)
 _id_counter_lock = threading.Lock()
 
 
+class _Catcher(ContextDecorator):
+    """Context manager / decorator returned by :meth:`Logger.catch`."""
+
+    def __init__(
+        self,
+        logger: Logger,
+        exception: type[BaseException] | tuple[type[BaseException], ...],
+        level: str,
+        message: str,
+        reraise: bool,
+    ) -> None:
+        self._logger = logger
+        self._exception = exception
+        self._level = level
+        self._message = message
+        self._reraise = reraise
+
+    def __enter__(self) -> None:
+        pass
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> bool:
+        if exc_type is not None and issubclass(exc_type, self._exception):
+            self._logger._log(self._level, self._message, (), {"exc_info": exc_val})
+            return not self._reraise
+        return False
+
+
 @dataclass
 class Logger:
     """A Loguru-like facade for :mod:`structlog`.
@@ -177,6 +209,24 @@ class Logger:
         """Apply context for the duration of a ``with`` block."""
         with bound_contextvars(**kwargs):
             yield self
+
+    def catch(
+        self,
+        exception: type[BaseException] | tuple[type[BaseException], ...] = Exception,
+        *,
+        level: str = "error",
+        message: str = "An error occurred",
+        reraise: bool = False,
+    ) -> Any:
+        """Return a context manager / decorator to catch and log exceptions.
+
+        When an exception matching ``exception`` is raised within the context
+        or decorated function, it is logged at ``level`` with ``message`` and
+        the exception details.
+
+        If ``reraise`` is False (the default), the exception is suppressed.
+        """
+        return _Catcher(self, exception, level, message, reraise)
 
     def opt(
         self,
