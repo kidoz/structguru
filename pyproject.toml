@@ -103,8 +103,6 @@ module = [
     "flask.*",
     "sentry_sdk",
     "sentry_sdk.*",
-    "sqlalchemy",
-    "sqlalchemy.*",
     "grpc",
     "grpc.*",
     "httpx",
