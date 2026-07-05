@@ -27,7 +27,7 @@ typecheck: ## Run type checker (mypy strict)
 check: lint typecheck test ## Run lint + typecheck + tests
 
 clean: ## Remove build artifacts and caches
-	rm -rf dist/ build/ src/*.egg-info .mypy_cache .pytest_cache .ruff_cache
+	rm -rf dist/ build/ target/ src/*.egg-info .mypy_cache .pytest_cache .ruff_cache
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
 build: clean ## Build sdist and wheel

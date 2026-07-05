@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.14,<2"]
+build-backend = "maturin"
 
 [project]
 name = "structguru"
@@ -22,7 +22,6 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
-    "Operating System :: OS Independent",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: System :: Logging",
     "Typing :: Typed",
@@ -79,8 +78,11 @@ bench = [
     "loguru>=0.7.3",
 ]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/structguru"]
+[tool.maturin]
+bindings = "pyo3"
+manifest-path = "crates/structguru-py/Cargo.toml"
+module-name = "structguru._rust"
+python-source = "src"
 
 [tool.ruff]
 target-version = "py310"
