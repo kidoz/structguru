@@ -1,0 +1,18 @@
+[package]
+name = "structguru-py"
+description = "PyO3 bindings for structguru"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "structguru_py"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { workspace = true, features = ["abi3-py310", "extension-module"] }
+structguru-core.workspace = true
