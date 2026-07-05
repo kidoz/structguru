@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyOverflowError, PyRecursionError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -10,6 +8,7 @@ use pyo3::types::{
 use structguru_core::Value;
 
 const MAX_VALUE_DEPTH: usize = 64;
+type ContainerStack = Vec<usize>;
 
 #[pyfunction]
 fn version() -> &'static str {
@@ -56,14 +55,14 @@ fn _render_json_debug(obj: Bound<'_, PyAny>) -> PyResult<String> {
 }
 
 fn convert_py_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
-    let mut containers = HashSet::new();
+    let mut containers = ContainerStack::with_capacity(8);
     convert_py_value_inner(obj, 1, &mut containers)
 }
 
 fn convert_py_value_inner(
     obj: &Bound<'_, PyAny>,
     depth: usize,
-    containers: &mut HashSet<usize>,
+    containers: &mut ContainerStack,
 ) -> PyResult<Value> {
     if depth > MAX_VALUE_DEPTH {
         return Err(PyRecursionError::new_err(format!(
@@ -131,18 +130,19 @@ fn convert_py_value_inner(
     )))
 }
 
-fn enter_container(obj: &Bound<'_, PyAny>, containers: &mut HashSet<usize>) -> PyResult<usize> {
+fn enter_container(obj: &Bound<'_, PyAny>, containers: &mut ContainerStack) -> PyResult<usize> {
     let container_id = obj.as_ptr() as usize;
-    if !containers.insert(container_id) {
+    if containers.contains(&container_id) {
         return Err(PyValueError::new_err(
             "cycle detected while converting Python value",
         ));
     }
+    containers.push(container_id);
     Ok(container_id)
 }
 
-fn leave_container(container_id: usize, containers: &mut HashSet<usize>) {
-    containers.remove(&container_id);
+fn leave_container(container_id: usize, containers: &mut ContainerStack) {
+    debug_assert_eq!(containers.pop(), Some(container_id));
 }
 
 fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny>> {
