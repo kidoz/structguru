@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import structguru._rust as rust
 
 from structguru import _native
@@ -18,3 +19,62 @@ def test_native_level_helpers_match_processor_contract() -> None:
     assert rust.syslog_severity("WARN") == 4
     assert rust.normalized_syslog_severity("fatal") == 2
     assert rust.normalized_syslog_severity("notice") == 6
+
+
+def test_native_converts_nested_values_to_owned_debug_shape() -> None:
+    value = {
+        "message": "created",
+        "ok": True,
+        "attempts": 2,
+        "ratio": 0.5,
+        "none": None,
+        "tags": ("api", "write"),
+        "context": {"request_id": "req-1", "ids": [1, 2, 3]},
+    }
+
+    assert rust._convert_value_debug(value) == {
+        "message": "created",
+        "ok": True,
+        "attempts": 2,
+        "ratio": 0.5,
+        "none": None,
+        "tags": ["api", "write"],
+        "context": {"request_id": "req-1", "ids": [1, 2, 3]},
+    }
+
+
+def test_native_conversion_stats_for_realistic_record() -> None:
+    record = {
+        "timestamp": "2026-07-06T00:00:00Z",
+        "level": "INFO",
+        "severity": 6,
+        "message": "user created",
+        "service": "api",
+        "user": {"id": 42, "roles": ["admin", "writer"]},
+        "context": {"request_id": "req-1", "retry": False},
+    }
+
+    assert rust._conversion_stats(record) == {"nodes": 14, "max_depth": 4}
+
+
+def test_native_rejects_unsupported_objects() -> None:
+    with pytest.raises(TypeError, match="unsupported value type"):
+        rust._convert_value_debug(object())
+
+
+def test_native_rejects_non_string_map_keys() -> None:
+    with pytest.raises(TypeError, match="map keys must be strings"):
+        rust._convert_value_debug({1: "one"})
+
+
+def test_native_rejects_integer_overflow() -> None:
+    with pytest.raises(OverflowError, match="i64"):
+        rust._convert_value_debug(2**100)
+
+
+def test_native_rejects_cycles() -> None:
+    values: list[object] = []
+    values.append(values)
+
+    with pytest.raises(ValueError, match="cycle detected"):
+        rust._convert_value_debug(values)
