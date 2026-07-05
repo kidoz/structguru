@@ -86,11 +86,12 @@ def add_syslog_severity(
     Defaults to ``6`` (Informational) for unknown levels.
     """
     level = event_dict.get("level", "INFO")
-    level_str = str(level)
-    native_severity = _native.syslog_severity(level_str)
-    event_dict["severity"] = (
-        native_severity if native_severity is not None else _SEVERITY_MAP.get(level, 6)
-    )
+    if isinstance(level, str):
+        native_severity = _native.syslog_severity(level)
+        if native_severity is not None:
+            event_dict["severity"] = native_severity
+            return event_dict
+    event_dict["severity"] = _SEVERITY_MAP.get(level, 6)
     return event_dict
 
 

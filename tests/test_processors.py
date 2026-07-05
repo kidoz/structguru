@@ -13,6 +13,27 @@ from structguru.processors import (
 )
 
 
+class _StringifiesToError:
+    def __str__(self) -> str:
+        return "ERROR"
+
+
+def _assert_native_matches_fallback(
+    monkeypatch,
+    processor,
+    method_name: str,
+    event_dict: dict,
+) -> None:
+    native_result = processor(None, method_name, event_dict.copy())
+    native_module = _native._RUST
+
+    monkeypatch.setattr(_native, "_RUST", None)
+    fallback_result = processor(None, method_name, event_dict.copy())
+    monkeypatch.setattr(_native, "_RUST", native_module)
+
+    assert native_result == fallback_result
+
+
 class TestLevelMap:
     def test_all_loguru_levels_mapped(self) -> None:
         for level in (
@@ -91,6 +112,21 @@ class TestNormalizeLevel:
         result = normalize_level(None, "warning", event_dict)
         assert result["level"] == "WARN"
 
+    def test_native_and_fallback_paths_match(self, monkeypatch) -> None:
+        cases: list[tuple[str, dict]] = [
+            ("info", {}),
+            ("debug", {"level": "trace"}),
+            ("info", {"level": "success"}),
+            ("warning", {"level": "warning"}),
+            ("error", {"level": "exception"}),
+            ("critical", {"level": "fatal"}),
+            ("custom", {"level": "notice"}),
+            ("info", {"level": 42}),
+            ("info", {"level": _StringifiesToError()}),
+        ]
+        for method_name, event_dict in cases:
+            _assert_native_matches_fallback(monkeypatch, normalize_level, method_name, event_dict)
+
 
 class TestAddSyslogSeverity:
     def test_maps_known_levels(self) -> None:
@@ -114,6 +150,21 @@ class TestAddSyslogSeverity:
         event_dict: dict = {"level": "ERROR"}
         result = add_syslog_severity(None, "info", event_dict)
         assert result["severity"] == 3
+
+    def test_native_and_fallback_paths_match(self, monkeypatch) -> None:
+        cases: list[dict] = [
+            {},
+            {"level": "DEBUG"},
+            {"level": "INFO"},
+            {"level": "WARN"},
+            {"level": "ERROR"},
+            {"level": "CRITICAL"},
+            {"level": "NOTICE"},
+            {"level": 42},
+            {"level": _StringifiesToError()},
+        ]
+        for event_dict in cases:
+            _assert_native_matches_fallback(monkeypatch, add_syslog_severity, "info", event_dict)
 
 
 class TestEnsureEventIsStr:
