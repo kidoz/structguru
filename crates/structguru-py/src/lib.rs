@@ -48,6 +48,13 @@ fn _conversion_stats<'py>(py: Python<'py>, obj: Bound<'py, PyAny>) -> PyResult<B
     Ok(result)
 }
 
+#[pyfunction]
+fn _render_json_debug(obj: Bound<'_, PyAny>) -> PyResult<String> {
+    convert_py_value(&obj)?
+        .to_json_string()
+        .map_err(|err| PyValueError::new_err(err.to_string()))
+}
+
 fn convert_py_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     let mut containers = HashSet::new();
     convert_py_value_inner(obj, 1, &mut containers)
@@ -170,5 +177,6 @@ fn rust_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(normalized_syslog_severity, module)?)?;
     module.add_function(wrap_pyfunction!(_convert_value_debug, module)?)?;
     module.add_function(wrap_pyfunction!(_conversion_stats, module)?)?;
+    module.add_function(wrap_pyfunction!(_render_json_debug, module)?)?;
     Ok(())
 }

@@ -4,6 +4,7 @@ import pytest
 import structguru._rust as rust
 
 from structguru import _native
+from structguru.config import orjson_serializer
 
 
 def test_native_module_exports_core_version() -> None:
@@ -78,3 +79,52 @@ def test_native_rejects_cycles() -> None:
 
     with pytest.raises(ValueError, match="cycle detected"):
         rust._convert_value_debug(values)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        True,
+        False,
+        42,
+        -7,
+        0.5,
+        "created",
+        ["api", 1, None],
+        ("tuple", 2),
+        {
+            "message": "created",
+            "level": "INFO",
+            "severity": 6,
+            "context": {"request_id": "req-1", "ids": [1, 2, 3]},
+            "ok": True,
+            "none": None,
+        },
+    ],
+)
+def test_native_json_render_matches_orjson_serializer(value: object) -> None:
+    assert rust._render_json_debug(value) == orjson_serializer(value)
+
+
+def test_native_json_render_rejects_unsupported_objects() -> None:
+    with pytest.raises(TypeError, match="unsupported value type"):
+        rust._render_json_debug(object())
+
+
+def test_native_json_render_rejects_non_string_map_keys() -> None:
+    with pytest.raises(TypeError, match="map keys must be strings"):
+        rust._render_json_debug({1: "one"})
+
+
+def test_native_json_render_rejects_integer_overflow() -> None:
+    with pytest.raises(OverflowError, match="i64"):
+        rust._render_json_debug(2**100)
+
+
+def test_native_json_render_rejects_cycles() -> None:
+    values: list[object] = []
+    values.append(values)
+
+    with pytest.raises(ValueError, match="cycle detected"):
+        rust._render_json_debug(values)

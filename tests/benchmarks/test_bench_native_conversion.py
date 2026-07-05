@@ -6,6 +6,8 @@ from typing import Any
 
 import structguru._rust as rust
 
+from structguru.config import orjson_serializer
+
 
 def _realistic_record() -> dict[str, Any]:
     return {
@@ -43,3 +45,21 @@ def test_bench_native_conversion_stats(benchmark: Any) -> None:
     @benchmark
     def _() -> None:
         rust._conversion_stats(record)
+
+
+def test_bench_python_orjson_serializer(benchmark: Any) -> None:
+    """Benchmark current Python orjson serialization."""
+    record = _realistic_record()
+
+    @benchmark
+    def _() -> None:
+        orjson_serializer(record)
+
+
+def test_bench_native_json_render(benchmark: Any) -> None:
+    """Benchmark native conversion plus Rust JSON rendering."""
+    record = _realistic_record()
+
+    @benchmark
+    def _() -> None:
+        rust._render_json_debug(record)
