@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from structguru import _native
 from structguru.processors import (
     _LEVEL_MAP,
     _SEVERITY_MAP,
@@ -84,6 +85,12 @@ class TestNormalizeLevel:
         result = normalize_level(None, "custom", event_dict)
         assert result["level"] == "CUSTOM"
 
+    def test_falls_back_when_native_unavailable(self, monkeypatch) -> None:
+        monkeypatch.setattr(_native, "_RUST", None)
+        event_dict: dict = {"level": "warning"}
+        result = normalize_level(None, "warning", event_dict)
+        assert result["level"] == "WARN"
+
 
 class TestAddSyslogSeverity:
     def test_maps_known_levels(self) -> None:
@@ -101,6 +108,12 @@ class TestAddSyslogSeverity:
         event_dict: dict = {}
         result = add_syslog_severity(None, "info", event_dict)
         assert result["severity"] == 6
+
+    def test_falls_back_when_native_unavailable(self, monkeypatch) -> None:
+        monkeypatch.setattr(_native, "_RUST", None)
+        event_dict: dict = {"level": "ERROR"}
+        result = add_syslog_severity(None, "info", event_dict)
+        assert result["severity"] == 3
 
 
 class TestEnsureEventIsStr:

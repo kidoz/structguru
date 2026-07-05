@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import structguru._rust as rust
 
+from structguru import _native
+
 
 def test_native_module_exports_core_version() -> None:
     assert rust.version() == "0.2.0"
+    assert _native.native_available()
 
 
 def test_native_level_helpers_match_processor_contract() -> None:

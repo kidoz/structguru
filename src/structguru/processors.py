@@ -12,6 +12,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from structguru import _native
+
 _LEVEL_MAP: dict[str, str] = {
     "trace": "DEBUG",
     "debug": "DEBUG",
@@ -62,8 +64,13 @@ def normalize_level(
     Canonical levels: ``CRITICAL``, ``ERROR``, ``WARN``, ``INFO``, ``DEBUG``.
     """
     raw_level = event_dict.get("level", method_name)
-    raw_level_str = str(raw_level).lower()
-    event_dict["level"] = _LEVEL_MAP.get(raw_level_str, raw_level_str.upper())
+    raw_level_str = str(raw_level)
+    native_level = _native.normalize_level(raw_level_str)
+    if native_level is not None:
+        event_dict["level"] = native_level
+        return event_dict
+    raw_level_lower = raw_level_str.lower()
+    event_dict["level"] = _LEVEL_MAP.get(raw_level_lower, raw_level_lower.upper())
     return event_dict
 
 
@@ -79,7 +86,11 @@ def add_syslog_severity(
     Defaults to ``6`` (Informational) for unknown levels.
     """
     level = event_dict.get("level", "INFO")
-    event_dict["severity"] = _SEVERITY_MAP.get(level, 6)
+    level_str = str(level)
+    native_severity = _native.syslog_severity(level_str)
+    event_dict["severity"] = (
+        native_severity if native_severity is not None else _SEVERITY_MAP.get(level, 6)
+    )
     return event_dict
 
 
