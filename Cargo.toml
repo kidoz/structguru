@@ -15,4 +15,6 @@ repository = "https://github.com/kidoz/structguru"
 
 [workspace.dependencies]
 pyo3 = { version = "0.29.0" }
+serde = { version = "1.0" }
+serde_json = { version = "1.0" }
 structguru-core = { path = "crates/structguru-core" }

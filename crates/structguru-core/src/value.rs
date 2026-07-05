@@ -1,3 +1,6 @@
+use serde::ser::{SerializeMap, SerializeSeq};
+use serde::{Serialize, Serializer};
+
 /// Owned structured value used by the Rust logging core.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -46,6 +49,40 @@ impl Value {
             Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::String(_) => {}
         }
     }
+
+    /// Render this value as compact JSON.
+    pub fn to_json_string(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+}
+
+impl Serialize for Value {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Value::Null => serializer.serialize_unit(),
+            Value::Bool(value) => serializer.serialize_bool(*value),
+            Value::Int(value) => serializer.serialize_i64(*value),
+            Value::Float(value) => serializer.serialize_f64(*value),
+            Value::String(value) => serializer.serialize_str(value),
+            Value::List(items) => {
+                let mut seq = serializer.serialize_seq(Some(items.len()))?;
+                for item in items {
+                    seq.serialize_element(item)?;
+                }
+                seq.end()
+            }
+            Value::Map(entries) => {
+                let mut map = serializer.serialize_map(Some(entries.len()))?;
+                for (key, value) in entries {
+                    map.serialize_entry(key, value)?;
+                }
+                map.end()
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -86,5 +123,23 @@ mod tests {
         };
         assert_eq!(entries[0].0, "first");
         assert_eq!(entries[1].0, "second");
+    }
+
+    #[test]
+    fn renders_compact_json_preserving_map_order() {
+        let value = Value::Map(vec![
+            ("message".to_owned(), Value::String("hello".to_owned())),
+            ("ok".to_owned(), Value::Bool(true)),
+            (
+                "tags".to_owned(),
+                Value::List(vec![Value::String("api".to_owned())]),
+            ),
+            ("none".to_owned(), Value::Null),
+        ]);
+
+        assert_eq!(
+            value.to_json_string().unwrap(),
+            r#"{"message":"hello","ok":true,"tags":["api"],"none":null}"#,
+        );
     }
 }
