@@ -3,8 +3,10 @@
 //! This crate is intentionally PyO3-free so the logger engine can grow with
 //! normal Rust unit tests and benchmarks before crossing the Python boundary.
 
+mod queue;
 mod value;
 
+pub use queue::{BoundedQueue, QueueMetrics};
 pub use value::{Value, ValueStats};
 
 /// Return the Rust core crate version.
