@@ -5,7 +5,7 @@ use pyo3::types::{
     PyAny, PyBool, PyDict, PyDictMethods, PyFloat, PyInt, PyList, PyListMethods, PyString, PyTuple,
     PyTupleMethods,
 };
-use structguru_core::{BoundedQueue, Value};
+use structguru_core::{BoundedQueue, StringWriter, Value};
 
 const MAX_VALUE_DEPTH: usize = 64;
 type ContainerStack = Vec<usize>;
@@ -93,6 +93,66 @@ impl NativeStringQueue {
         result.set_item("dequeued", metrics.dequeued)?;
         result.set_item("depth", self.queue.len())?;
         result.set_item("maxsize", self.queue.maxsize())?;
+        Ok(result)
+    }
+}
+
+#[pyclass(name = "_NativeStringWriter")]
+struct NativeStringWriter {
+    writer: StringWriter,
+}
+
+#[pymethods]
+impl NativeStringWriter {
+    #[new]
+    #[pyo3(signature = (maxsize, paused=false))]
+    fn new(maxsize: usize, paused: bool) -> Self {
+        let writer = if paused {
+            StringWriter::new_paused(maxsize)
+        } else {
+            StringWriter::new(maxsize)
+        };
+        Self { writer }
+    }
+
+    #[getter]
+    fn maxsize(&self) -> usize {
+        self.writer.maxsize()
+    }
+
+    fn try_enqueue(&self, message: &str) -> bool {
+        self.writer.try_enqueue(message.to_owned()).is_ok()
+    }
+
+    fn flush(&self, py: Python<'_>) {
+        py.detach(|| self.writer.flush());
+    }
+
+    fn close(&self, py: Python<'_>) {
+        py.detach(|| self.writer.close());
+    }
+
+    fn resume(&self) {
+        self.writer.resume();
+    }
+
+    fn messages(&self) -> Vec<String> {
+        self.writer.messages()
+    }
+
+    fn metrics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let metrics = self.writer.metrics();
+        let result = PyDict::new(py);
+        result.set_item("enqueued", metrics.enqueued)?;
+        result.set_item("dropped", metrics.dropped)?;
+        result.set_item("dequeued", metrics.dequeued)?;
+        result.set_item("written", metrics.written)?;
+        result.set_item("depth", metrics.depth)?;
+        result.set_item("maxsize", metrics.maxsize)?;
+        result.set_item("in_flight", metrics.in_flight)?;
+        result.set_item("closed", metrics.closed)?;
+        result.set_item("worker_done", metrics.worker_done)?;
+        result.set_item("paused", metrics.paused)?;
         Ok(result)
     }
 }
@@ -222,5 +282,6 @@ fn rust_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_conversion_stats, module)?)?;
     module.add_function(wrap_pyfunction!(_render_json_debug, module)?)?;
     module.add_class::<NativeStringQueue>()?;
+    module.add_class::<NativeStringWriter>()?;
     Ok(())
 }

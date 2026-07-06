@@ -5,9 +5,11 @@
 
 mod queue;
 mod value;
+mod worker;
 
 pub use queue::{BoundedQueue, QueueMetrics};
 pub use value::{Value, ValueStats};
+pub use worker::{StringWriter, WorkerMetrics};
 
 /// Return the Rust core crate version.
 pub fn version() -> &'static str {
