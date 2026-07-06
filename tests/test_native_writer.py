@@ -17,6 +17,7 @@ def test_native_string_writer_drains_messages_in_order() -> None:
         "dropped": 0,
         "dequeued": 2,
         "written": 2,
+        "sink_errors": 0,
         "depth": 0,
         "maxsize": 0,
         "in_flight": 0,
@@ -54,3 +55,19 @@ def test_native_string_writer_close_is_idempotent_and_rejects_new_messages() -> 
     assert writer.messages() == ["before close"]
     assert writer.metrics()["closed"] is True
     assert writer.metrics()["worker_done"] is True
+
+
+def test_native_string_writer_counts_sink_errors_without_stopping() -> None:
+    writer = rust._NativeStringWriter(0, fail_after=1)
+
+    assert writer.try_enqueue("first")
+    assert writer.try_enqueue("second")
+    assert writer.try_enqueue("third")
+    writer.flush()
+
+    assert writer.messages() == ["first"]
+    assert writer.metrics()["enqueued"] == 3
+    assert writer.metrics()["dequeued"] == 3
+    assert writer.metrics()["written"] == 1
+    assert writer.metrics()["sink_errors"] == 2
+    writer.close()

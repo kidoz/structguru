@@ -1,6 +1,114 @@
 use std::collections::VecDeque;
+use std::fmt;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SinkError {
+    message: String,
+}
+
+impl SinkError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for SinkError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SinkError {}
+
+pub trait StringSink: Send {
+    fn write(&mut self, message: String) -> Result<(), SinkError>;
+
+    fn flush(&mut self) -> Result<(), SinkError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct MemorySinkHandle {
+    messages: Arc<Mutex<Vec<String>>>,
+}
+
+impl MemorySinkHandle {
+    pub fn messages(&self) -> Vec<String> {
+        self.messages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+pub struct MemorySink {
+    handle: MemorySinkHandle,
+}
+
+impl MemorySink {
+    pub fn new() -> (Self, MemorySinkHandle) {
+        let handle = MemorySinkHandle::default();
+        (
+            Self {
+                handle: handle.clone(),
+            },
+            handle,
+        )
+    }
+}
+
+impl StringSink for MemorySink {
+    fn write(&mut self, message: String) -> Result<(), SinkError> {
+        self.handle
+            .messages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(message);
+        Ok(())
+    }
+}
+
+pub struct FailingSink {
+    handle: MemorySinkHandle,
+    fail_after: usize,
+    attempts: usize,
+}
+
+impl FailingSink {
+    pub fn new(fail_after: usize) -> (Self, MemorySinkHandle) {
+        let handle = MemorySinkHandle::default();
+        (
+            Self {
+                handle: handle.clone(),
+                fail_after,
+                attempts: 0,
+            },
+            handle,
+        )
+    }
+}
+
+impl StringSink for FailingSink {
+    fn write(&mut self, message: String) -> Result<(), SinkError> {
+        if self.attempts >= self.fail_after {
+            self.attempts += 1;
+            return Err(SinkError::new("test sink write failed"));
+        }
+
+        self.attempts += 1;
+        self.handle
+            .messages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(message);
+        Ok(())
+    }
+}
 
 /// Point-in-time view of native writer state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -9,6 +117,7 @@ pub struct WorkerMetrics {
     pub dropped: u64,
     pub dequeued: u64,
     pub written: u64,
+    pub sink_errors: u64,
     pub depth: usize,
     pub maxsize: usize,
     pub in_flight: usize,
@@ -23,11 +132,11 @@ struct WorkerCounters {
     dropped: u64,
     dequeued: u64,
     written: u64,
+    sink_errors: u64,
 }
 
 struct WorkerState {
     queue: VecDeque<String>,
-    written: Vec<String>,
     counters: WorkerCounters,
     in_flight: usize,
     closed: bool,
@@ -50,6 +159,7 @@ struct WorkerShared {
 pub struct StringWriter {
     shared: Arc<WorkerShared>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    memory_handle: MemorySinkHandle,
 }
 
 impl StringWriter {
@@ -61,12 +171,26 @@ impl StringWriter {
         Self::with_paused(maxsize, true)
     }
 
+    pub fn new_failing(maxsize: usize, fail_after: usize, paused: bool) -> Self {
+        let (sink, handle) = FailingSink::new(fail_after);
+        Self::with_sink(maxsize, paused, Box::new(sink), handle)
+    }
+
     fn with_paused(maxsize: usize, paused: bool) -> Self {
+        let (sink, handle) = MemorySink::new();
+        Self::with_sink(maxsize, paused, Box::new(sink), handle)
+    }
+
+    fn with_sink(
+        maxsize: usize,
+        paused: bool,
+        sink: Box<dyn StringSink>,
+        memory_handle: MemorySinkHandle,
+    ) -> Self {
         let shared = Arc::new(WorkerShared {
             maxsize,
             state: Mutex::new(WorkerState {
                 queue: VecDeque::new(),
-                written: Vec::new(),
                 counters: WorkerCounters::default(),
                 in_flight: 0,
                 closed: false,
@@ -77,11 +201,12 @@ impl StringWriter {
             drained: Condvar::new(),
         });
         let worker_shared = Arc::clone(&shared);
-        let worker = thread::spawn(move || worker_loop(worker_shared));
+        let worker = thread::spawn(move || worker_loop(worker_shared, sink));
 
         Self {
             shared,
             worker: Mutex::new(Some(worker)),
+            memory_handle,
         }
     }
 
@@ -140,7 +265,7 @@ impl StringWriter {
     }
 
     pub fn messages(&self) -> Vec<String> {
-        self.lock_state().written.clone()
+        self.memory_handle.messages()
     }
 
     pub fn metrics(&self) -> WorkerMetrics {
@@ -150,6 +275,7 @@ impl StringWriter {
             dropped: state.counters.dropped,
             dequeued: state.counters.dequeued,
             written: state.counters.written,
+            sink_errors: state.counters.sink_errors,
             depth: state.queue.len(),
             maxsize: self.shared.maxsize,
             in_flight: state.in_flight,
@@ -173,7 +299,7 @@ impl Drop for StringWriter {
     }
 }
 
-fn worker_loop(shared: Arc<WorkerShared>) {
+fn worker_loop(shared: Arc<WorkerShared>, mut sink: Box<dyn StringSink>) {
     loop {
         let message = {
             let mut state = shared
@@ -193,6 +319,15 @@ fn worker_loop(shared: Arc<WorkerShared>) {
                     break message;
                 }
                 if state.closed {
+                    drop(state);
+                    let flush_result = sink.flush();
+                    let mut state = shared
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if flush_result.is_err() {
+                        state.counters.sink_errors += 1;
+                    }
                     state.worker_done = true;
                     shared.drained.notify_all();
                     return;
@@ -204,14 +339,32 @@ fn worker_loop(shared: Arc<WorkerShared>) {
             }
         };
 
+        let result = sink.write(message);
         let mut state = shared
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.written.push(message);
-        state.counters.written += 1;
+        match result {
+            Ok(()) => {
+                state.counters.written += 1;
+            }
+            Err(_) => {
+                state.counters.sink_errors += 1;
+            }
+        }
         state.in_flight -= 1;
-        if state.queue.is_empty() && state.in_flight == 0 {
+        let should_flush = state.queue.is_empty() && state.in_flight == 0;
+        drop(state);
+
+        if should_flush {
+            let flush_result = sink.flush();
+            let mut state = shared
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if flush_result.is_err() {
+                state.counters.sink_errors += 1;
+            }
             shared.drained.notify_all();
         }
     }
@@ -234,6 +387,7 @@ mod tests {
         assert_eq!(metrics.enqueued, 2);
         assert_eq!(metrics.dequeued, 2);
         assert_eq!(metrics.written, 2);
+        assert_eq!(metrics.sink_errors, 0);
         assert_eq!(metrics.depth, 0);
     }
 
@@ -272,5 +426,23 @@ mod tests {
         let metrics = writer.metrics();
         assert!(metrics.closed);
         assert!(metrics.worker_done);
+    }
+
+    #[test]
+    fn sink_errors_are_counted_without_stopping_worker() {
+        let writer = StringWriter::new_failing(0, 1, false);
+
+        assert_eq!(writer.try_enqueue("first".to_owned()), Ok(()));
+        assert_eq!(writer.try_enqueue("second".to_owned()), Ok(()));
+        assert_eq!(writer.try_enqueue("third".to_owned()), Ok(()));
+        writer.flush();
+
+        assert_eq!(writer.messages(), vec!["first"]);
+        let metrics = writer.metrics();
+        assert_eq!(metrics.enqueued, 3);
+        assert_eq!(metrics.dequeued, 3);
+        assert_eq!(metrics.written, 1);
+        assert_eq!(metrics.sink_errors, 2);
+        assert_eq!(metrics.depth, 0);
     }
 }

@@ -9,7 +9,9 @@ mod worker;
 
 pub use queue::{BoundedQueue, QueueMetrics};
 pub use value::{Value, ValueStats};
-pub use worker::{StringWriter, WorkerMetrics};
+pub use worker::{
+    MemorySink, MemorySinkHandle, SinkError, StringSink, StringWriter, WorkerMetrics,
+};
 
 /// Return the Rust core crate version.
 pub fn version() -> &'static str {

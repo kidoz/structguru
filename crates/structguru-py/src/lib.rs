@@ -105,9 +105,11 @@ struct NativeStringWriter {
 #[pymethods]
 impl NativeStringWriter {
     #[new]
-    #[pyo3(signature = (maxsize, paused=false))]
-    fn new(maxsize: usize, paused: bool) -> Self {
-        let writer = if paused {
+    #[pyo3(signature = (maxsize, paused=false, fail_after=None))]
+    fn new(maxsize: usize, paused: bool, fail_after: Option<usize>) -> Self {
+        let writer = if let Some(fail_after) = fail_after {
+            StringWriter::new_failing(maxsize, fail_after, paused)
+        } else if paused {
             StringWriter::new_paused(maxsize)
         } else {
             StringWriter::new(maxsize)
@@ -147,6 +149,7 @@ impl NativeStringWriter {
         result.set_item("dropped", metrics.dropped)?;
         result.set_item("dequeued", metrics.dequeued)?;
         result.set_item("written", metrics.written)?;
+        result.set_item("sink_errors", metrics.sink_errors)?;
         result.set_item("depth", metrics.depth)?;
         result.set_item("maxsize", metrics.maxsize)?;
         result.set_item("in_flight", metrics.in_flight)?;
