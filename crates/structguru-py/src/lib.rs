@@ -56,14 +56,14 @@ fn _render_json_debug(obj: Bound<'_, PyAny>) -> PyResult<String> {
 
 /// Render one log line: convert + redact `fields`, append the standard keys, emit JSON.
 #[pyfunction]
-#[pyo3(signature = (fields, logger, level, service, message, timestamp))]
+#[pyo3(signature = (fields, logger, level, service, message, timestamp=None))]
 fn render_line(
     fields: &Bound<'_, PyDict>,
     logger: &str,
     level: &str,
     service: &str,
     message: &str,
-    timestamp: &str,
+    timestamp: Option<&str>,
 ) -> PyResult<String> {
     let mut entries: Vec<(String, Value)> = Vec::with_capacity(fields.len());
     for (key, value) in fields.iter() {
@@ -74,6 +74,14 @@ fn render_line(
             .to_owned();
         entries.push((key, convert_py_value(&value)?));
     }
+    let generated;
+    let timestamp = match timestamp {
+        Some(value) => value,
+        None => {
+            generated = structguru_core::now_iso8601();
+            &generated
+        }
+    };
     structguru_core::render_line(entries, logger, level, service, message, timestamp)
         .map_err(|err| PyValueError::new_err(err.to_string()))
 }
@@ -129,16 +137,24 @@ struct NativeStringWriter {
 #[pymethods]
 impl NativeStringWriter {
     #[new]
-    #[pyo3(signature = (maxsize, paused=false, fail_after=None))]
-    fn new(maxsize: usize, paused: bool, fail_after: Option<usize>) -> Self {
-        let writer = if let Some(fail_after) = fail_after {
-            StringWriter::new_failing(maxsize, fail_after, paused)
-        } else if paused {
-            StringWriter::new_paused(maxsize)
-        } else {
-            StringWriter::new(maxsize)
+    #[pyo3(signature = (maxsize, paused=false, fail_after=None, target="memory"))]
+    fn new(maxsize: usize, paused: bool, fail_after: Option<usize>, target: &str) -> PyResult<Self> {
+        let writer = match target {
+            "stdout" => StringWriter::new_stdout(maxsize),
+            "memory" => {
+                if let Some(fail_after) = fail_after {
+                    StringWriter::new_failing(maxsize, fail_after, paused)
+                } else if paused {
+                    StringWriter::new_paused(maxsize)
+                } else {
+                    StringWriter::new(maxsize)
+                }
+            }
+            other => {
+                return Err(PyValueError::new_err(format!("unknown writer target: {other}")));
+            }
         };
-        Self { writer }
+        Ok(Self { writer })
     }
 
     #[getter]
@@ -216,7 +232,13 @@ fn convert_py_value_inner(
         });
     }
     if obj.is_exact_instance_of::<PyFloat>() {
-        return Ok(Value::Float(obj.extract()?));
+        let value: f64 = obj.extract()?;
+        // orjson emits `null` for NaN/Infinity; serde_json would error, so map here.
+        return Ok(if value.is_finite() {
+            Value::Float(value)
+        } else {
+            Value::Null
+        });
     }
     if let Ok(value) = obj.cast::<PyString>() {
         return Ok(Value::String(value.to_str()?.to_owned()));
@@ -254,10 +276,14 @@ fn convert_py_value_inner(
         return Ok(Value::List(values));
     }
 
-    Err(PyTypeError::new_err(format!(
-        "unsupported value type: {}",
-        obj.get_type().name()?
-    )))
+    // Exotic leaf (datetime/date/UUID/Enum/dataclass/...): delegate to orjson so
+    // the output matches the current renderer exactly, and so genuinely
+    // unsupported types (Decimal/bytes/set) raise the same TypeError they do today.
+    let orjson = obj.py().import("orjson")?;
+    let dumped = orjson.call_method1("dumps", (obj,))?;
+    let json = String::from_utf8(dumped.extract::<Vec<u8>>()?)
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    Ok(Value::Raw(json))
 }
 
 fn enter_container(obj: &Bound<'_, PyAny>, containers: &mut ContainerStack) -> PyResult<usize> {
@@ -296,6 +322,7 @@ fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny
             }
             Ok(dict.into_any())
         }
+        Value::Raw(json) => py.import("orjson")?.call_method1("loads", (json.as_str(),)),
     }
 }
 

@@ -59,7 +59,9 @@ def test_native_conversion_stats_for_realistic_record() -> None:
 
 
 def test_native_rejects_unsupported_objects() -> None:
-    with pytest.raises(TypeError, match="unsupported value type"):
+    # Exotic leaves are delegated to orjson; genuinely unserializable objects
+    # still raise TypeError (orjson.JSONEncodeError), matching the live renderer.
+    with pytest.raises(TypeError):
         rust._convert_value_debug(object())
 
 
@@ -108,7 +110,7 @@ def test_native_json_render_matches_orjson_serializer(value: object) -> None:
 
 
 def test_native_json_render_rejects_unsupported_objects() -> None:
-    with pytest.raises(TypeError, match="unsupported value type"):
+    with pytest.raises(TypeError):
         rust._render_json_debug(object())
 
 

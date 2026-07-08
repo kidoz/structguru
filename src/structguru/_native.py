@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import importlib
 import threading
-from datetime import datetime, timezone
 from typing import Any, Protocol, cast
 
 
@@ -39,10 +38,10 @@ class _RustModule(Protocol):
         level: str,
         service: str,
         message: str,
-        timestamp: str,
+        timestamp: str | None = None,
     ) -> str: ...
 
-    def _NativeStringWriter(self, maxsize: int) -> _NativeWriter: ...
+    def _NativeStringWriter(self, maxsize: int, target: str = ...) -> _NativeWriter: ...
 
 
 def _load_rust_module() -> _RustModule | None:
@@ -90,9 +89,11 @@ def is_native_enabled() -> bool:
     return _enabled and _RUST is not None
 
 
-def enable_native(*, service: str = "app", maxsize: int = 0) -> None:
+def enable_native(*, service: str = "app", maxsize: int = 0, target: str = "stdout") -> None:
     """Route the common log path through the native renderer + writer.
 
+    ``target`` selects the background writer's sink: ``"stdout"`` (default,
+    12-factor) or ``"memory"`` (records lines for inspection/tests).
     ``maxsize=0`` is an unbounded queue; a positive size drops new records when
     full (see the drop counter in :func:`native_metrics`).
     """
@@ -103,7 +104,7 @@ def enable_native(*, service: str = "app", maxsize: int = 0) -> None:
     with _state_lock:
         if _writer is not None:
             _writer.close()
-        _writer = _RUST._NativeStringWriter(maxsize)
+        _writer = _RUST._NativeStringWriter(maxsize, target=target)
         _service = service
         _enabled = True
 
@@ -124,11 +125,14 @@ def render_and_enqueue(
     level: str,
     message: str,
 ) -> bool:
-    """Render one record natively and enqueue it; returns False if dropped."""
+    """Render one record natively and enqueue it; returns False if dropped.
+
+    The timestamp is generated inside the Rust core (cached per second), so no
+    Python-side time formatting happens on the hot path.
+    """
     assert _RUST is not None and _writer is not None  # guarded by is_native_enabled
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    line = _RUST.render_line(fields, logger, level, _service, message, timestamp)
-    return _writer.try_enqueue(line)
+    line = _RUST.render_line(fields, logger, level, _service, message)
+    return _writer.try_enqueue(line + "\n")
 
 
 def flush_native() -> None:

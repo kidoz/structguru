@@ -50,7 +50,12 @@ fn redact(value: &mut Value) {
                 redact(item);
             }
         }
-        Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::String(_) => {}
+        Value::Null
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::String(_)
+        | Value::Raw(_) => {}
     }
 }
 

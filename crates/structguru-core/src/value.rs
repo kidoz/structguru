@@ -11,6 +11,12 @@ pub enum Value {
     String(String),
     List(Vec<Value>),
     Map(Vec<(String, Value)>),
+    /// Pre-serialized, already-valid JSON emitted verbatim.
+    ///
+    /// Used for exotic Python leaves (datetime/date/UUID/Enum/...) that the
+    /// boundary serializes via orjson for exact parity with the current
+    /// renderer, rather than reproducing orjson's formatting in Rust.
+    Raw(String),
 }
 
 /// Simple structural metrics for converted values.
@@ -46,7 +52,12 @@ impl Value {
                     value.update_stats(depth + 1, stats);
                 }
             }
-            Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::String(_) => {}
+            Value::Null
+            | Value::Bool(_)
+            | Value::Int(_)
+            | Value::Float(_)
+            | Value::String(_)
+            | Value::Raw(_) => {}
         }
     }
 
@@ -80,6 +91,11 @@ impl Serialize for Value {
                     map.serialize_entry(key, value)?;
                 }
                 map.end()
+            }
+            Value::Raw(json) => {
+                let raw = serde_json::value::RawValue::from_string(json.clone())
+                    .map_err(serde::ser::Error::custom)?;
+                raw.serialize(serializer)
             }
         }
     }
