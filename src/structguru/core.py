@@ -27,8 +27,9 @@ from pathlib import Path
 from typing import Any, TypeAlias
 
 import structlog
-from structlog.contextvars import bound_contextvars
+from structlog.contextvars import bound_contextvars, get_contextvars
 
+from structguru import _native
 from structguru.config import _to_logging_level
 
 HandlerId: TypeAlias = int
@@ -285,7 +286,6 @@ class Logger:
         kwargs: dict[str, Any],
     ) -> None:
         """Internal dispatch."""
-        structlog_logger = self._get_structlog_logger()
         formatted_msg, consumed_keys = _safe_format(message, args, kwargs)
 
         # Strip kwargs that were consumed by brace-formatting so they don't
@@ -293,6 +293,21 @@ class Logger:
         for key in consumed_keys:
             kwargs.pop(key, None)
 
+        # Native fast path: only for the common non-exception, non-stack case.
+        # Exception/stack rendering stays on the structlog path (Python-owned).
+        exc_info = kwargs.get("exc_info", self._opt_exc_info)
+        stack_info = kwargs.get("stack_info") or self._opt_stack_info
+        if _native.is_native_enabled() and not exc_info and not stack_info:
+            name = self.name if self.name is not None else _caller_module_name()
+            fields = {
+                **get_contextvars(),
+                **self._bound,
+                **{k: v for k, v in kwargs.items() if k not in ("exc_info", "stack_info")},
+            }
+            _native.render_and_enqueue(fields, name, method, formatted_msg)
+            return
+
+        structlog_logger = self._get_structlog_logger()
         if self._opt_exc_info is not None:
             kwargs.setdefault("exc_info", self._opt_exc_info)
         if self._opt_stack_info:
