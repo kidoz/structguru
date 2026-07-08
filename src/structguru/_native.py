@@ -12,9 +12,26 @@ from __future__ import annotations
 import atexit
 import importlib
 import os
+import sys
 import threading
+import traceback
 import warnings
+from types import TracebackType
 from typing import Any, Protocol, cast
+
+# method name -> numeric level (mirrors logging levels; TRACE/SUCCESS folded)
+_LEVEL_NUM: dict[str, int] = {
+    "trace": 5,
+    "debug": 10,
+    "info": 20,
+    "success": 20,
+    "warning": 30,
+    "warn": 30,
+    "error": 40,
+    "exception": 40,
+    "critical": 50,
+    "fatal": 50,
+}
 
 
 class _NativeWriter(Protocol):
@@ -46,6 +63,7 @@ class _RustModule(Protocol):
         service: str,
         message: str,
         timestamp: str | None = None,
+        sensitive_keys: list[str] | None = None,
     ) -> str: ...
 
     def _NativeStringWriter(self, maxsize: int, target: str = ...) -> _NativeWriter: ...
@@ -92,6 +110,9 @@ _service = "app"
 _maxsize = 0
 _target = "stdout"
 _overflow = "block"
+_level_threshold = _LEVEL_NUM["info"]
+_otel = False
+_sensitive_keys: list[str] | None = None
 _hooks_registered = False
 _drop_count = 0
 
@@ -101,12 +122,54 @@ def is_native_enabled() -> bool:
     return _enabled and _RUST is not None
 
 
+def is_below_level(method: str) -> bool:
+    """True when a call at *method* is below the native threshold (drop it)."""
+    return _LEVEL_NUM.get(method, _LEVEL_NUM["info"]) < _level_threshold
+
+
+def set_native_level(level: str) -> None:
+    """Adjust the native level threshold at runtime (per-process)."""
+    global _level_threshold
+    _level_threshold = _LEVEL_NUM.get(level.lower(), _LEVEL_NUM["info"])
+
+
+def otel_enabled() -> bool:
+    """True when OTel trace-context injection is enabled for native mode."""
+    return _otel
+
+
+def sensitive_keys() -> list[str] | None:
+    """Custom redaction keys for native mode, or None for the defaults."""
+    return _sensitive_keys
+
+
+def format_exception(exc_info: Any) -> str:
+    """Format ``exc_info`` to a traceback string matching structlog's output.
+
+    Accepts ``True`` (use the current exception), a ``BaseException`` instance,
+    or a ``(type, value, tb)`` tuple.
+    """
+    if exc_info is True:
+        exc_info = sys.exc_info()
+    elif isinstance(exc_info, BaseException):
+        exc_info = (type(exc_info), exc_info, exc_info.__traceback__)
+    if not exc_info or exc_info[0] is None:
+        return ""
+    exc_type, exc_value, exc_tb = exc_info
+    assert isinstance(exc_value, BaseException)
+    tb = cast("TracebackType | None", exc_tb)
+    return "".join(traceback.format_exception(type(exc_value), exc_value, tb)).rstrip("\n")
+
+
 def enable_native(
     *,
     service: str = "app",
     maxsize: int = 0,
     target: str = "stdout",
     overflow: str = "block",
+    level: str = "INFO",
+    otel: bool = False,
+    sensitive_keys: list[str] | None = None,
 ) -> None:
     """Route the common log path through the native renderer + writer.
 
@@ -123,6 +186,7 @@ def enable_native(
     forked children (gunicorn/celery prefork) instead of deadlocking.
     """
     global _enabled, _writer, _service, _maxsize, _target, _overflow
+    global _level_threshold, _otel, _sensitive_keys
     if _RUST is None:
         msg = "native extension is not available"
         raise RuntimeError(msg)
@@ -136,6 +200,9 @@ def enable_native(
         _target = target
         _service = service
         _overflow = overflow
+        _level_threshold = _LEVEL_NUM.get(level.lower(), _LEVEL_NUM["info"])
+        _otel = otel
+        _sensitive_keys = list(sensitive_keys) if sensitive_keys is not None else None
         _writer = _RUST._NativeStringWriter(maxsize, target=target)
         _enabled = True
     _register_lifecycle_hooks()
@@ -202,7 +269,8 @@ def render_and_enqueue(
     Python-side time formatting happens on the hot path.
     """
     assert _RUST is not None and _writer is not None  # guarded by is_native_enabled
-    line = _RUST.render_line(fields, logger, level, _service, message) + "\n"
+    rendered = _RUST.render_line(fields, logger, level, _service, message, None, _sensitive_keys)
+    line = rendered + "\n"
     if _overflow == "block":
         enqueued = _writer.enqueue_blocking(line)
     else:

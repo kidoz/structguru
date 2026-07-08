@@ -37,7 +37,7 @@ def _standard_json(bound: dict[str, Any], method: str, msg: str, **kwargs: Any) 
 
 
 def _native_json(bound: dict[str, Any], method: str, msg: str, **kwargs: Any) -> dict[str, Any]:
-    _native.enable_native(service="svc", target="memory")
+    _native.enable_native(service="svc", target="memory", level="DEBUG")
     try:
         log = structguru.logger.bind(**bound)
         getattr(log, method)(msg, **kwargs)
@@ -111,17 +111,55 @@ def test_native_brace_formatting_consumes_kwarg() -> None:
     assert native["extra"] == 1
 
 
-def test_exception_logs_bypass_native_path() -> None:
-    """exc_info must fall through to the structlog path, not the native writer."""
-    _native.enable_native(service="svc", target="memory")
+def test_native_exception_matches_structlog() -> None:
+    """logger.error(exc_info=...) renders natively with a matching traceback string.
+
+    The *same* captured exception is logged both ways so the traceback (file, line,
+    function) is identical — only the renderer differs.
+    """
     try:
-        before = _native.native_metrics()["enqueued"]
-        try:
-            raise ValueError("nope")
-        except ValueError:
-            structguru.logger.exception("failed")
+        raise ValueError("nope")
+    except ValueError as err:
+        exc = err
+
+    _native.enable_native(service="svc", target="memory", level="DEBUG")
+    try:
+        structguru.logger.error("failed", code=1, exc_info=exc)
         _native.flush_native()
-        after = _native.native_metrics()["enqueued"]
-        assert after == before  # nothing enqueued natively
+        native = json.loads(_native.drain_messages()[-1])
+    finally:
+        _native.disable_native()
+
+    buf = io.StringIO()
+    configure_structlog(service="svc", level="DEBUG", json_logs=True, stream=buf)
+    structguru.logger.error("failed", code=1, exc_info=exc)
+    standard = json.loads(buf.getvalue().strip().splitlines()[-1])
+
+    assert native["exception"] == standard["exception"]
+    assert native["level"] == "ERROR"
+    assert native["code"] == 1
+
+
+def test_native_level_filtering_drops_below_threshold() -> None:
+    _native.enable_native(service="svc", target="memory", level="WARNING")
+    try:
+        structguru.logger.info("dropped")
+        structguru.logger.warning("kept")
+        _native.flush_native()
+        lines = _native.drain_messages()
+        assert len(lines) == 1
+        assert json.loads(lines[0])["message"] == "kept"
+    finally:
+        _native.disable_native()
+
+
+def test_native_custom_sensitive_keys() -> None:
+    _native.enable_native(service="svc", target="memory", sensitive_keys=["secret_sauce"])
+    try:
+        structguru.logger.info("m", secret_sauce="x", ssn="123")
+        _native.flush_native()
+        record = json.loads(_native.drain_messages()[-1])
+        assert record["secret_sauce"] == "[REDACTED]"
+        assert record["ssn"] == "123"  # default key, not in the custom set
     finally:
         _native.disable_native()

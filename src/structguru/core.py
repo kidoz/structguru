@@ -31,6 +31,7 @@ from structlog.contextvars import bound_contextvars, get_contextvars
 
 from structguru import _native
 from structguru.config import _to_logging_level
+from structguru.otel import add_otel_context
 
 HandlerId: TypeAlias = int
 Sink: TypeAlias = "str | Path | logging.Handler | Callable[[str], None]"
@@ -286,6 +287,15 @@ class Logger:
         kwargs: dict[str, Any],
     ) -> None:
         """Internal dispatch."""
+        # Native fast path handles the common case (incl. exceptions); stack_info
+        # still falls back to the structlog path (Python-owned frame walking).
+        stack_info = bool(kwargs.get("stack_info") or self._opt_stack_info)
+        use_native = _native.is_native_enabled() and not stack_info
+
+        # Cheap disabled path: level-filter before any formatting.
+        if use_native and _native.is_below_level(method):
+            return
+
         formatted_msg, consumed_keys = _safe_format(message, args, kwargs)
 
         # Strip kwargs that were consumed by brace-formatting so they don't
@@ -293,17 +303,18 @@ class Logger:
         for key in consumed_keys:
             kwargs.pop(key, None)
 
-        # Native fast path: only for the common non-exception, non-stack case.
-        # Exception/stack rendering stays on the structlog path (Python-owned).
-        exc_info = kwargs.get("exc_info", self._opt_exc_info)
-        stack_info = kwargs.get("stack_info") or self._opt_stack_info
-        if _native.is_native_enabled() and not exc_info and not stack_info:
+        if use_native:
+            exc_info = kwargs.get("exc_info", self._opt_exc_info)
             name = self.name if self.name is not None else _caller_module_name()
             fields = {
                 **get_contextvars(),
                 **self._bound,
                 **{k: v for k, v in kwargs.items() if k not in ("exc_info", "stack_info")},
             }
+            if _native.otel_enabled():
+                add_otel_context(None, method, fields)
+            if exc_info:
+                fields["exception"] = _native.format_exception(exc_info)
             _native.render_and_enqueue(fields, name, method, formatted_msg)
             return
 
