@@ -311,3 +311,26 @@ def drain_messages() -> list[str]:
 def native_metrics() -> dict[str, Any] | None:
     """Return writer metrics (enqueued/dropped/written/depth/...)."""
     return _writer.metrics() if _writer is not None else None
+
+
+def _maybe_enable_from_env() -> None:
+    """Auto-enable native mode when ``STRUCTGURU_NATIVE`` is set (12-factor switch).
+
+    Honors ``LOG_LEVEL``, ``STRUCTGURU_SERVICE``, and ``STRUCTGURU_NATIVE_TARGET``.
+    Never breaks import: a missing extension or bad config is silently ignored.
+    """
+    if os.environ.get("STRUCTGURU_NATIVE", "").strip().lower() not in ("1", "true", "yes", "on"):
+        return
+    if _RUST is None:
+        return
+    try:
+        enable_native(
+            service=os.environ.get("STRUCTGURU_SERVICE", "app"),
+            level=os.environ.get("LOG_LEVEL", "INFO"),
+            target=os.environ.get("STRUCTGURU_NATIVE_TARGET", "stdout"),
+        )
+    except Exception:  # pragma: no cover - defensive: never fail import on env config
+        pass
+
+
+_maybe_enable_from_env()
