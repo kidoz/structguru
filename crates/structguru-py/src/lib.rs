@@ -83,8 +83,16 @@ fn render_line(
             &generated
         }
     };
-    structguru_core::render_line(entries, logger, level, service, message, timestamp, sensitive_keys)
-        .map_err(|err| PyValueError::new_err(err.to_string()))
+    structguru_core::render_line(
+        entries,
+        logger,
+        level,
+        service,
+        message,
+        timestamp,
+        sensitive_keys,
+    )
+    .map_err(|err| PyValueError::new_err(err.to_string()))
 }
 
 #[pyclass(name = "_NativeStringQueue")]
@@ -139,7 +147,12 @@ struct NativeStringWriter {
 impl NativeStringWriter {
     #[new]
     #[pyo3(signature = (maxsize, paused=false, fail_after=None, target="memory"))]
-    fn new(maxsize: usize, paused: bool, fail_after: Option<usize>, target: &str) -> PyResult<Self> {
+    fn new(
+        maxsize: usize,
+        paused: bool,
+        fail_after: Option<usize>,
+        target: &str,
+    ) -> PyResult<Self> {
         let writer = match target {
             "stdout" => StringWriter::new_stdout(maxsize),
             "memory" => {
@@ -152,7 +165,9 @@ impl NativeStringWriter {
                 }
             }
             other => {
-                return Err(PyValueError::new_err(format!("unknown writer target: {other}")));
+                return Err(PyValueError::new_err(format!(
+                    "unknown writer target: {other}"
+                )));
             }
         };
         Ok(Self { writer })

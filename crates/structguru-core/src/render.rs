@@ -70,7 +70,10 @@ pub fn render_line(
 ) -> Result<String, serde_json::Error> {
     let keys: Vec<String> = match sensitive_keys {
         Some(custom) => custom.into_iter().map(|k| k.to_ascii_lowercase()).collect(),
-        None => DEFAULT_SENSITIVE_KEYS.iter().map(|k| (*k).to_owned()).collect(),
+        None => DEFAULT_SENSITIVE_KEYS
+            .iter()
+            .map(|k| (*k).to_owned())
+            .collect(),
     };
     let mut root = Value::Map(fields);
     redact(&mut root, &keys);
@@ -98,7 +101,10 @@ mod tests {
     #[test]
     fn renders_fields_then_standard_keys_in_order() {
         let fields = vec![("request_id".to_owned(), Value::String("req-1".to_owned()))];
-        let line = render_line(fields, "svc.mod", "warning", "checkout", "hello", "TS", None).unwrap();
+        let line = render_line(
+            fields, "svc.mod", "warning", "checkout", "hello", "TS", None,
+        )
+        .unwrap();
 
         assert_eq!(
             line,
@@ -112,7 +118,10 @@ mod tests {
             ("Password".to_owned(), Value::String("hunter2".to_owned())),
             (
                 "ctx".to_owned(),
-                Value::Map(vec![("api_key".to_owned(), Value::String("abc".to_owned()))]),
+                Value::Map(vec![(
+                    "api_key".to_owned(),
+                    Value::String("abc".to_owned()),
+                )]),
             ),
             ("qty".to_owned(), Value::Int(2)),
         ];
