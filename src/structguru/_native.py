@@ -13,11 +13,14 @@ import atexit
 import importlib
 import os
 import threading
+import warnings
 from typing import Any, Protocol, cast
 
 
 class _NativeWriter(Protocol):
     def try_enqueue(self, message: str) -> bool: ...
+
+    def enqueue_blocking(self, message: str) -> bool: ...
 
     def flush(self) -> None: ...
 
@@ -88,7 +91,9 @@ _writer: _NativeWriter | None = None
 _service = "app"
 _maxsize = 0
 _target = "stdout"
+_overflow = "block"
 _hooks_registered = False
+_drop_count = 0
 
 
 def is_native_enabled() -> bool:
@@ -96,28 +101,41 @@ def is_native_enabled() -> bool:
     return _enabled and _RUST is not None
 
 
-def enable_native(*, service: str = "app", maxsize: int = 0, target: str = "stdout") -> None:
+def enable_native(
+    *,
+    service: str = "app",
+    maxsize: int = 0,
+    target: str = "stdout",
+    overflow: str = "block",
+) -> None:
     """Route the common log path through the native renderer + writer.
 
     ``target`` selects the background writer's sink: ``"stdout"`` (default,
     12-factor) or ``"memory"`` (records lines for inspection/tests).
-    ``maxsize=0`` is an unbounded queue; a positive size drops new records when
-    full (see the drop counter in :func:`native_metrics`).
+
+    ``maxsize=0`` is an unbounded queue. With a positive ``maxsize``, ``overflow``
+    governs a full queue: ``"block"`` (default, no loss — the caller waits with the
+    GIL released) or ``"drop"`` (drop the new record, count it, and emit a
+    rate-limited warning; see :func:`native_metrics`).
 
     Registers shutdown (``atexit``) and fork (``os.register_at_fork``) handlers so
     buffered records are flushed on exit and the background writer is respawned in
     forked children (gunicorn/celery prefork) instead of deadlocking.
     """
-    global _enabled, _writer, _service, _maxsize, _target
+    global _enabled, _writer, _service, _maxsize, _target, _overflow
     if _RUST is None:
         msg = "native extension is not available"
         raise RuntimeError(msg)
+    if overflow not in ("block", "drop"):
+        msg = f"overflow must be 'block' or 'drop', not {overflow!r}"
+        raise ValueError(msg)
     with _state_lock:
         if _writer is not None:
             _writer.close()
         _maxsize = maxsize
         _target = target
         _service = service
+        _overflow = overflow
         _writer = _RUST._NativeStringWriter(maxsize, target=target)
         _enabled = True
     _register_lifecycle_hooks()
@@ -184,8 +202,31 @@ def render_and_enqueue(
     Python-side time formatting happens on the hot path.
     """
     assert _RUST is not None and _writer is not None  # guarded by is_native_enabled
-    line = _RUST.render_line(fields, logger, level, _service, message)
-    return _writer.try_enqueue(line + "\n")
+    line = _RUST.render_line(fields, logger, level, _service, message) + "\n"
+    if _overflow == "block":
+        enqueued = _writer.enqueue_blocking(line)
+    else:
+        enqueued = _writer.try_enqueue(line)
+    if not enqueued:
+        _note_drop()
+    return enqueued
+
+
+def _note_drop() -> None:
+    """Emit a rate-limited warning when the queue drops a record (drop mode)."""
+    global _drop_count
+    _drop_count += 1
+    if _drop_count == 1 or _drop_count % 1000 == 0:
+        warnings.warn(
+            f"structguru native logging dropped {_drop_count} record(s): queue full",
+            stacklevel=3,
+        )
+
+
+def _reset_drop_count() -> None:
+    """Reset the drop counter (used by tests)."""
+    global _drop_count
+    _drop_count = 0
 
 
 def flush_native() -> None:

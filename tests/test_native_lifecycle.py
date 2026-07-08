@@ -42,6 +42,28 @@ def test_metrics_track_enqueue_and_write() -> None:
         _native.disable_native()
 
 
+def test_block_overflow_never_drops_under_backpressure() -> None:
+    """A small bounded queue in block mode must apply backpressure, not drop."""
+    _native.enable_native(service="svc", target="memory", maxsize=4, overflow="block")
+    try:
+        for _ in range(200):
+            structguru.logger.info("m")
+        _native.flush_native()
+        metrics = _native.native_metrics()
+        assert metrics is not None
+        assert metrics["enqueued"] == 200
+        assert metrics["written"] == 200
+        assert metrics["dropped"] == 0
+    finally:
+        _native.disable_native()
+
+
+def test_drop_emits_rate_limited_warning() -> None:
+    _native._reset_drop_count()
+    with pytest.warns(UserWarning, match="dropped"):
+        _native._note_drop()
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork (POSIX)")
 def test_native_writer_survives_fork() -> None:
     """After fork, the child respawns its writer and logs without deadlocking.
