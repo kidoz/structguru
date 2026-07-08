@@ -10,7 +10,7 @@ mod worker;
 pub use queue::{BoundedQueue, QueueMetrics};
 pub use value::{Value, ValueStats};
 pub use worker::{
-    MemorySink, MemorySinkHandle, SinkError, StringSink, StringWriter, WorkerMetrics,
+    MemorySink, MemorySinkHandle, SinkError, StringSink, StringWriter, WorkerMetrics, WriteSink,
 };
 
 /// Return the Rust core crate version.

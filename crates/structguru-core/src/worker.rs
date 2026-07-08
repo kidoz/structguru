@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::fmt;
+use std::io::Write;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 
@@ -70,6 +71,37 @@ impl StringSink for MemorySink {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(message);
         Ok(())
+    }
+}
+
+pub struct WriteSink<W> {
+    writer: W,
+}
+
+impl<W> WriteSink<W> {
+    pub fn new(writer: W) -> Self {
+        Self { writer }
+    }
+
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+}
+
+impl<W> StringSink for WriteSink<W>
+where
+    W: Write + Send,
+{
+    fn write(&mut self, message: String) -> Result<(), SinkError> {
+        self.writer
+            .write_all(message.as_bytes())
+            .map_err(|err| SinkError::new(err.to_string()))
+    }
+
+    fn flush(&mut self) -> Result<(), SinkError> {
+        self.writer
+            .flush()
+            .map_err(|err| SinkError::new(err.to_string()))
     }
 }
 
@@ -373,6 +405,52 @@ fn worker_loop(shared: Arc<WorkerShared>, mut sink: Box<dyn StringSink>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Error, ErrorKind, Result as IoResult};
+
+    #[derive(Clone, Default)]
+    struct SharedWriter {
+        contents: Arc<Mutex<Vec<u8>>>,
+        fail_writes_after: Option<usize>,
+        writes: Arc<Mutex<usize>>,
+    }
+
+    impl SharedWriter {
+        fn contents(&self) -> Vec<u8> {
+            self.contents
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+
+        fn fail_writes_after(mut self, fail_writes_after: usize) -> Self {
+            self.fail_writes_after = Some(fail_writes_after);
+            self
+        }
+    }
+
+    impl Write for SharedWriter {
+        fn write(&mut self, bytes: &[u8]) -> IoResult<usize> {
+            let mut writes = self
+                .writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.fail_writes_after.is_some_and(|limit| *writes >= limit) {
+                *writes += 1;
+                return Err(Error::new(ErrorKind::BrokenPipe, "test writer failed"));
+            }
+
+            *writes += 1;
+            self.contents
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> IoResult<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn writer_drains_messages_in_order() {
@@ -438,6 +516,52 @@ mod tests {
         writer.flush();
 
         assert_eq!(writer.messages(), vec!["first"]);
+        let metrics = writer.metrics();
+        assert_eq!(metrics.enqueued, 3);
+        assert_eq!(metrics.dequeued, 3);
+        assert_eq!(metrics.written, 1);
+        assert_eq!(metrics.sink_errors, 2);
+        assert_eq!(metrics.depth, 0);
+    }
+
+    #[test]
+    fn write_sink_writes_exact_message_bytes() {
+        let output = SharedWriter::default();
+        let writer = StringWriter::with_sink(
+            0,
+            false,
+            Box::new(WriteSink::new(output.clone())),
+            MemorySinkHandle::default(),
+        );
+
+        assert_eq!(writer.try_enqueue("first\n".to_owned()), Ok(()));
+        assert_eq!(writer.try_enqueue("second".to_owned()), Ok(()));
+        writer.flush();
+
+        assert_eq!(output.contents(), b"first\nsecond");
+        let metrics = writer.metrics();
+        assert_eq!(metrics.enqueued, 2);
+        assert_eq!(metrics.dequeued, 2);
+        assert_eq!(metrics.written, 2);
+        assert_eq!(metrics.sink_errors, 0);
+    }
+
+    #[test]
+    fn write_sink_errors_are_counted_without_stopping_worker() {
+        let output = SharedWriter::default().fail_writes_after(1);
+        let writer = StringWriter::with_sink(
+            0,
+            false,
+            Box::new(WriteSink::new(output.clone())),
+            MemorySinkHandle::default(),
+        );
+
+        assert_eq!(writer.try_enqueue("first".to_owned()), Ok(()));
+        assert_eq!(writer.try_enqueue("second".to_owned()), Ok(()));
+        assert_eq!(writer.try_enqueue("third".to_owned()), Ok(()));
+        writer.flush();
+
+        assert_eq!(output.contents(), b"first");
         let metrics = writer.metrics();
         assert_eq!(metrics.enqueued, 3);
         assert_eq!(metrics.dequeued, 3);
