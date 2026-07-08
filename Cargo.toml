@@ -13,6 +13,14 @@ license = "MIT"
 authors = ["Aleksandr Pavlov <ckidoz@gmail.com>"]
 repository = "https://github.com/kidoz/structguru"
 
+[profile.release]
+# Optimize the shipped extension: whole-program LTO + single codegen unit for
+# speed, strip symbols to shrink the wheel. Keep the default unwind panic
+# strategy — PyO3's FFI trampoline relies on catch_unwind.
+lto = "fat"
+codegen-units = 1
+strip = true
+
 [workspace.dependencies]
 pyo3 = { version = "0.29.0" }
 serde = { version = "1.0" }
