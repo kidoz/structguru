@@ -1,0 +1,78 @@
+"""Reliability tests for native mode: shutdown flush and fork safety."""
+
+from __future__ import annotations
+
+import os
+import select
+
+import pytest
+
+import structguru
+from structguru import _native
+
+pytestmark = pytest.mark.skipif(
+    not _native.native_available(),
+    reason="native extension not built",
+)
+
+
+def test_close_drains_buffered_records() -> None:
+    """flush() must drain queued records to the sink before they are read."""
+    _native.enable_native(service="svc", target="memory")
+    try:
+        structguru.logger.info("last message")
+        _native.flush_native()
+        assert any("last message" in line for line in _native.drain_messages())
+    finally:
+        _native.disable_native()
+
+
+def test_metrics_track_enqueue_and_write() -> None:
+    _native.enable_native(service="svc", target="memory")
+    try:
+        for _ in range(5):
+            structguru.logger.info("m")
+        _native.flush_native()
+        metrics = _native.native_metrics()
+        assert metrics is not None
+        assert metrics["enqueued"] == 5
+        assert metrics["written"] == 5
+        assert metrics["dropped"] == 0
+    finally:
+        _native.disable_native()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork (POSIX)")
+def test_native_writer_survives_fork() -> None:
+    """After fork, the child respawns its writer and logs without deadlocking.
+
+    The parent's background writer thread does not exist in the child; if the
+    child tried to use or join it, this test would hang (caught by the select
+    timeout). The registered ``after_in_child`` hook must swap in a fresh writer.
+    """
+    _native.enable_native(service="svc", target="memory")
+    try:
+        structguru.logger.info("parent log")
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:  # child
+            try:
+                structguru.logger.info("child log")
+                _native.flush_native()
+                logged = any("child log" in line for line in _native.drain_messages())
+                os.write(write_fd, b"1" if logged else b"0")
+            except BaseException:
+                os.write(write_fd, b"E")
+            finally:
+                os._exit(0)
+
+        # parent
+        os.close(write_fd)
+        ready, _, _ = select.select([read_fd], [], [], 5.0)
+        assert ready, "child deadlocked after fork (no writer respawn)"
+        result = os.read(read_fd, 1)
+        os.close(read_fd)
+        os.waitpid(pid, 0)
+        assert result == b"1", f"child failed to log natively after fork: {result!r}"
+    finally:
+        _native.disable_native()
