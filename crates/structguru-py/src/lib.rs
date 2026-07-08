@@ -54,6 +54,30 @@ fn _render_json_debug(obj: Bound<'_, PyAny>) -> PyResult<String> {
         .map_err(|err| PyValueError::new_err(err.to_string()))
 }
 
+/// Render one log line: convert + redact `fields`, append the standard keys, emit JSON.
+#[pyfunction]
+#[pyo3(signature = (fields, logger, level, service, message, timestamp))]
+fn render_line(
+    fields: &Bound<'_, PyDict>,
+    logger: &str,
+    level: &str,
+    service: &str,
+    message: &str,
+    timestamp: &str,
+) -> PyResult<String> {
+    let mut entries: Vec<(String, Value)> = Vec::with_capacity(fields.len());
+    for (key, value) in fields.iter() {
+        let key = key
+            .cast::<PyString>()
+            .map_err(|_| PyTypeError::new_err("field keys must be strings"))?
+            .to_str()?
+            .to_owned();
+        entries.push((key, convert_py_value(&value)?));
+    }
+    structguru_core::render_line(entries, logger, level, service, message, timestamp)
+        .map_err(|err| PyValueError::new_err(err.to_string()))
+}
+
 #[pyclass(name = "_NativeStringQueue")]
 struct NativeStringQueue {
     queue: BoundedQueue<String>,
@@ -284,6 +308,7 @@ fn rust_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_convert_value_debug, module)?)?;
     module.add_function(wrap_pyfunction!(_conversion_stats, module)?)?;
     module.add_function(wrap_pyfunction!(_render_json_debug, module)?)?;
+    module.add_function(wrap_pyfunction!(render_line, module)?)?;
     module.add_class::<NativeStringQueue>()?;
     module.add_class::<NativeStringWriter>()?;
     Ok(())

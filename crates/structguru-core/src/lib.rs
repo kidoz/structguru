@@ -4,10 +4,12 @@
 //! normal Rust unit tests and benchmarks before crossing the Python boundary.
 
 mod queue;
+mod render;
 mod value;
 mod worker;
 
 pub use queue::{BoundedQueue, QueueMetrics};
+pub use render::{DEFAULT_SENSITIVE_KEYS, render_line};
 pub use value::{Value, ValueStats};
 pub use worker::{
     MemorySink, MemorySinkHandle, SinkError, StringSink, StringWriter, WorkerMetrics, WriteSink,
