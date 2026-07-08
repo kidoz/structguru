@@ -182,6 +182,7 @@ struct WorkerShared {
     state: Mutex<WorkerState>,
     available: Condvar,
     drained: Condvar,
+    space: Condvar,
 }
 
 /// Private native writer skeleton for already-rendered string records.
@@ -243,6 +244,7 @@ impl StringWriter {
             }),
             available: Condvar::new(),
             drained: Condvar::new(),
+            space: Condvar::new(),
         });
         let worker_shared = Arc::clone(&shared);
         let worker = thread::spawn(move || worker_loop(worker_shared, sink));
@@ -284,6 +286,30 @@ impl StringWriter {
         Ok(())
     }
 
+    /// Enqueue, blocking the caller until space is available (backpressure).
+    ///
+    /// Returns `Err` only if the writer is closed. Callers should release the
+    /// GIL around this so a full queue does not freeze other Python threads.
+    pub fn enqueue_blocking(&self, message: String) -> Result<(), String> {
+        let mut state = self.lock_state();
+        loop {
+            if state.closed {
+                return Err(message);
+            }
+            if self.shared.maxsize == 0 || state.queue.len() < self.shared.maxsize {
+                state.queue.push_back(message);
+                state.counters.enqueued += 1;
+                self.shared.available.notify_one();
+                return Ok(());
+            }
+            state = self
+                .shared
+                .space
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
     pub fn flush(&self) {
         let mut state = self.lock_state();
         while !state.queue.is_empty() || state.in_flight > 0 {
@@ -306,6 +332,7 @@ impl StringWriter {
             let mut state = self.lock_state();
             state.closed = true;
             self.shared.available.notify_all();
+            self.shared.space.notify_all(); // wake blocked producers so they see closed
         }
 
         let worker = self
@@ -376,6 +403,7 @@ fn worker_loop(shared: Arc<WorkerShared>, mut sink: Box<dyn StringSink>) {
                 if let Some(message) = state.queue.pop_front() {
                     state.counters.dequeued += 1;
                     state.in_flight += 1;
+                    shared.space.notify_one(); // a slot freed — wake a blocked producer
                     break message;
                 }
                 if state.closed {
@@ -495,6 +523,19 @@ mod tests {
         assert_eq!(metrics.written, 2);
         assert_eq!(metrics.sink_errors, 0);
         assert_eq!(metrics.depth, 0);
+    }
+
+    #[test]
+    fn blocking_enqueue_applies_backpressure_without_dropping() {
+        let writer = StringWriter::new(2); // small bounded queue
+        for i in 0..50 {
+            writer.enqueue_blocking(format!("m{i}")).unwrap();
+        }
+        writer.flush();
+        let metrics = writer.metrics();
+        assert_eq!(metrics.enqueued, 50);
+        assert_eq!(metrics.dropped, 0);
+        assert_eq!(metrics.written, 50);
     }
 
     #[test]

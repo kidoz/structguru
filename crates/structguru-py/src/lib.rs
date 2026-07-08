@@ -166,6 +166,12 @@ impl NativeStringWriter {
         self.writer.try_enqueue(message.to_owned()).is_ok()
     }
 
+    fn enqueue_blocking(&self, py: Python<'_>, message: &str) -> bool {
+        let message = message.to_owned();
+        // Release the GIL while blocked on a full queue so other Python threads run.
+        py.detach(|| self.writer.enqueue_blocking(message).is_ok())
+    }
+
     fn flush(&self, py: Python<'_>) {
         py.detach(|| self.writer.flush());
     }
