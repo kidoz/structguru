@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 
@@ -192,6 +193,7 @@ pub struct StringWriter {
     shared: Arc<WorkerShared>,
     worker: Mutex<Option<JoinHandle<()>>>,
     memory_handle: MemorySinkHandle,
+    abandoned: AtomicBool,
 }
 
 impl StringWriter {
@@ -249,7 +251,17 @@ impl StringWriter {
             shared,
             worker: Mutex::new(Some(worker)),
             memory_handle,
+            abandoned: AtomicBool::new(false),
         }
+    }
+
+    /// Neutralize this writer after a `fork()`: the background thread does not
+    /// exist in the child process, so `close`/`Drop` must **not** try to join
+    /// it (that would hang). After this, `close`/`Drop` are no-ops and the
+    /// (detached) `JoinHandle` is simply dropped. The caller replaces the writer
+    /// with a fresh one in the child.
+    pub fn abandon(&self) {
+        self.abandoned.store(true, Ordering::Release);
     }
 
     pub fn maxsize(&self) -> usize {
@@ -284,6 +296,12 @@ impl StringWriter {
     }
 
     pub fn close(&self) {
+        // Abandoned (post-fork) writers have no live worker thread to drain or
+        // join, and their inherited state mutex may be permanently locked — never
+        // touch it. Dropping the detached JoinHandle afterwards does not join.
+        if self.abandoned.load(Ordering::Acquire) {
+            return;
+        }
         {
             let mut state = self.lock_state();
             state.closed = true;
@@ -496,6 +514,18 @@ mod tests {
 
         writer.close();
         assert_eq!(writer.messages(), vec!["kept"]);
+    }
+
+    #[test]
+    fn abandoned_writer_close_is_a_noop() {
+        let writer = StringWriter::new(0);
+        writer.try_enqueue("x".to_owned()).unwrap();
+        writer.abandon();
+        // close() must not touch the state mutex or join the worker thread.
+        writer.close();
+        let metrics = writer.metrics();
+        assert!(!metrics.closed, "abandoned close must not mark closed");
+        // Drop at end of scope must also be a no-op (detaches, never joins).
     }
 
     #[test]

@@ -178,6 +178,11 @@ impl NativeStringWriter {
         self.writer.resume();
     }
 
+    /// Neutralize after a fork; the caller replaces this with a fresh writer.
+    fn abandon(&self) {
+        self.writer.abandon();
+    }
+
     fn messages(&self) -> Vec<String> {
         self.writer.messages()
     }
