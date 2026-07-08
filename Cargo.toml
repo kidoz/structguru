@@ -17,4 +17,5 @@ repository = "https://github.com/kidoz/structguru"
 pyo3 = { version = "0.29.0" }
 serde = { version = "1.0" }
 serde_json = { version = "1.0" }
+time = { version = "0.3", features = ["macros", "formatting"] }
 structguru-core = { path = "crates/structguru-core" }

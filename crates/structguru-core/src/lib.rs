@@ -3,11 +3,13 @@
 //! This crate is intentionally PyO3-free so the logger engine can grow with
 //! normal Rust unit tests and benchmarks before crossing the Python boundary.
 
+mod clock;
 mod queue;
 mod render;
 mod value;
 mod worker;
 
+pub use clock::now_iso8601;
 pub use queue::{BoundedQueue, QueueMetrics};
 pub use render::{DEFAULT_SENSITIVE_KEYS, render_line};
 pub use value::{Value, ValueStats};
