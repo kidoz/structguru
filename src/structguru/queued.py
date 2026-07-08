@@ -84,6 +84,17 @@ def configure_queued_logging(
         msg = "Pass either handler= or handlers=, not both."
         raise ValueError(msg)
 
+    from structguru._native import is_native_enabled
+
+    if is_native_enabled():
+        import warnings
+
+        warnings.warn(
+            "Native mode already offloads log I/O to a background thread; "
+            "configure_queued_logging() is redundant while it is enabled.",
+            stacklevel=2,
+        )
+
     root = logging.getLogger()
 
     # Already configured — a _PassthroughQueueHandler is present.
