@@ -27,35 +27,29 @@ pub const DEFAULT_SENSITIVE_KEYS: &[&str] = &[
     "private_key",
 ];
 
-fn is_sensitive(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
-    DEFAULT_SENSITIVE_KEYS.iter().any(|candidate| *candidate == lower)
+fn is_sensitive(key: &str, keys: &[String]) -> bool {
+    keys.contains(&key.to_ascii_lowercase())
 }
 
 /// Recursively redact sensitive keys in place (key-based, matches the default
 /// `RedactingProcessor`: no value-pattern matching).
-fn redact(value: &mut Value) {
+fn redact(value: &mut Value, keys: &[String]) {
     match value {
         Value::Map(entries) => {
             for (key, child) in entries.iter_mut() {
-                if is_sensitive(key) {
+                if is_sensitive(key, keys) {
                     *child = Value::String(REDACTED.to_owned());
                 } else {
-                    redact(child);
+                    redact(child, keys);
                 }
             }
         }
         Value::List(items) => {
             for item in items.iter_mut() {
-                redact(item);
+                redact(item, keys);
             }
         }
-        Value::Null
-        | Value::Bool(_)
-        | Value::Int(_)
-        | Value::Float(_)
-        | Value::String(_)
-        | Value::Raw(_) => {}
+        _ => {}
     }
 }
 
@@ -72,9 +66,14 @@ pub fn render_line(
     service: &str,
     message: &str,
     timestamp: &str,
+    sensitive_keys: Option<Vec<String>>,
 ) -> Result<String, serde_json::Error> {
+    let keys: Vec<String> = match sensitive_keys {
+        Some(custom) => custom.into_iter().map(|k| k.to_ascii_lowercase()).collect(),
+        None => DEFAULT_SENSITIVE_KEYS.iter().map(|k| (*k).to_owned()).collect(),
+    };
     let mut root = Value::Map(fields);
-    redact(&mut root);
+    redact(&mut root, &keys);
     let Value::Map(mut entries) = root else {
         unreachable!("root is constructed as a map");
     };
@@ -99,7 +98,7 @@ mod tests {
     #[test]
     fn renders_fields_then_standard_keys_in_order() {
         let fields = vec![("request_id".to_owned(), Value::String("req-1".to_owned()))];
-        let line = render_line(fields, "svc.mod", "warning", "checkout", "hello", "TS").unwrap();
+        let line = render_line(fields, "svc.mod", "warning", "checkout", "hello", "TS", None).unwrap();
 
         assert_eq!(
             line,
@@ -117,10 +116,24 @@ mod tests {
             ),
             ("qty".to_owned(), Value::Int(2)),
         ];
-        let line = render_line(fields, "l", "info", "svc", "m", "TS").unwrap();
+        let line = render_line(fields, "l", "info", "svc", "m", "TS", None).unwrap();
 
         assert!(line.contains(r#""Password":"[REDACTED]""#));
         assert!(line.contains(r#""api_key":"[REDACTED]""#));
         assert!(line.contains(r#""qty":2"#));
+    }
+
+    #[test]
+    fn custom_sensitive_keys_replace_the_defaults() {
+        let fields = vec![
+            ("ssn".to_owned(), Value::String("123".to_owned())),
+            ("secret_sauce".to_owned(), Value::String("x".to_owned())),
+        ];
+        let keys = Some(vec!["secret_sauce".to_owned()]);
+        let line = render_line(fields, "l", "info", "svc", "m", "TS", keys).unwrap();
+
+        // "ssn" is a default key but NOT in the custom set → not redacted.
+        assert!(line.contains(r#""ssn":"123""#));
+        assert!(line.contains(r#""secret_sauce":"[REDACTED]""#));
     }
 }

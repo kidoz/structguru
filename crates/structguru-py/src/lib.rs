@@ -56,7 +56,7 @@ fn _render_json_debug(obj: Bound<'_, PyAny>) -> PyResult<String> {
 
 /// Render one log line: convert + redact `fields`, append the standard keys, emit JSON.
 #[pyfunction]
-#[pyo3(signature = (fields, logger, level, service, message, timestamp=None))]
+#[pyo3(signature = (fields, logger, level, service, message, timestamp=None, sensitive_keys=None))]
 fn render_line(
     fields: &Bound<'_, PyDict>,
     logger: &str,
@@ -64,6 +64,7 @@ fn render_line(
     service: &str,
     message: &str,
     timestamp: Option<&str>,
+    sensitive_keys: Option<Vec<String>>,
 ) -> PyResult<String> {
     let mut entries: Vec<(String, Value)> = Vec::with_capacity(fields.len());
     for (key, value) in fields.iter() {
@@ -82,7 +83,7 @@ fn render_line(
             &generated
         }
     };
-    structguru_core::render_line(entries, logger, level, service, message, timestamp)
+    structguru_core::render_line(entries, logger, level, service, message, timestamp, sensitive_keys)
         .map_err(|err| PyValueError::new_err(err.to_string()))
 }
 
