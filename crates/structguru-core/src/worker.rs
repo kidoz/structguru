@@ -203,6 +203,16 @@ impl StringWriter {
         Self::with_paused(maxsize, true)
     }
 
+    /// Writer that drains to the process's stdout (line-buffered by the OS).
+    pub fn new_stdout(maxsize: usize) -> Self {
+        Self::with_sink(
+            maxsize,
+            false,
+            Box::new(WriteSink::new(std::io::stdout())),
+            MemorySinkHandle::default(),
+        )
+    }
+
     pub fn new_failing(maxsize: usize, fail_after: usize, paused: bool) -> Self {
         let (sink, handle) = FailingSink::new(fail_after);
         Self::with_sink(maxsize, paused, Box::new(sink), handle)
