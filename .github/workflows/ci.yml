@@ -32,3 +32,33 @@ jobs:
 
       - name: Run quality gates
         run: make check
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all --check
+      # --lib only: the extension-module cdylib cannot link a standalone test
+      # binary (no libpython), so lint the library and run core tests separately.
+      - name: Clippy
+        run: cargo clippy --workspace --lib -- -D warnings
+      - name: Core tests
+        run: cargo test -p structguru-core
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - name: Check on MSRV
+        run: cargo check --workspace
