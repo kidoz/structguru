@@ -62,3 +62,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.89.0
       - name: Check on MSRV
         run: cargo check --workspace
+
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: dtolnay/rust-toolchain@stable
+      # Smoke-run only: confirm benchmarks execute (native vs baseline). CI is
+      # too noisy for a strict perf-regression threshold — track numbers locally.
+      - name: Run benchmarks
+        run: make install && make bench
