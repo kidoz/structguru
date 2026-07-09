@@ -153,6 +153,16 @@ def test_native_level_filtering_drops_below_threshold() -> None:
         _native.disable_native()
 
 
+def test_native_reserved_key_collision_matches_structlog() -> None:
+    """User fields colliding with standard keys must not duplicate keys, and must
+    match structlog's precedence (canonical level; user-provided service wins)."""
+    standard = _without_ts(_standard_json({}, "warning", "m", level="bogus", tag="t"))
+    native = _without_ts(_native_json({}, "warning", "m", level="bogus", tag="t"))
+    assert native == standard
+    assert native["level"] == "WARN"
+    assert native["tag"] == "t"
+
+
 def test_native_custom_sensitive_keys() -> None:
     _native.enable_native(service="svc", target="memory", sensitive_keys=["secret_sauce"])
     try:

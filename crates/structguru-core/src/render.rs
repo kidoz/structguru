@@ -84,11 +84,22 @@ pub fn render_line(
     let canonical = normalize_level(level);
     let severity = syslog_severity(&canonical);
 
+    // Guard against duplicate JSON keys when a user field collides with a
+    // standard key. logger/level/severity/timestamp/message are authoritative
+    // (the structlog processors overwrite them), so drop any user field of the
+    // same name. "service" uses setdefault semantics — a user-provided
+    // "service" wins — matching `add_service`.
+    const OVERRIDE_KEYS: [&str; 5] = ["logger", "level", "severity", "timestamp", "message"];
+    let has_service = entries.iter().any(|(key, _)| key == "service");
+    entries.retain(|(key, _)| !OVERRIDE_KEYS.contains(&key.as_str()));
+
     entries.push(("logger".to_owned(), Value::String(logger.to_owned())));
     entries.push(("level".to_owned(), Value::String(canonical)));
     entries.push(("severity".to_owned(), Value::Int(i64::from(severity))));
     entries.push(("timestamp".to_owned(), Value::String(timestamp.to_owned())));
-    entries.push(("service".to_owned(), Value::String(service.to_owned())));
+    if !has_service {
+        entries.push(("service".to_owned(), Value::String(service.to_owned())));
+    }
     entries.push(("message".to_owned(), Value::String(message.to_owned())));
 
     Value::Map(entries).to_json_string()
@@ -130,6 +141,26 @@ mod tests {
         assert!(line.contains(r#""Password":"[REDACTED]""#));
         assert!(line.contains(r#""api_key":"[REDACTED]""#));
         assert!(line.contains(r#""qty":2"#));
+    }
+
+    #[test]
+    fn standard_keys_override_user_fields_except_service() {
+        let fields = vec![
+            ("level".to_owned(), Value::String("bogus".to_owned())),
+            ("service".to_owned(), Value::String("user-svc".to_owned())),
+            ("keep".to_owned(), Value::Int(1)),
+        ];
+        let line = render_line(fields, "l", "warning", "cfg-svc", "m", "TS", None).unwrap();
+
+        // canonical level overrides the user field; user "service" wins (setdefault)
+        assert!(line.contains(r#""level":"WARN""#));
+        assert!(!line.contains("bogus"));
+        assert!(line.contains(r#""service":"user-svc""#));
+        assert!(!line.contains("cfg-svc"));
+        assert!(line.contains(r#""keep":1"#));
+        // each standard key appears exactly once (no duplicate JSON keys)
+        assert_eq!(line.matches(r#""level":"#).count(), 1);
+        assert_eq!(line.matches(r#""service":"#).count(), 1);
     }
 
     #[test]
