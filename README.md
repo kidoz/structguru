@@ -365,7 +365,7 @@ sentry = SentryProcessor(event_level=logging.ERROR, tag_keys=frozenset({"service
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+
 - structlog >= 24.1.0
 - orjson >= 3.9.0
 

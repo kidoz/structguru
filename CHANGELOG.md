@@ -29,6 +29,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **Minimum Python is now 3.11** (dropped 3.10); the `abi3` wheel baseline is
+  `abi3-py311`.
 - Build backend switched to **maturin**; structguru now ships as binary wheels.
   The Rust extension is an **optional accelerator** — the library works without
   it via the standard structlog path, so `enable_native()` is required to use it.
