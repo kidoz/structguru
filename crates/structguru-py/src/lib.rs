@@ -5,7 +5,7 @@ use pyo3::types::{
     PyAny, PyBool, PyDict, PyDictMethods, PyFloat, PyInt, PyList, PyListMethods, PyString, PyTuple,
     PyTupleMethods,
 };
-use structguru_core::{BoundedQueue, StringWriter, Value};
+use structguru_core::{StringWriter, Value};
 
 const MAX_VALUE_DEPTH: usize = 64;
 type ContainerStack = Vec<usize>;
@@ -93,49 +93,6 @@ fn render_line(
         sensitive_keys,
     )
     .map_err(|err| PyValueError::new_err(err.to_string()))
-}
-
-#[pyclass(name = "_NativeStringQueue")]
-struct NativeStringQueue {
-    queue: BoundedQueue<String>,
-}
-
-#[pymethods]
-impl NativeStringQueue {
-    #[new]
-    fn new(maxsize: usize) -> Self {
-        Self {
-            queue: BoundedQueue::new(maxsize),
-        }
-    }
-
-    #[getter]
-    fn maxsize(&self) -> usize {
-        self.queue.maxsize()
-    }
-
-    fn depth(&self) -> usize {
-        self.queue.len()
-    }
-
-    fn try_enqueue(&self, item: &str) -> bool {
-        self.queue.try_enqueue(item.to_owned()).is_ok()
-    }
-
-    fn try_dequeue(&self) -> Option<String> {
-        self.queue.try_dequeue()
-    }
-
-    fn metrics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let metrics = self.queue.metrics();
-        let result = PyDict::new(py);
-        result.set_item("enqueued", metrics.enqueued)?;
-        result.set_item("dropped", metrics.dropped)?;
-        result.set_item("dequeued", metrics.dequeued)?;
-        result.set_item("depth", self.queue.len())?;
-        result.set_item("maxsize", self.queue.maxsize())?;
-        Ok(result)
-    }
 }
 
 #[pyclass(name = "_NativeStringWriter")]
@@ -363,7 +320,6 @@ fn rust_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_conversion_stats, module)?)?;
     module.add_function(wrap_pyfunction!(_render_json_debug, module)?)?;
     module.add_function(wrap_pyfunction!(render_line, module)?)?;
-    module.add_class::<NativeStringQueue>()?;
     module.add_class::<NativeStringWriter>()?;
     Ok(())
 }
