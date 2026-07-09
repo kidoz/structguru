@@ -13,6 +13,7 @@ Combines structlog's powerful structured logging, performance, and processor cha
 - **Sentry-compatible** — preserves `exc_info` on `LogRecord` for Sentry's logging integration
 - **stdlib interop** — intercepts standard `logging` so third-party libraries use the same formatting
 - **RFC 5424 severity codes** included in every log record
+- **Optional Rust accelerator** — opt-in native render + off-thread writer for the JSON path (see [Native mode](#native-mode-experimental-rust-accelerator))
 - **Fully typed** — PEP 561 compliant with strict mypy
 
 **Processors & utilities:**
@@ -255,6 +256,45 @@ from structguru import configure_structlog, configure_queued_logging
 configure_structlog(service="myapp", json_logs=True)
 listener = configure_queued_logging()  # replaces handler with queue pair
 ```
+
+## Native mode (experimental Rust accelerator)
+
+structguru ships an optional Rust extension that renders and enqueues the common
+JSON logging path natively, off-thread. It is **opt-in** and accelerates
+`logger` calls (~4× on a realistic record in local benchmarks); when it is not
+enabled — or the compiled extension is unavailable — everything falls back to the
+standard structlog path.
+
+```python
+import structguru
+
+structguru.enable_native(service="myapp", level="INFO")  # opt in
+structguru.logger.bind(request_id="abc").info("order {id} accepted", id=987)
+# → JSON line written to stdout by a background writer thread
+```
+
+Or enable it from the environment (12-factor):
+
+```bash
+STRUCTGURU_NATIVE=1 LOG_LEVEL=INFO python -m myapp
+```
+
+Public API:
+
+| Symbol | Purpose |
+|--------|---------|
+| `enable_native(*, service="app", maxsize=0, target="stdout", overflow="block", level="INFO", otel=False, sensitive_keys=None)` | Turn native mode on. |
+| `disable_native()` | Turn it off and stop the background writer. |
+| `set_native_level(level)` | Adjust the level threshold at runtime. |
+| `native_metrics()` | Writer counters (enqueued/written/dropped/depth/...). |
+| `native_available()` | Whether the compiled extension is importable. |
+
+Behavior notes:
+
+- **Overflow**: `maxsize=0` is unbounded; a positive `maxsize` uses `overflow="block"` (backpressure, no loss — the default) or `overflow="drop"` (drop-newest + counted, rate-limited warning).
+- **Redaction, level filtering, exceptions, and OpenTelemetry** injection are supported natively; `sensitive_keys` overrides the default redaction keys.
+- **Fork/shutdown safe** — the writer is flushed on exit and respawned in forked children (gunicorn/celery prefork).
+- **Scope (v1)**: native mode renders **JSON to stdout/file**. `stack_info`, console output (`json_logs=False`), custom `logger.add()` sinks, and advanced processors (sampling/rate-limiting/routing/metrics) continue to use the standard structlog path.
 
 ## Framework integrations
 
