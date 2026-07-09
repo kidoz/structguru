@@ -8,7 +8,9 @@ from structguru.config import orjson_serializer
 
 
 def test_native_module_exports_core_version() -> None:
-    assert rust.version() == "0.2.0"
+    import structguru
+
+    assert rust.version() == structguru.__version__
     assert _native.native_available()
 
 

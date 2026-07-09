@@ -18,7 +18,7 @@ from structguru.redaction import DEFAULT_SENSITIVE_KEYS, RedactingProcessor
 from structguru.routing import ConditionalProcessor
 from structguru.sampling import RateLimitingProcessor, SamplingProcessor
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "ConditionalProcessor",
