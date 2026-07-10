@@ -13,8 +13,10 @@ on:
   pull_request:
     paths:
       - "crates/**"
+      - "src/**"
       - "Cargo.*"
       - "pyproject.toml"
+      - "uv.lock"
       - ".github/workflows/wheels.yml"
   workflow_dispatch:
 
@@ -22,8 +24,50 @@ permissions:
   contents: read
 
 jobs:
+  metadata:
+    name: Validate release metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check Python, Rust, and tag versions
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          python - <<'PY'
+          import ast
+          import os
+          import pathlib
+          import tomllib
+
+          pyproject = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          cargo = tomllib.loads(pathlib.Path("Cargo.toml").read_text())
+          module = ast.parse(pathlib.Path("src/structguru/__init__.py").read_text())
+          python_version = next(
+              ast.literal_eval(node.value)
+              for node in module.body
+              if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets)
+          )
+          versions = {
+              "pyproject.toml": pyproject["project"]["version"],
+              "Cargo.toml": cargo["workspace"]["package"]["version"],
+              "structguru.__version__": python_version,
+          }
+          if len(set(versions.values())) != 1:
+              raise SystemExit(f"version mismatch: {versions}")
+          version = next(iter(versions.values()))
+          release_tag = os.environ.get("RELEASE_TAG")
+          if release_tag and release_tag != f"v{version}":
+              raise SystemExit(f"tag {release_tag!r} does not match package version v{version}")
+          print(f"validated version {version}")
+          PY
+
   build:
     name: wheels ${{ matrix.platform.os }}-${{ matrix.platform.target }}
+    needs: metadata
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
@@ -38,6 +82,9 @@ jobs:
           - { runner: windows-latest, os: windows, target: x64,     manylinux: auto }
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -51,12 +98,22 @@ jobs:
           # shell: bash ensures dist/*.whl expands consistently on every runner
           # (Windows defaults to PowerShell, where the glob behaves differently).
           abi3audit --strict --report dist/*.whl
+      - name: Smoke-test host-native wheel
+        if: >-
+          (matrix.platform.os == 'linux' && matrix.platform.target == 'x86_64') ||
+          matrix.platform.os == 'macos' ||
+          matrix.platform.os == 'windows'
+        shell: bash
+        run: |
+          python -m pip install --force-reinstall dist/*.whl
+          python -c "import structguru; assert structguru.native_available(); structguru.logger.info('wheel smoke test'); structguru.disable_native()"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
           path: dist/*.whl
 
   sdist:
+    needs: metadata
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
