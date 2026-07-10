@@ -1,5 +1,5 @@
 site_name: structguru
-site_description: Loguru-like wrapper for structlog
+site_description: Native structured logging with a loguru-style API
 theme:
   name: material
   features:
@@ -37,10 +37,10 @@ nav:
     - Overview: api/index.md
     - Core: api/core.md
     - Configuration: api/config.md
-    - Processors: api/processors.md
+    - Native Processing: api/processors.md
     - Security & Redaction: api/redaction.md
     - Performance & Sampling: api/sampling.md
-    - Advanced Routing: api/routing.md
+    - Level-Aware Processing: api/routing.md
     - Observability (Metrics & OTel):
       - Metrics: api/metrics.md
       - OpenTelemetry: api/otel.md

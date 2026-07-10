@@ -7,6 +7,6 @@ These pages are automatically generated from the source code docstrings using th
 Navigate through the sub-sections to explore the modules:
 
 *   **Core**: The main Loguru-style facade and logger implementation.
-*   **Configuration**: How to set up and configure structlog.
+*   **Configuration**: Native renderer, filters, sinks, and compatibility helpers.
 *   **Processors**: Built-in processors for standardizing and enriching logs.
 *   **Integrations**: Adapters for popular frameworks like ASGI, Celery, Django, Flask, etc.

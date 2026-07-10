@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "structguru"
 version = "1.0.0"
-description = "A loguru-style ergonomic logging library with a Rust accelerator"
+description = "Native structured logging with a loguru-style Python API"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"

@@ -1,6 +1,6 @@
 # structguru
 
-A [loguru](https://github.com/Delgan/loguru)-style ergonomic logging library with a Rust accelerator.
+A native structured logging library with a [loguru](https://github.com/Delgan/loguru)-style API.
 
 Combines a loguru-style API — brace formatting, `bind`, `contextualize`, `opt`, sink management — with a native Rust renderer for maximum performance. Since v1.0, the Rust extension is the default (and only) rendering path; structlog and orjson are no longer dependencies.
 
@@ -10,19 +10,18 @@ Combines a loguru-style API — brace formatting, `bind`, `contextualize`, `opt`
 - **Structured JSON output** in production (rendered natively in Rust for speed)
 - **Pretty colored console** output in development
 - **Context management** — `bind()` for persistent context, `contextualize()` for request-scoped context
-- **Sentry-compatible** — preserves `exc_info` on `LogRecord` for Sentry's logging integration
-- **stdlib interop** — intercepts standard `logging` so third-party libraries use the same formatting
+- **Sentry integration** — redacted breadcrumbs/events with raw exceptions preserved for capture
+- **stdlib interop** — `logger.add()` sinks can also receive third-party `logging` records
 - **RFC 5424 severity codes** included in every log record
-- **Optional Rust accelerator** — opt-in native render + off-thread writer for the JSON path (see [Native mode](#native-mode-experimental-rust-accelerator))
+- **Native Rust runtime** — rendering and output run through the bundled abi3 extension
 - **Fully typed** — PEP 561 compliant with strict mypy
 
-**Processors & utilities:**
+**Native processing:**
 
 - **Redaction** — mask sensitive fields (passwords, tokens) by key name or regex
 - **Sampling** — probabilistic and rate-limited log suppression
 - **Metrics** — extract counters/histograms from log events via callbacks
-- **Routing** — apply processors conditionally by log level range
-- **Exception formatting** — convert `exc_info` to JSON-serializable dicts with full frame chains
+- **Exception formatting** — render `exc_info` as text or a structured frame dictionary
 - **Non-blocking logging** — off-thread I/O via the native Rust writer (default since v1.0)
 - **OpenTelemetry** — automatic `trace_id`/`span_id` injection from current span
 
@@ -49,7 +48,8 @@ pip install structguru[celery,flask,sentry]  # pick what you need
 pip install structguru[all]                   # everything
 ```
 
-Available extras: `otel`, `celery`, `flask`, `django`, `sqlalchemy`, `grpc`, `sentry`, `all`.
+Available extras: `otel`, `celery`, `flask`, `django`, `sqlalchemy`, `grpc`,
+`sentry`, `httpx`, `requests`, `all`.
 
 ## Quick start
 
@@ -61,7 +61,7 @@ configure(service="myapp", level="DEBUG", json=True)
 
 # Use anywhere
 logger.info("Hello {name}", name="world")
-# → {"timestamp": "2025-01-15T12:00:00Z", "service": "myapp", "level": "INFO", "severity": 6, "message": "Hello world", "name": "world"}
+# → {"logger":"...","level":"INFO","severity":6,"timestamp":"...","service":"myapp","message":"Hello world"}
 ```
 
 ## Usage
@@ -138,6 +138,11 @@ logger.remove(handler_id)
 logger.remove()
 ```
 
+All sink forms receive structguru records. They are also registered with the
+stdlib root logger for third-party records. Native delivery uses the bounded
+callable queue and participates in `flush_native()`, reconfiguration, disable,
+fork, and shutdown draining.
+
 ### Environment-based setup
 
 `setup_structlog()` reads from environment variables for easy container deployment:
@@ -169,22 +174,20 @@ configure(service="myapp", json=False)
 # → 2025-01-15 12:00:00 [info     ] Hello world
 ```
 
-## Processors
+## Native processing
 
 ### Redaction
 
 Mask sensitive fields automatically:
 
 ```python
-import re
-from structguru import RedactingProcessor
+from structguru import configure
 
-redactor = RedactingProcessor(
-    sensitive_keys=frozenset({"password", "token", "ssn"}),
-    patterns=[re.compile(r"\b\d{3}-\d{2}-\d{4}\b")],  # SSN pattern
-    replacement="***",
+configure(
+    sensitive_keys=["password", "token", "ssn"],
+    sensitive_patterns=[r"\b\d{3}-\d{2}-\d{4}\b"],
+    pattern_replacement="***",
 )
-# Add to your structlog processor chain
 ```
 
 ### Sampling & rate limiting
@@ -192,13 +195,9 @@ redactor = RedactingProcessor(
 Suppress noisy logs:
 
 ```python
-from structguru import SamplingProcessor, RateLimitingProcessor
+from structguru import configure
 
-# Keep 10% of events
-sampler = SamplingProcessor(rate=0.1)
-
-# Max 5 messages per event name per 60 seconds
-limiter = RateLimitingProcessor(max_count=5, period_seconds=60)
+configure(sample_rate=0.1, rate_limit_max=5, rate_limit_period=60)
 ```
 
 ### Metric extraction
@@ -206,33 +205,23 @@ limiter = RateLimitingProcessor(max_count=5, period_seconds=60)
 Derive metrics from log events:
 
 ```python
-from structguru import MetricProcessor
+from structguru import MetricProcessor, configure
 
 metrics = MetricProcessor()
 metrics.counter("user.login", lambda ed: login_counter.inc())
 metrics.histogram("db.query", "duration_ms", lambda v, ed: query_hist.observe(v))
-```
 
-### Conditional routing
-
-Apply processors only for certain log levels:
-
-```python
-from structguru import ConditionalProcessor
-
-# Only redact ERROR+ logs (skip overhead for DEBUG/INFO)
-routed = ConditionalProcessor(redactor, min_level="ERROR")
+configure(metric_processor=metrics)
 ```
 
 ### Exception formatting
 
-Convert exceptions to JSON-serializable dicts:
+Render exceptions as JSON-serializable dictionaries:
 
 ```python
-from structguru import ExceptionDictProcessor
+from structguru import configure
 
-exc_processor = ExceptionDictProcessor(max_frames=20, include_locals=False)
-# Produces: {"exception": {"type": "ValueError", "message": "...", "frames": [...]}}
+configure(structured_exceptions=True, exception_max_frames=20)
 ```
 
 ### OpenTelemetry correlation
@@ -240,10 +229,9 @@ exc_processor = ExceptionDictProcessor(max_frames=20, include_locals=False)
 Inject trace context into every log event:
 
 ```python
-from structguru import add_otel_context
+from structguru import configure
 
-# Add to processor chain — automatically picks up trace_id, span_id, trace_flags
-# No-op when opentelemetry-api is not installed
+configure(otel=True)  # no-op injection when opentelemetry-api is absent
 ```
 
 ### Non-blocking logging
@@ -251,12 +239,10 @@ from structguru import add_otel_context
 Since v1.0, log I/O is offloaded to a background thread by default — the native
 Rust writer handles all output asynchronously. No configuration needed.
 
-## Native mode (Rust accelerator — default since v1.0)
+## Native runtime
 
-structguru ships a Rust extension that renders and enqueues the common JSON
-logging path natively, off-thread. **Native mode is the default** — it is
-auto-enabled at import time, accelerating `logger` calls (~4× on a realistic
-record in local benchmarks). The native path no longer depends on `orjson`;
+structguru ships a required Rust extension that renders and enqueues logging
+natively, off-thread. It is auto-enabled at import time. The runtime does not depend on `orjson`;
 exotic values (`datetime`, `UUID`, `Enum`, dataclasses) are converted natively
 in Rust.
 
@@ -278,7 +264,7 @@ import structguru
 
 structguru.configure(service="myapp", level="INFO", file_path="/var/log/app.log")
 structguru.logger.bind(request_id="abc").info("order {id} accepted", id=987)
-# → JSON line written to stdout by a background writer thread
+# → JSON line written to /var/log/app.log by a background writer thread
 ```
 
 The default import-time configuration also honors environment variables:
@@ -291,7 +277,7 @@ Public API:
 
 | Symbol | Purpose |
 |--------|---------|
-| `configure(*, service="app", maxsize=0, target="stdout", overflow="block", level="INFO", otel=False, sensitive_keys=None, sensitive_patterns=None, pattern_replacement="[REDACTED]", sample_rate=1.0, sample_max_level=None, rate_limit_max=None, rate_limit_period=60.0, metric_processor=None, sentry_processor=None, structured_exceptions=False, exception_include_locals=False, exception_max_frames=20, exception_max_local_repr=200, json=True, colors=None, file_path=None, file_max_bytes=52428800, file_backup_count=5, also_stdout=False, callable_sinks=None, stream_sink=None)` | Configure or reconfigure logging. |
+| `configure(...)` | Configure rendering, filtering, redaction, and output sinks. See the API reference for the complete signature. |
 | `configure_structlog(...)` | Deprecated compatibility wrapper; use `configure()`. Removed in v2.0. |
 | `disable_native()` | Stop the writer; logging is disabled until `configure()` is called. |
 | `set_native_level(level)` | Adjust the level threshold at runtime. |
@@ -301,17 +287,17 @@ Public API:
 Behavior notes:
 
 - **Overflow**: `maxsize=0` is unbounded; a positive `maxsize` uses `overflow="block"` (backpressure, no loss — the default) or `overflow="drop"` (drop-newest + counted, rate-limited warning).
-- **Redaction, level filtering, exceptions, and OpenTelemetry** injection are supported natively; `sensitive_keys` overrides the default redaction keys. `sensitive_patterns` adds regex value-pattern redaction (applied to every string value). Rust's `regex` engine guarantees linear-time matching (no ReDoS) and therefore rejects backreferences and look-around: an unsupported pattern raises `ValueError` at `configure()` time. Rewrite look-around with a capture group instead: `pattern_replacement` supports group expansion (`$1`, `${name}`; `$$` for a literal `$`), so `(?<=password=)\S+` becomes pattern `(password=)\S+` with `pattern_replacement="$1[REDACTED]"` — same output, linear-time engine.
-- **Sampling & rate limiting** (`sample_rate`, `rate_limit_max`, `rate_limit_period`) are applied as native pre-render filters — dropped records cost zero rendering. `sampled` and `rate_limited` counters are distinct from the transport `dropped` counter. `sample_max_level` restricts sampling to records at or below that level (more severe records always pass) — the native analog of `ConditionalProcessor(SamplingProcessor(...), max_level=...)`.
+- **Redaction, level filtering, exceptions, and OpenTelemetry** injection are supported natively; redaction covers the message and all structured string values before rendering or Sentry export. `sensitive_keys` overrides the default redaction keys. Rust's linear-time regex engine rejects backreferences and look-around with `ValueError` at configuration time.
+- **Sampling & rate limiting** (`sample_rate`, `rate_limit_max`, `rate_limit_period`) are applied as native pre-render filters — dropped records cost zero rendering. `sampled` and `rate_limited` counters are distinct from the transport `dropped` counter. `sample_max_level` restricts sampling to records at or below that level; more severe records always pass.
 - **Metric hooks** (`metric_processor=...`) invoke a structlog-style processor (e.g. `MetricProcessor`) for every *kept* record on the caller's thread, with `(None, method, {"event": message, **fields})`. Dropped records (level/sampling/rate-limit) never reach it; hook errors are swallowed.
 - **Fork/shutdown safe** — the writer is flushed on exit and respawned in forked children (gunicorn/celery prefork).
-- **Structured exceptions** (`structured_exceptions=True`) render the `exception` field as the dict produced by `ExceptionDictProcessor` (type/message/module/frames, optional locals with redaction + repr truncation via the `exception_*` knobs) instead of the formatted traceback string. Extraction stays in Python (frame walking, `repr`); the native renderer serializes the dict.
+- **Structured exceptions** (`structured_exceptions=True`) render `type`, `message`, `module`, and frames as a dictionary, with optional redacted/truncated locals controlled by the `exception_*` options.
 - **`stack_info` is supported natively**: the stack is captured in Python and rendered in the same position as `StackInfoRenderer` (`stack` between `service` and `message`). Unlike the standard path, the stack ends at the *user's* calling frame (structguru-internal frames are skipped, the way structlog skips its own).
 - **Console mode** (`json=False`): renders colored, human-readable lines instead of JSON — structguru's own stable dev format (`<timestamp> [<LEVEL>] <message>  k=v`), with ANSI colors by default on a TTY. Override with `colors=True/False`.
 - **File sinks** (`file_path=...`): write to a rotating file natively. Defaults mirror `RotatingFileHandler` (50 MB, 5 backups); configure via `file_max_bytes`/`file_backup_count`. Set `also_stdout=True` to mirror output to both file and stdout (e.g. container + persistent log).
-- **Callable sinks** (`callable_sinks=[fn, ...]`): invoke `Callable[[str], None]` with each rendered line. They run on a dedicated daemon thread (never the Rust writer, which must not touch the GIL), so a blocking callable cannot deadlock the logging path. Callable errors are swallowed.
-- **Sentry integration** (`sentry_processor=SentryProcessor(...)`): pass the processor via `configure()` instead of a processor chain. It runs per kept record on the caller's thread with the same `require_redaction` guard; the hook injects `REDACTED_MARKER_KEY` when redaction is configured so the guard recognizes native Rust redaction.
-- **Scope**: the native renderer covers JSON and console rendering, file/stdout/callable sinks, and all processors (redaction/sampling/rate-limit/metrics/exceptions/stack_info). `logger.add()`/`logger.remove()` manage stdlib handlers for third-party consumers; native-mode logs bypass stdlib.
+- **Callable sinks** (`callable_sinks=[fn, ...]`): use a bounded queue (`callable_queue_maxsize=1024`). `overflow="block"` provides lossless backpressure; `overflow="drop"` reports `callable_dropped` metrics. Flush and lifecycle operations drain queued calls.
+- **Sentry integration** (`sentry_processor=SentryProcessor(...)`): receives the already-redacted event and raw `exc_info` only for exception capture.
+- **Scope**: the native renderer covers JSON and console rendering, file/stdout/callable sinks, redaction, sampling/rate limiting, metrics, exceptions, and stack information. `logger.add()` sinks receive native and stdlib records.
 
 ## Framework integrations
 
@@ -374,10 +360,13 @@ server = grpc.server(
 ### Sentry
 
 ```python
+import logging
+
+from structguru import configure
 from structguru.integrations.sentry import SentryProcessor
 
-# Add to processor chain — sends ERROR+ as Sentry events, INFO+ as breadcrumbs
 sentry = SentryProcessor(event_level=logging.ERROR, tag_keys=frozenset({"service"}))
+configure(sentry_processor=sentry)
 ```
 
 ## Requirements
@@ -393,7 +382,7 @@ sentry = SentryProcessor(event_level=logging.ERROR, tag_keys=frozenset({"service
 ## Development
 
 ```bash
-uv sync
+uv sync --all-extras
 uv run pytest
 make bench
 uv run ruff check .

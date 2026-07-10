@@ -9,13 +9,13 @@ from fastapi import FastAPI
 from sqlalchemy import Column, Integer, String, create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-from structguru import configure_structlog, logger
+from structguru import configure, logger
 from structguru.integrations.asgi import StructguruMiddleware
 from structguru.integrations.celery import setup_celery_logging
 from structguru.integrations.sqlalchemy import setup_query_logging
 
 # 1. Configure logging
-configure_structlog(service="fullstack-app", json_logs=False)
+configure(service="fullstack-app", json=False)
 
 # 2. Database setup
 Base: Any = declarative_base()

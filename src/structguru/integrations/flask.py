@@ -39,7 +39,7 @@ def setup_flask_logging(
     log_request:
         If ``True``, log a summary line when each request completes.
     logger_name:
-        Name for the structlog logger used by the hooks.
+        Name for the structguru logger used by the hooks.
     """
     log = Logger(name=logger_name)
 

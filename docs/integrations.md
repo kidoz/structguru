@@ -4,7 +4,8 @@ This guide provides in-depth information on how to use `structguru` with various
 
 ## Shared Setup
 
-Most integrations assume you have configured `structlog` first. It's recommended to do this once at your application's entry point:
+The native runtime is configured automatically. Configure it explicitly at the
+application entry point when you need a custom service, level, or sink:
 
 ```python
 from structguru import configure
@@ -98,7 +99,9 @@ setup_celery_logging()
 
 ### Context Propagation
 
-When `propagate_context=True` (the default), selected keys from the producer's `structlog` context are automatically passed via message headers to the worker. You can control which keys are propagated:
+When `propagate_context=True` (the default), selected keys from the producer's
+structguru context are passed via message headers to the worker. You can control
+which keys are propagated:
 
 ```python
 setup_celery_logging(
@@ -221,24 +224,18 @@ server = grpc.server(
 
 ```python
 import logging
-import structlog
+from structguru import configure
 from structguru.integrations.sentry import SentryProcessor
 
-# Important: Place RedactingProcessor before SentryProcessor if used.
 sentry_processor = SentryProcessor(
     event_level=logging.ERROR,       # Logs ERROR+ as Sentry events
     breadcrumb_level=logging.INFO,   # Logs INFO+ as Sentry breadcrumbs
     tag_keys=frozenset({"service"}), # Keys to set as Sentry tags
 )
 
-# Add to your structlog processor chain during configuration
-structlog.configure(
-    processors=[
-        # ... other processors
-        sentry_processor,
-        # ...
-    ]
-)
+configure(sentry_processor=sentry_processor)
 ```
 
-**Note:** If `sentry-sdk` is not installed, the `SentryProcessor` will gracefully act as a no-op. Exceptions in logs (via `exc_info=True` or `logger.exception`) are automatically normalized and sent to Sentry via `capture_exception`.
+The native hook redacts the message and structured fields before Sentry sees the
+event. Raw `exc_info` is retained only for `capture_exception`. If `sentry-sdk`
+is not installed, `SentryProcessor` acts as a no-op.

@@ -1,7 +1,7 @@
 """Django integration for structguru.
 
 Provides a ``LOGGING`` dict generator and a request middleware that binds
-``request_id``, ``method``, ``path``, and ``client_ip`` to structlog's
+``request_id``, ``method``, ``path``, and ``client_ip`` to structguru
 context variables.
 
 Usage in ``settings.py``::
@@ -81,7 +81,7 @@ class StructguruMiddleware:
     """Django middleware for structured request logging.
 
     Binds ``request_id``, ``method``, ``path``, ``client_ip`` (and ``user_id``
-    when available) to structlog context variables for the duration of each
+    when available) to structguru context variables for the duration of each
     request.
     """
 

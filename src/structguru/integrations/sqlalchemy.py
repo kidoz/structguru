@@ -36,7 +36,7 @@ def setup_query_logging(
     log_all:
         If ``True``, log every query regardless of duration.
     logger_name:
-        Name for the structlog logger.
+        Name for the structguru logger.
     """
     from sqlalchemy import event
 

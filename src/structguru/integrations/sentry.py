@@ -1,14 +1,14 @@
-"""Enhanced Sentry integration processor.
+"""Enhanced Sentry event integration.
 
-Provides a structlog processor that sends log events to Sentry as
+Provides a callable event hook that sends log events to Sentry as
 breadcrumbs and/or captured events based on severity.
 
 Usage::
 
     from structguru.integrations.sentry import SentryProcessor
 
-    structlog.configure(
-        processors=[..., SentryProcessor(tag_keys=frozenset({"service"})), ...],
+    structguru.configure(
+        sentry_processor=SentryProcessor(tag_keys=frozenset({"service"})),
     )
 """
 
@@ -38,14 +38,14 @@ _METHOD_TO_LEVEL: dict[str, int] = {
 
 
 class SentryProcessor:
-    """Structlog processor that forwards events to Sentry.
+    """Forward events to Sentry as breadcrumbs and/or captured exceptions.
 
     .. important::
-        Place :class:`~structguru.redaction.RedactingProcessor` **before** this
-        processor.  When *require_redaction* is ``True`` (the default),
+        When *require_redaction* is ``True`` (the default),
         :class:`SentryProcessor` refuses to upload the event dict as Sentry
         extras unless the redaction marker is present — turning the ordering
-        convention into a runtime guard.
+        convention into a runtime guard. The native hook always supplies an
+        already-redacted event and marker.
 
     Parameters
     ----------
@@ -69,9 +69,8 @@ class SentryProcessor:
     .. tip:: Pass this processor via
         ``configure(sentry_processor=SentryProcessor(...))``.
         It runs per kept record on the caller's thread with the same contract.
-        When redaction is configured (``sensitive_keys``/``sensitive_patterns``),
-        the native hook injects ``REDACTED_MARKER_KEY`` so the
-        ``require_redaction`` guard recognizes that redaction already ran in Rust.
+        The native hook supplies an already-redacted event and injects
+        ``REDACTED_MARKER_KEY`` so the guard recognizes the completed redaction.
     """
 
     def __init__(

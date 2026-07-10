@@ -1,6 +1,6 @@
 """gRPC server interceptor for structured logging.
 
-Binds ``grpc_method`` and ``request_id`` (from metadata) to structlog's
+Binds ``grpc_method`` and ``request_id`` (from metadata) to structguru
 context variables for each incoming RPC.
 
 Usage::
@@ -32,7 +32,7 @@ class StructguruInterceptor:
     request_id_key:
         Metadata key to extract a request/correlation ID from.
     logger_name:
-        Name for the structlog logger.
+        Name for the structguru logger.
     """
 
     def __init__(

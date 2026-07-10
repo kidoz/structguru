@@ -4,6 +4,32 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Redaction now covers the rendered message as well as structured fields, and
+  Sentry receives only the already-redacted event while retaining raw
+  `exc_info` solely for exception capture.
+- Callable sinks use a bounded, drainable queue. `flush_native()`, reconfigure,
+  disable, fork, and interpreter shutdown now drain pending callable deliveries;
+  runtime `logger.add()` registrations survive reconfiguration and are removed
+  independently by handler ID.
+- `logger.add()` file, stream, handler, and callable sinks now receive both
+  structguru and stdlib records. `configure_structlog()` no longer duplicates
+  its configured stream to stdout.
+- Rotating files account for existing bytes, close the active handle before
+  rename (including on Windows), and rotate before the threshold-crossing record.
+- Malformed `exc_info` no longer breaks logging, and slots dataclasses serialize
+  through their declared fields.
+
+### Changed
+
+- Wheel CI validates tag/Python/Rust version coherence and smoke-installs
+  host-native wheel artifacts before publication.
+- Removed the obsolete public processor-chain helpers and modules; native
+  `configure()` options are the sole processing API in v1.
+
 ## [1.0.0] - 2026-07-10
 
 ### Changed (breaking)
@@ -38,8 +64,6 @@ All notable changes to this project are documented here. The format is based on
   for the golden parity suite, which compares native output against the standard
   structlog/orjson path. Production code has no dependency on either.
 
-## [Unreleased]
-
 ### Added
 
 - **Native exotic-value conversion (orjson-free native path).** The native Rust
@@ -50,9 +74,9 @@ All notable changes to this project are documented here. The format is based on
   raise `TypeError`, matching the orjson rejection contract. The `Value::Raw`
   reverse path uses `json.loads` (stdlib) instead of `orjson.loads`.
 - **Native mode is now the default.** The Rust renderer is auto-enabled at import
-  time (no `configure()` call needed). `configure_structlog()` opts back into
-  the standard structlog path (disabling native, so output lands on the configured
-  stream). Set `STRUCTGURU_LEGACY=1` to opt out of auto-enable entirely. The
+  time (no `configure()` call needed). `configure_structlog()` configures the
+  native path with synchronous output to its selected stream. Set
+  `STRUCTGURU_LEGACY=1` to opt out of auto-enable entirely. The
   `STRUCTGURU_NATIVE` env var is now a no-op (deprecated).
 - **Native Sentry integration.** `configure(sentry_processor=...)` invokes a
   structlog-style processor (e.g. `SentryProcessor`) for every kept record on
@@ -68,9 +92,9 @@ All notable changes to this project are documented here. The format is based on
   to both file and stdout.
 - **Native callable sinks.** `configure(callable_sinks=[fn, ...])` invokes
   `Callable[[str], None]` with each rendered line. They run on a dedicated
-  daemon thread (never the Rust writer, which must not touch the GIL), so a
-  blocking callable cannot deadlock the logging path. Callable errors are
-  swallowed.
+  daemon thread through a bounded queue. The configured overflow policy provides
+  backpressure or counted dropping; flush and lifecycle operations drain pending
+  deliveries. Callable errors are swallowed.
 - **Native console renderer.** `configure(json=False)` renders colored,
   human-readable lines instead of JSON — structguru's own stable dev format
   (`<timestamp> [<LEVEL>] <message>  k=v`), with ANSI colors by default on a
@@ -115,11 +139,9 @@ All notable changes to this project are documented here. The format is based on
 - **`configure()` is the logging configuration API.** It replaces the
   unreleased native-configuration name. `configure_structlog()` delegates to
   `configure()`, emits `DeprecationWarning`, and will be removed in v2.0.
-- **`configure_queued_logging()` is deprecated.** It emits a `DeprecationWarning`
-  and will be removed in 1.0. Native mode (`configure()`) already offloads
-  log I/O to a background thread, making the `QueueHandler`/`QueueListener`
-  wrapper redundant. Use `configure(file_path=...)` or
-  `configure(callable_sinks=[...])` for off-thread output.
+- **`configure_queued_logging()` was removed.** Native mode (`configure()`)
+  already offloads log I/O to a background thread. Use
+  `configure(file_path=...)` or `configure(callable_sinks=[...])`.
 - **Unsupported `sensitive_patterns` now raise `ValueError` at
   `configure()`** instead of emitting a `UserWarning` and silently leaving
   native mode disabled. Rust's `regex` engine guarantees linear-time matching
@@ -144,8 +166,7 @@ All notable changes to this project are documented here. The format is based on
   key-based redaction), mirroring `RedactingProcessor(patterns=...)` on the
   native fast path. Patterns are compiled once at enable time into a reusable
   `RedactionConfig`; Rust's `regex` engine does not support backreferences or
-  look-around, so an unsupported pattern emits a `UserWarning` and falls back to
-  the standard structlog path.
+  look-around, so an unsupported pattern raises `ValueError` at configuration time.
 - **Native sampling & rate limiting.** `configure(sample_rate=...)`,
   `rate_limit_max=...`, and `rate_limit_period=...` add pre-render filters
   (implemented in Rust) so dropped records cost zero rendering. Drop counters

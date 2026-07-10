@@ -2,7 +2,7 @@
 
 Works with any ASGI framework (FastAPI, Starlette, Litestar, etc.).
 Binds ``request_id``, ``method``, ``path``, and ``client_ip`` to
-structlog's context variables for every HTTP/WebSocket request.
+structguru context variables for every HTTP/WebSocket request.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ class StructguruMiddleware:
     request_id_header:
         Header name to read an existing request ID from (case-insensitive).
     logger_name:
-        Name for the structlog logger used by this middleware.
+        Name for the structguru logger used by this middleware.
     log_request:
         If ``True``, log a summary line when each request completes.
     extract_headers:
