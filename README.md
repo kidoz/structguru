@@ -23,7 +23,7 @@ Combines a loguru-style API — brace formatting, `bind`, `contextualize`, `opt`
 - **Metrics** — extract counters/histograms from log events via callbacks
 - **Routing** — apply processors conditionally by log level range
 - **Exception formatting** — convert `exc_info` to JSON-serializable dicts with full frame chains
-- **Non-blocking logging** — offload I/O to a background thread with `configure_queued_logging()`
+- **Non-blocking logging** — off-thread I/O via the native Rust writer (default since v1.0)
 - **OpenTelemetry** — automatic `trace_id`/`span_id` injection from current span
 
 **Framework integrations** (optional dependencies):
@@ -248,16 +248,10 @@ from structguru import add_otel_context
 
 ### Non-blocking logging
 
-Offload log I/O to a background thread:
+Since v1.0, log I/O is offloaded to a background thread by default — the native
+Rust writer handles all output asynchronously. No configuration needed.
 
-```python
-from structguru import configure_structlog, configure_queued_logging
-
-configure_structlog(service="myapp", json_logs=True)
-listener = configure_queued_logging()  # replaces handler with queue pair
-```
-
-## Native mode (Rust accelerator — default since v0.4.0)
+## Native mode (Rust accelerator — default since v1.0)
 
 structguru ships a Rust extension that renders and enqueues the common JSON
 logging path natively, off-thread. **Native mode is the default** — it is
