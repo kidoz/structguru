@@ -5,9 +5,8 @@ use pyo3::types::{
     PyAny, PyBool, PyDict, PyDictMethods, PyFloat, PyInt, PyList, PyListMethods, PyString, PyTuple,
     PyTupleMethods,
 };
-use regex::Regex;
 use std::time::Duration;
-use structguru_core::{Pipeline, StringWriter, Value};
+use structguru_core::{Pipeline, RedactionPattern, StringWriter, Value};
 
 const MAX_VALUE_DEPTH: usize = 64;
 type ContainerStack = Vec<usize>;
@@ -59,13 +58,15 @@ fn _render_json_debug(obj: Bound<'_, PyAny>) -> PyResult<String> {
 /// Validate regex pattern strings for native value-pattern redaction.
 ///
 /// Compiles each pattern with Rust's `regex` engine and returns the count.
-/// Raises `ValueError` on the first pattern that fails to compile (e.g.
-/// backreferences, look-around) so the Python bridge can fall back to the
-/// standard structlog path with a warning.
+/// With `allow_backtracking`, patterns the linear engine rejects (look-around,
+/// backreferences) are compiled with the bounded backtracking engine instead.
+/// Raises `ValueError` on the first pattern that fails to compile so
+/// `configure()` can fail loudly at setup time.
 #[pyfunction]
-fn validate_patterns(patterns: Vec<String>) -> PyResult<usize> {
+#[pyo3(signature = (patterns, allow_backtracking=false))]
+fn validate_patterns(patterns: Vec<String>, allow_backtracking: bool) -> PyResult<usize> {
     for p in &patterns {
-        Regex::new(p).map_err(|err| PyValueError::new_err(err.to_string()))?;
+        RedactionPattern::compile(p, allow_backtracking).map_err(PyValueError::new_err)?;
     }
     Ok(patterns.len())
 }
@@ -107,12 +108,12 @@ fn render_line(
             &generated
         }
     };
-    let compiled_patterns: Vec<Regex> = match &sensitive_patterns {
+    let compiled_patterns: Vec<RedactionPattern> = match &sensitive_patterns {
         Some(patterns) => patterns
             .iter()
-            .map(|p| Regex::new(p))
+            .map(|p| RedactionPattern::linear(p))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| PyValueError::new_err(err.to_string()))?,
+            .map_err(PyValueError::new_err)?,
         None => Vec::new(),
     };
     let patterns_ref = if compiled_patterns.is_empty() {
@@ -142,20 +143,24 @@ fn render_line(
 /// `ValueError` so the Python bridge can fall back to the standard path.
 #[pyclass(name = "RedactionConfig")]
 struct RedactionConfig {
-    patterns: Vec<Regex>,
+    patterns: Vec<RedactionPattern>,
     replacement: String,
 }
 
 #[pymethods]
 impl RedactionConfig {
     #[new]
-    #[pyo3(signature = (patterns, replacement=None))]
-    fn new(patterns: Vec<String>, replacement: Option<String>) -> PyResult<Self> {
+    #[pyo3(signature = (patterns, replacement=None, allow_backtracking=false))]
+    fn new(
+        patterns: Vec<String>,
+        replacement: Option<String>,
+        allow_backtracking: bool,
+    ) -> PyResult<Self> {
         let compiled = patterns
-            .into_iter()
-            .map(|p| Regex::new(&p))
+            .iter()
+            .map(|p| RedactionPattern::compile(p, allow_backtracking))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+            .map_err(PyValueError::new_err)?;
         Ok(Self {
             patterns: compiled,
             replacement: replacement.unwrap_or_else(|| "[REDACTED]".to_owned()),
@@ -259,12 +264,12 @@ fn render_line_console(
             &generated
         }
     };
-    let compiled: Vec<Regex> = match &sensitive_patterns {
+    let compiled: Vec<RedactionPattern> = match &sensitive_patterns {
         Some(patterns) => patterns
             .iter()
-            .map(|p| Regex::new(p))
+            .map(|p| RedactionPattern::linear(p))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| PyValueError::new_err(err.to_string()))?,
+            .map_err(PyValueError::new_err)?,
         None => Vec::new(),
     };
     let patterns_ref = if compiled.is_empty() {

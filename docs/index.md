@@ -51,6 +51,12 @@ configure(
 Key and pattern redaction covers the message and structured fields before data
 is rendered, queued, or forwarded to Sentry.
 
+Patterns run on Rust's linear-time regex engine, which rejects look-around and
+backreferences at `configure()` time; rewrite them as capture groups with
+`pattern_replacement="$1[REDACTED]"`, or pass `allow_backtracking_patterns=True`
+to opt those patterns into a bounded backtracking engine (fail-closed on
+backtrack-limit overruns).
+
 ## Sinks
 
 ```python

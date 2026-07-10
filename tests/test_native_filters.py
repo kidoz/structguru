@@ -178,6 +178,90 @@ def test_unsupported_pattern_raises_at_setup(pattern: str) -> None:
     assert not _native.is_native_enabled()
 
 
+def test_unsupported_pattern_error_mentions_backtracking_opt_in() -> None:
+    with pytest.raises(ValueError, match="allow_backtracking_patterns=True"):
+        _native.configure(
+            service="svc",
+            target="memory",
+            level="DEBUG",
+            sensitive_patterns=[r"(?<=foo)bar"],
+        )
+    assert not _native.is_native_enabled()
+
+
+@pytest.mark.parametrize(
+    "pattern,body,expected",
+    [
+        pytest.param(
+            r"(?<=password=)\S+",
+            "login with password=hunter2 ok",
+            "login with password=[REDACTED] ok",
+            id="lookbehind",
+        ),
+        pytest.param(
+            r"foo(?!bar)\w*",
+            "foobar and foobaz",
+            "foobar and [REDACTED]",
+            id="negative-lookahead",
+        ),
+        pytest.param(
+            r"\b(\w+) \1\b",
+            "dup dup unique",
+            "[REDACTED] unique",
+            id="backreference",
+        ),
+    ],
+)
+def test_backtracking_opt_in_redacts_lookaround_and_backreferences(
+    pattern: str, body: str, expected: str
+) -> None:
+    """`allow_backtracking_patterns=True` routes patterns the linear engine
+    rejects through a bounded backtracking engine, so they work as written
+    (at the cost of the linear-time guarantee for those patterns)."""
+    _native.configure(
+        service="svc",
+        target="memory",
+        level="DEBUG",
+        sensitive_patterns=[pattern],
+        allow_backtracking_patterns=True,
+    )
+    try:
+        structguru.logger.info("m", body=body)
+        record = _drain_last()
+        assert record["body"] == expected
+    finally:
+        _native.disable_native()
+
+
+def test_backtracking_opt_in_redacts_message() -> None:
+    _native.configure(
+        service="svc",
+        target="memory",
+        level="DEBUG",
+        sensitive_patterns=[r"(?<=secret=)\w+"],
+        allow_backtracking_patterns=True,
+    )
+    try:
+        structguru.logger.info("token secret=abc")
+        record = _drain_last()
+    finally:
+        _native.disable_native()
+
+    assert record["message"] == "token secret=[REDACTED]"
+
+
+def test_invalid_pattern_raises_even_with_backtracking_opt_in() -> None:
+    with pytest.raises(ValueError, match="invalid sensitive_patterns regex"):
+        _native.configure(
+            service="svc",
+            target="memory",
+            level="DEBUG",
+            sensitive_patterns=[r"(unclosed"],
+            allow_backtracking_patterns=True,
+        )
+    assert not _native.is_native_enabled()
+
+
 # -- sampling ---------------------------------------------------------------
 
 

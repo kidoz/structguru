@@ -29,6 +29,9 @@ time = { version = "0.3", features = ["macros", "formatting"] }
 # `unicode` is on by default in the regex crate; keep it so character classes
 # match Python's `re` defaults (which are Unicode-aware on `str`).
 regex = { version = "1", default-features = false, features = ["std", "unicode"] }
+# Backtracking engine for opt-in look-around/backreference redaction patterns
+# (`allow_backtracking_patterns=True`); never used unless explicitly requested.
+fancy-regex = { version = "0.18", default-features = false, features = ["std", "unicode"] }
 # Only `rand::random` is used (sampling filter); `thread_rng` pulls in the
 # std/sys_rng machinery it needs.
 rand = { version = "0.10", default-features = false, features = [

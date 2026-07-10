@@ -190,6 +190,23 @@ configure(
 )
 ```
 
+Patterns run on Rust's linear-time regex engine (no ReDoS), which rejects
+look-around and backreferences at `configure()` time. Most look-behinds rewrite
+as capture groups — `(?<=password=)\S+` becomes `password=(\S+)` with
+`pattern_replacement="$1[REDACTED]"`. For patterns that can't be rewritten,
+`allow_backtracking_patterns=True` opts them into a bounded backtracking
+engine: look-around and backreferences then work as written, at the cost of
+the linear-time guarantee for those patterns. If a value ever exceeds the
+backtrack limit, it is redacted entirely (fail-closed) rather than emitted
+unchecked.
+
+```python
+configure(
+    sensitive_patterns=[r"(?<=password=)\S+"],
+    allow_backtracking_patterns=True,
+)
+```
+
 ### Sampling & rate limiting
 
 Suppress noisy logs:

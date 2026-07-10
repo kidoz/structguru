@@ -117,9 +117,14 @@ class _RustModule(Protocol):
         stack: str | None = None,
     ) -> str: ...
 
-    def validate_patterns(self, patterns: list[str]) -> int: ...
+    def validate_patterns(self, patterns: list[str], allow_backtracking: bool = False) -> int: ...
 
-    def RedactionConfig(self, patterns: list[str], replacement: str | None = None) -> Any: ...
+    def RedactionConfig(
+        self,
+        patterns: list[str],
+        replacement: str | None = None,
+        allow_backtracking: bool = False,
+    ) -> Any: ...
 
     def NativeFilter(
         self,
@@ -413,6 +418,7 @@ def configure(
     sensitive_keys: list[str] | None = None,
     sensitive_patterns: list[str] | None = None,
     pattern_replacement: str = "[REDACTED]",
+    allow_backtracking_patterns: bool = False,
     sample_rate: float = 1.0,
     sample_max_level: str | None = None,
     rate_limit_max: int | None = None,
@@ -452,6 +458,15 @@ def configure(
     ``$``), so look-behind-style patterns can be rewritten to preserve their
     prefix — e.g. pattern ``password=(\\S+)`` with replacement
     ``password=[REDACTED]``.
+
+    ``allow_backtracking_patterns=True`` opts patterns the linear engine
+    rejects into a bounded backtracking engine instead, so look-around and
+    backreferences work as written. The linear-time (no-ReDoS) guarantee no
+    longer applies to those patterns; evaluation is capped by a backtrack
+    limit, and a string whose evaluation exceeds it is redacted *entirely*
+    (fail-closed) rather than emitted unchecked. Patterns the linear engine
+    accepts still use it — only the exotic ones pay the backtracking cost.
+    Prefer the capture-group rewrite where possible.
 
     ``sample_rate`` (0.0–1.0) and ``rate_limit_max``/``rate_limit_period`` add
     pre-render filters: dropped records cost zero rendering. ``sampled`` and
@@ -530,18 +545,27 @@ def configure(
     # `regex` guarantees linear-time matching and therefore rejects
     # backreferences and look-around; fail loudly at setup time — redaction
     # that silently differs from what was configured is worse than an error.
+    # `allow_backtracking_patterns` routes rejected patterns to the bounded
+    # backtracking engine instead (validated the same way).
     if sensitive_patterns:
         try:
-            _RUST.validate_patterns(list(sensitive_patterns))
+            _RUST.validate_patterns(list(sensitive_patterns), allow_backtracking_patterns)
         except ValueError as exc:
-            msg = (
-                f"unsupported sensitive_patterns regex ({exc}). Rust's regex engine "
-                "guarantees linear-time matching and does not support backreferences "
-                "or look-around. Rewrite the pattern with a capture group instead, "
-                "e.g. lookbehind '(?<=password=)\\S+' becomes 'password=(\\S+)'."
-            )
+            if allow_backtracking_patterns:
+                msg = f"invalid sensitive_patterns regex ({exc})."
+            else:
+                msg = (
+                    f"unsupported sensitive_patterns regex ({exc}). Rust's regex engine "
+                    "guarantees linear-time matching and does not support backreferences "
+                    "or look-around. Rewrite the pattern with a capture group instead, "
+                    "e.g. lookbehind '(?<=password=)\\S+' becomes 'password=(\\S+)', or "
+                    "pass allow_backtracking_patterns=True to opt this pattern into a "
+                    "bounded backtracking engine (loses the linear-time guarantee)."
+                )
             raise ValueError(msg) from exc
-        new_config = _RUST.RedactionConfig(list(sensitive_patterns), pattern_replacement)
+        new_config = _RUST.RedactionConfig(
+            list(sensitive_patterns), pattern_replacement, allow_backtracking_patterns
+        )
         new_patterns: list[str] | None = list(sensitive_patterns)
     else:
         new_config = None

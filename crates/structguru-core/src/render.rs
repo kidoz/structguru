@@ -10,6 +10,87 @@ use regex::Regex;
 
 const REDACTED: &str = "[REDACTED]";
 
+/// Maximum backtracking steps for an opt-in backtracking pattern before the
+/// engine gives up on the current string. Exceeding it fails closed (see
+/// [`RedactionPattern::replace_all`]), so a pathological value cannot hang the
+/// render path. Mirrors fancy-regex's own default.
+const BACKTRACK_LIMIT: usize = 1_000_000;
+
+/// A compiled value-redaction pattern.
+///
+/// `Linear` wraps the default `regex` engine, which guarantees linear-time
+/// matching (no ReDoS) but rejects look-around and backreferences.
+/// `Backtracking` wraps `fancy-regex` for those constructs; it is only
+/// constructed when the caller explicitly opts in
+/// (`allow_backtracking_patterns=True` in Python) and carries
+/// [`BACKTRACK_LIMIT`] so evaluation is bounded.
+pub enum RedactionPattern {
+    Linear(Regex),
+    Backtracking(Box<fancy_regex::Regex>),
+}
+
+impl RedactionPattern {
+    /// Compile with the linear-time engine only.
+    pub fn linear(pattern: &str) -> Result<Self, String> {
+        Regex::new(pattern)
+            .map(Self::Linear)
+            .map_err(|err| err.to_string())
+    }
+
+    /// Compile with the linear-time engine, falling back to the backtracking
+    /// engine (look-around, backreferences) when `allow_backtracking` is set.
+    pub fn compile(pattern: &str, allow_backtracking: bool) -> Result<Self, String> {
+        match Regex::new(pattern) {
+            Ok(re) => Ok(Self::Linear(re)),
+            Err(_) if allow_backtracking => Self::backtracking_with_limit(pattern, BACKTRACK_LIMIT),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    fn backtracking_with_limit(pattern: &str, limit: usize) -> Result<Self, String> {
+        fancy_regex::RegexBuilder::new(pattern)
+            .backtrack_limit(limit)
+            .build()
+            .map(|re| Self::Backtracking(Box::new(re)))
+            .map_err(|err| err.to_string())
+    }
+
+    /// `replace_all` with the regex crate's group expansion in `replacement`
+    /// (`$1`, `${name}`; `$$` for a literal `$`).
+    ///
+    /// A backtracking pattern whose evaluation errors at match time (backtrack
+    /// limit exceeded) fails CLOSED: the entire string becomes `[REDACTED]`.
+    /// Emitting a value the configured pattern could not check risks leaking
+    /// exactly the data redaction exists to mask.
+    fn replace_all(&self, text: &str, replacement: &str) -> String {
+        match self {
+            Self::Linear(re) => re.replace_all(text, replacement).into_owned(),
+            Self::Backtracking(re) => replace_all_backtracking(re, text, replacement)
+                .unwrap_or_else(|| REDACTED.to_owned()),
+        }
+    }
+}
+
+/// fancy-regex's `replace_all` panics on evaluation errors; iterate matches
+/// manually so a backtrack-limit error surfaces as `None` instead.
+fn replace_all_backtracking(
+    re: &fancy_regex::Regex,
+    text: &str,
+    replacement: &str,
+) -> Option<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for caps in re.captures_iter(text) {
+        let caps = caps.ok()?;
+        let matched = caps.get(0).expect("capture group 0 is the whole match");
+        out.push_str(&text[last..matched.start()]);
+        fancy_regex::Expander::default().append_expansion(&mut out, replacement, &caps);
+        last = matched.end();
+    }
+    out.push_str(&text[last..]);
+    Some(out)
+}
+
 /// Internal marker set by `RedactingProcessor`, mirrored from
 /// `structguru.redaction.REDACTED_MARKER_KEY`. `strip_redaction_marker`
 /// removes it before rendering on the standard path; drop it here too so a
@@ -78,7 +159,7 @@ fn redact(value: &mut Value, keys: &[impl AsRef<str>]) {
 /// `$$` for a literal `$`), so look-behind-style patterns can be rewritten as
 /// capture groups that preserve their prefix, e.g. pattern `password=(\S+)`
 /// with replacement `password=[REDACTED]`.
-fn redact_patterns(value: &mut Value, patterns: &[Regex], replacement: &str) {
+fn redact_patterns(value: &mut Value, patterns: &[RedactionPattern], replacement: &str) {
     match value {
         Value::Map(entries) => {
             for (_, child) in entries.iter_mut() {
@@ -93,7 +174,7 @@ fn redact_patterns(value: &mut Value, patterns: &[Regex], replacement: &str) {
         Value::String(s) if !patterns.is_empty() => {
             let mut current = std::mem::take(s);
             for re in patterns {
-                current = re.replace_all(&current, replacement).into_owned();
+                current = re.replace_all(&current, replacement);
             }
             *s = current;
         }
@@ -104,7 +185,7 @@ fn redact_patterns(value: &mut Value, patterns: &[Regex], replacement: &str) {
 fn redact_message(
     message: &str,
     sensitive_keys: Option<&Vec<String>>,
-    sensitive_patterns: Option<&[Regex]>,
+    sensitive_patterns: Option<&[RedactionPattern]>,
     pattern_replacement: Option<&str>,
 ) -> String {
     let message_is_sensitive = match sensitive_keys {
@@ -153,7 +234,7 @@ pub fn render_line(
     timestamp: &str,
     stack: Option<&str>,
     sensitive_keys: Option<Vec<String>>,
-    sensitive_patterns: Option<&[Regex]>,
+    sensitive_patterns: Option<&[RedactionPattern]>,
     pattern_replacement: Option<&str>,
 ) -> Result<String, serde_json::Error> {
     let redacted_message = redact_message(
@@ -279,7 +360,7 @@ pub fn render_line_console(
     colors: bool,
     timestamp: &str,
     sensitive_keys: Option<Vec<String>>,
-    sensitive_patterns: Option<&[Regex]>,
+    sensitive_patterns: Option<&[RedactionPattern]>,
     pattern_replacement: Option<&str>,
     stack: Option<&str>,
 ) -> String {
@@ -491,7 +572,8 @@ mod tests {
 
     #[test]
     fn pattern_redacts_matching_substring_in_string_value() {
-        let email = Regex::new(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}").unwrap();
+        let email =
+            RedactionPattern::linear(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}").unwrap();
         let patterns = vec![email];
         let fields = vec![(
             "msg".to_owned(),
@@ -517,7 +599,7 @@ mod tests {
 
     #[test]
     fn pattern_redacts_matching_substring_in_message() {
-        let patterns = vec![Regex::new(r"secret=\w+").unwrap()];
+        let patterns = vec![RedactionPattern::linear(r"secret=\w+").unwrap()];
         let line = render_line(
             vec![],
             "l",
@@ -558,7 +640,7 @@ mod tests {
 
     #[test]
     fn pattern_redaction_descends_into_nested_maps_and_lists() {
-        let ssn = Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").unwrap();
+        let ssn = RedactionPattern::linear(r"\b\d{3}-\d{2}-\d{4}\b").unwrap();
         let patterns = vec![ssn];
         let fields = vec![
             (
@@ -598,7 +680,7 @@ mod tests {
 
     #[test]
     fn pattern_redaction_skips_non_string_leaves_and_raw() {
-        let any = Regex::new(r".+").unwrap();
+        let any = RedactionPattern::linear(r".+").unwrap();
         let patterns = vec![any];
         let fields = vec![
             ("count".to_owned(), Value::Int(42)),
@@ -633,8 +715,8 @@ mod tests {
     fn multiple_patterns_apply_in_order() {
         // Two patterns: first replaces emails, second replaces the word "secret".
         let patterns = vec![
-            Regex::new(r"a@b\.com").unwrap(),
-            Regex::new(r"secret").unwrap(),
+            RedactionPattern::linear(r"a@b\.com").unwrap(),
+            RedactionPattern::linear(r"secret").unwrap(),
         ];
         let fields = vec![(
             "msg".to_owned(),
@@ -661,7 +743,7 @@ mod tests {
     fn pattern_replacement_expands_capture_groups() {
         // Lookbehind rewrite: `(?<=password=)\S+` becomes `password=(\S+)` with
         // a replacement that re-emits the prefix.
-        let patterns = vec![Regex::new(r"(password=)\S+").unwrap()];
+        let patterns = vec![RedactionPattern::linear(r"(password=)\S+").unwrap()];
         let fields = vec![(
             "msg".to_owned(),
             Value::String("login with password=hunter2 ok".to_owned()),
@@ -685,9 +767,69 @@ mod tests {
     }
 
     #[test]
+    fn compile_rejects_lookbehind_without_opt_in() {
+        assert!(RedactionPattern::compile(r"(?<=password=)\S+", false).is_err());
+        assert!(RedactionPattern::compile(r"(?<=password=)\S+", true).is_ok());
+    }
+
+    #[test]
+    fn compile_prefers_linear_engine_when_pattern_allows() {
+        // No fancy constructs → the linear engine handles it even with opt-in.
+        let pattern = RedactionPattern::compile(r"secret=\w+", true).unwrap();
+        assert!(matches!(pattern, RedactionPattern::Linear(_)));
+    }
+
+    #[test]
+    fn backtracking_pattern_supports_lookbehind() {
+        let patterns = vec![RedactionPattern::compile(r"(?<=password=)\S+", true).unwrap()];
+        let fields = vec![(
+            "msg".to_owned(),
+            Value::String("login with password=hunter2 ok".to_owned()),
+        )];
+        let line = render_line(
+            fields,
+            "l",
+            "info",
+            "svc",
+            "m",
+            "TS",
+            None,
+            None,
+            Some(&patterns),
+            None,
+        )
+        .unwrap();
+
+        assert!(line.contains(r#""msg":"login with password=[REDACTED] ok""#));
+        assert!(!line.contains("hunter2"));
+    }
+
+    #[test]
+    fn backtracking_pattern_supports_backreferences_and_expansion() {
+        let pattern = RedactionPattern::compile(r"\b(\w+) \1\b", true).unwrap();
+        assert!(matches!(pattern, RedactionPattern::Backtracking(_)));
+        assert_eq!(
+            pattern.replace_all("dup dup unique", "$1 [REDACTED]"),
+            "dup [REDACTED] unique",
+        );
+    }
+
+    #[test]
+    fn backtracking_evaluation_failure_fails_closed() {
+        // The backreference forces the backtracking engine; a limit of 1 makes
+        // evaluation exceed it, so the entire string must be redacted rather
+        // than emitted unchecked.
+        let pattern = RedactionPattern::backtracking_with_limit(r"(a+)+\1$", 1).unwrap();
+        assert_eq!(
+            pattern.replace_all("aaaaaaaaaaaaaaaaaaaaaaaaaaaa!", "[X]"),
+            REDACTED,
+        );
+    }
+
+    #[test]
     fn key_redaction_and_pattern_redaction_combine() {
         // Key-based redaction masks "token"; pattern-based masks the email in "msg".
-        let patterns = vec![Regex::new(r"leak@x\.io").unwrap()];
+        let patterns = vec![RedactionPattern::linear(r"leak@x\.io").unwrap()];
         let fields = vec![
             ("token".to_owned(), Value::String("abc".to_owned())),
             (
@@ -774,7 +916,7 @@ mod tests {
 
     #[test]
     fn console_redacts_sensitive_patterns_in_message() {
-        let patterns = vec![Regex::new(r"secret=\w+").unwrap()];
+        let patterns = vec![RedactionPattern::linear(r"secret=\w+").unwrap()];
         let line = render_line_console(
             vec![],
             "l",
