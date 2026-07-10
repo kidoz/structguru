@@ -22,7 +22,7 @@ Combines structlog's powerful structured logging, performance, and processor cha
 - **Metrics** — extract counters/histograms from log events via callbacks
 - **Routing** — apply processors conditionally by log level range
 - **Exception formatting** — convert `exc_info` to JSON-serializable dicts with full frame chains
-- **Non-blocking logging** — offload I/O to a background thread with `configure_queued_logging()`
+- **Non-blocking logging** — off-thread I/O via the native Rust writer (default since v1.0)
 - **OpenTelemetry** — automatic `trace_id`/`span_id` injection from current span
 
 **Framework integrations** (optional dependencies):
@@ -247,14 +247,8 @@ from structguru import add_otel_context
 
 ### Non-blocking logging
 
-Offload log I/O to a background thread:
-
-```python
-from structguru import configure_structlog, configure_queued_logging
-
-configure_structlog(service="myapp", json_logs=True)
-listener = configure_queued_logging()  # replaces handler with queue pair
-```
+Since v1.0, log I/O is offloaded to a background thread by default — the native
+Rust writer handles all output asynchronously. No configuration needed.
 
 ## Framework integrations
 

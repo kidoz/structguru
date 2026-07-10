@@ -37,37 +37,13 @@ session = get_logging_session()
 session.get("https://example.com")
 ```
 
-## Standard Library Interception
+## Standard Library Integration
 
-After `configure_structlog()` (or `setup_structlog()`), standard-library `logging`
-records that reach the **root** logger are already rendered through structguru's
-pipeline — you don't need to do anything for the common case.
-
-`InterceptHandler` is for libraries that configure their **own** handlers and set
-`propagate=False`, so their records never reach the root logger (a common pattern
-in `uvicorn`, `gunicorn`, etc.). Attach it to that specific logger so its output
-flows into the same structured stream:
-
-```python
-import logging
-from structguru.config import configure_structlog
-from structguru.integrations.stdlib import InterceptHandler
-
-configure_structlog(service="myapp", json_logs=True)
-
-access = logging.getLogger("uvicorn.access")
-access.handlers = [InterceptHandler()]
-access.propagate = False  # avoid double-logging via the root handler
-```
-
-Intercepted records are forwarded to the live structguru handler(s), so they
-share the same stream, formatter, and processor chain (redaction, service name,
-timestamps, etc.). If `configure_structlog()` has not been called, the handler
-falls back to rendering JSON on `sys.stdout`.
-
-> **Note:** Do not also add `InterceptHandler` to the root logger while leaving
-> `propagate=True` — the root handler would render the record and the
-> `InterceptHandler` would forward it again, producing duplicate lines.
+Since v1.0, structguru uses the native Rust renderer for its own logs. Third-party
+libraries that log through the standard `logging` module are unaffected — their
+records flow through the stdlib handler chain normally. Configure the root logger's
+handlers via `logging.basicConfig()` or Django's `LOGGING` dict if you need
+third-party logs formatted a specific way.
 
 ## ASGI (FastAPI / Starlette)
 
