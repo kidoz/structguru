@@ -12,6 +12,7 @@ from structguru.config import configure_structlog
 from structguru.queued import configure_queued_logging
 
 
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
 class TestConfigureQueuedLogging:
     def test_replaces_handler_with_queue(self) -> None:
         buf = io.StringIO()
@@ -117,3 +118,12 @@ class TestConfigureQueuedLogging:
             assert queue_size == 4
         finally:
             listener.stop()
+
+
+def test_configure_queued_logging_emits_deprecation_warning() -> None:
+    """configure_queued_logging() warns it is deprecated (superseded by native mode)."""
+    buf = io.StringIO()
+    configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        listener = configure_queued_logging()
+    listener.stop()

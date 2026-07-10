@@ -80,6 +80,15 @@ def configure_queued_logging(
     QueueListener
         The running listener (useful for manual ``stop()`` in tests).
     """
+    import warnings
+
+    warnings.warn(
+        "configure_queued_logging() is deprecated; native mode (enable_native()) "
+        "already offloads I/O to a background thread. It will be removed in 1.0.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     if handler is not None and handlers is not None:
         msg = "Pass either handler= or handlers=, not both."
         raise ValueError(msg)

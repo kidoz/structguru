@@ -301,7 +301,7 @@ Behavior notes:
 - **Console mode** (`json=False`): renders colored, human-readable lines instead of JSON — structguru's own stable dev format (`<timestamp> [<LEVEL>] <message>  k=v`), with ANSI colors by default on a TTY. Override with `colors=True/False`.
 - **File sinks** (`file_path=...`): write to a rotating file natively. Defaults mirror `RotatingFileHandler` (50 MB, 5 backups); configure via `file_max_bytes`/`file_backup_count`. Set `also_stdout=True` to mirror output to both file and stdout (e.g. container + persistent log).
 - **Callable sinks** (`callable_sinks=[fn, ...]`): invoke `Callable[[str], None]` with each rendered line. They run on a dedicated daemon thread (never the Rust writer, which must not touch the GIL), so a blocking callable cannot deadlock the logging path. Callable errors are swallowed.
-- **Scope**: native mode covers JSON and console rendering, file/stdout/callable sinks, and all processors (redaction/sampling/rate-limit/metrics/exceptions/stack_info). `logger.add()`/`logger.remove()` sink management still uses the standard structlog path until a future unification.
+- **Scope**: native mode covers JSON and console rendering, file/stdout/callable sinks, and all processors (redaction/sampling/rate-limit/metrics/exceptions/stack_info). `logger.add()`/`logger.remove()` sink management still uses the standard structlog path until a future unification. `configure_queued_logging()` is deprecated — native mode already offloads I/O to a background thread.
 
 ## Framework integrations
 

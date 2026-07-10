@@ -59,6 +59,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **`configure_queued_logging()` is deprecated.** It emits a `DeprecationWarning`
+  and will be removed in 1.0. Native mode (`enable_native()`) already offloads
+  log I/O to a background thread, making the `QueueHandler`/`QueueListener`
+  wrapper redundant. Use `enable_native(file_path=...)` or
+  `enable_native(callable_sinks=[...])` for off-thread output.
 - **Unsupported `sensitive_patterns` now raise `ValueError` at
   `enable_native()`** instead of emitting a `UserWarning` and silently leaving
   native mode disabled. Rust's `regex` engine guarantees linear-time matching
