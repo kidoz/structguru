@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import json
+import logging.config
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -26,6 +28,24 @@ class TestBuildLoggingConfig:
     def test_root_level(self) -> None:
         config = build_logging_config(level="WARNING")
         assert config["root"]["level"] == "WARNING"
+
+    def test_json_formatter_escapes_message(self) -> None:
+        # A message with quotes/newlines must not break the JSON or forge fields.
+        buf = io.StringIO()
+        config = build_logging_config(service="svc", json_logs=True)
+        config["handlers"]["console"]["class"] = "logging.StreamHandler"
+        config["handlers"]["console"]["stream"] = buf
+        logging.config.dictConfig(config)
+        try:
+            logging.getLogger("t").warning('x", "level": "CRITICAL\n')
+            line = buf.getvalue().strip()
+            parsed = json.loads(line)  # would raise if injection broke the JSON
+            assert parsed["message"] == 'x", "level": "CRITICAL\n'
+            assert parsed["service"] == "svc"
+            assert parsed["level"] == "WARNING"
+        finally:
+            logging.getLogger("t").handlers.clear()
+            logging.config.dictConfig({"version": 1, "disable_existing_loggers": False})
 
 
 class TestStructguruMiddleware:

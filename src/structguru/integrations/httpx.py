@@ -10,6 +10,7 @@ import time
 from typing import Any
 
 from structguru.core import Logger
+from structguru.integrations._util import sanitize_url
 
 _logger = Logger(name="structguru.httpx")
 
@@ -26,7 +27,7 @@ def log_response(response: Any) -> None:
 
     extra: dict[str, Any] = {
         "http_method": request.method,
-        "http_url": str(request.url),
+        "http_url": sanitize_url(request.url),
         "status_code": response.status_code,
     }
     if start_time is not None:

@@ -52,6 +52,21 @@ def test_httpx_logging_hooks_error(httpserver: HTTPServer) -> None:
     assert rec["status_code"] == 500
 
 
+def test_httpx_logged_url_strips_query_and_credentials(httpserver: HTTPServer) -> None:
+    buf = io.StringIO()
+    configure(service="test", level="DEBUG", json=True, stream=buf)
+    httpserver.expect_request("/charge").respond_with_data("OK", status=200)
+
+    client = httpx.Client(event_hooks=StructguruHTTPXLoggingHooks.get_hooks())
+    # Query string carries a token; it must not reach the log.
+    client.get(httpserver.url_for("/charge"), params={"api_key": "SECRET"})
+
+    rec = _records(buf)[0]
+    assert "SECRET" not in rec["http_url"]
+    assert "api_key" not in rec["http_url"]
+    assert rec["http_url"].endswith("/charge?")
+
+
 def test_get_hooks_returns_fresh_lists() -> None:
     first = StructguruHTTPXLoggingHooks.get_hooks()
     first["request"].append(lambda req: None)

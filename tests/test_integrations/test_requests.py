@@ -38,6 +38,23 @@ def test_requests_logging_session_success() -> None:
 
 
 @responses.activate
+def test_requests_logged_url_strips_query_and_credentials() -> None:
+    buf = io.StringIO()
+    configure(service="test", level="DEBUG", json=True, stream=buf)
+    responses.add(responses.GET, "http://user:pass@test.local/charge", json={}, status=200)
+
+    session = get_logging_session()
+    # Credentials and a token embedded directly in the URL string are what the
+    # integration sees (params= are merged later, during request preparation).
+    session.get("http://user:pass@test.local/charge?token=SECRET")
+
+    rec = _records(buf)[0]
+    assert "SECRET" not in rec["http_url"]
+    assert "pass" not in rec["http_url"]
+    assert rec["http_url"] == "http://test.local/charge?"
+
+
+@responses.activate
 def test_requests_logging_session_error() -> None:
     buf = io.StringIO()
     configure(service="test", level="DEBUG", json=True, stream=buf)

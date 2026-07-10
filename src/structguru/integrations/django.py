@@ -19,12 +19,37 @@ Usage in ``settings.py``::
 
 from __future__ import annotations
 
+import json
+import logging
 import time
 from typing import Any
 
 from structguru._contextvars import bind_contextvars, clear_contextvars
 from structguru.core import Logger
 from structguru.integrations._util import coerce_request_id
+
+
+class _JSONLogFormatter(logging.Formatter):
+    """stdlib formatter that renders records as JSON with proper escaping.
+
+    Unlike a ``%``-style format string (where ``%(message)s`` is substituted
+    raw), this serializes each field through :func:`json.dumps`, so a log
+    message or logger name containing quotes or newlines cannot break the JSON
+    or forge additional fields.
+    """
+
+    def __init__(self, service: str = "app") -> None:
+        super().__init__()
+        self.service = service
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "service": self.service,
+            "level": record.levelname,
+            "name": record.name,
+            "message": record.getMessage(),
+        }
+        return json.dumps(payload, ensure_ascii=False)
 
 
 def build_logging_config(
@@ -55,10 +80,10 @@ def build_logging_config(
         "disable_existing_loggers": False,
         "formatters": {
             "json": {
-                "format": (
-                    f'{{"service": "{service}", "level": "%(levelname)s", '
-                    f'"name": "%(name)s", "message": "%(message)s"}}'
-                ),
+                # Custom factory (dictConfig "()" key) so message/name are
+                # JSON-escaped rather than interpolated into a format string.
+                "()": "structguru.integrations.django._JSONLogFormatter",
+                "service": service,
             },
             "console": {
                 "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",

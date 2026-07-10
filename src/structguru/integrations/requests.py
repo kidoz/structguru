@@ -12,6 +12,7 @@ from typing import Any
 import requests
 
 from structguru.core import Logger
+from structguru.integrations._util import sanitize_url
 
 _logger = Logger(name="structguru.requests")
 
@@ -50,7 +51,7 @@ class StructguruRequestsSession(requests.Session):
 
             extra: dict[str, Any] = {
                 "http_method": method_str.upper(),
-                "http_url": str(url),
+                "http_url": sanitize_url(url),
                 "duration_ms": round(duration_ms, 2),
             }
             if status_code is not None:
