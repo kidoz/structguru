@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import time
-import warnings
 from typing import Any
 
 import pytest
@@ -109,23 +108,27 @@ def test_multiple_patterns_apply_in_order() -> None:
         _native.disable_native()
 
 
-def test_unsupported_pattern_falls_back_with_warning() -> None:
-    """A pattern using look-around (unsupported by Rust regex) must warn and
-    refuse to enable native mode — the standard path runs instead."""
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        pytest.param(r"(?<=foo)bar", id="lookbehind"),
+        pytest.param(r"foo(?!bar)", id="negative-lookahead"),
+        pytest.param(r"(\w+) \1", id="backreference"),
+    ],
+)
+def test_unsupported_pattern_raises_at_setup(pattern: str) -> None:
+    """Backreferences/look-around are rejected loudly at enable time: Rust's
+    regex engine guarantees linear-time matching and does not support them,
+    and redaction that silently differs from the configuration is worse than
+    an error. The message includes rewrite guidance."""
+    with pytest.raises(ValueError, match="unsupported sensitive_patterns regex"):
         _native.enable_native(
             service="svc",
             target="memory",
             level="DEBUG",
-            sensitive_patterns=[r"(?<=foo)bar"],
+            sensitive_patterns=[pattern],
         )
-    try:
-        assert not _native.is_native_enabled()
-        fallback = [w for w in caught if "native pattern redaction unsupported" in str(w.message)]
-        assert len(fallback) == 1
-    finally:
-        _native.disable_native()
+    assert not _native.is_native_enabled()
 
 
 # -- sampling ---------------------------------------------------------------

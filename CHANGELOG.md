@@ -36,6 +36,16 @@ All notable changes to this project are documented here. The format is based on
   lines are byte-identical (modulo timestamp), locking key order and
   serialization format for the full-Rust migration.
 
+### Changed
+
+- **Unsupported `sensitive_patterns` now raise `ValueError` at
+  `enable_native()`** instead of emitting a `UserWarning` and silently leaving
+  native mode disabled. Rust's `regex` engine guarantees linear-time matching
+  (no ReDoS on the hot path) and therefore rejects backreferences and
+  look-around; redaction that silently differs from the configuration is worse
+  than a setup-time error. The error message includes rewrite guidance
+  (migration plan decision gate B).
+
 ### Fixed
 
 - **Redaction marker never leaks into native output.** The internal

@@ -349,19 +349,21 @@ def enable_native(
         msg = f"metric_processor must be callable, got {type(metric_processor)!r}"
         raise TypeError(msg)
 
-    # Validate regex patterns against Rust's engine before enabling. If any fail
-    # (backreferences, look-around, ...), warn once and refuse to enable native
-    # mode so the standard path (with RedactingProcessor) runs instead.
+    # Validate regex patterns against Rust's engine before enabling. Rust's
+    # `regex` guarantees linear-time matching and therefore rejects
+    # backreferences and look-around; fail loudly at setup time — redaction
+    # that silently differs from what was configured is worse than an error.
     if sensitive_patterns:
         try:
             _RUST.validate_patterns(list(sensitive_patterns))
         except ValueError as exc:
-            warnings.warn(
-                f"native pattern redaction unsupported ({exc}); "
-                "falling back to the standard structlog path",
-                stacklevel=2,
+            msg = (
+                f"unsupported sensitive_patterns regex ({exc}). Rust's regex engine "
+                "guarantees linear-time matching and does not support backreferences "
+                "or look-around. Rewrite the pattern with a capture group instead, "
+                "e.g. lookbehind '(?<=password=)\\S+' becomes 'password=(\\S+)'."
             )
-            return
+            raise ValueError(msg) from exc
         new_config = _RUST.RedactionConfig(list(sensitive_patterns))
         new_patterns: list[str] | None = list(sensitive_patterns)
     else:
