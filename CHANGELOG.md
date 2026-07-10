@@ -4,33 +4,7 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
-
-### Fixed
-
-- Redaction now covers the rendered message as well as structured fields, and
-  Sentry receives only the already-redacted event while retaining raw
-  `exc_info` solely for exception capture.
-- Callable sinks use a bounded, drainable queue. `flush_native()`, reconfigure,
-  disable, fork, and interpreter shutdown now drain pending callable deliveries;
-  runtime `logger.add()` registrations survive reconfiguration and are removed
-  independently by handler ID.
-- `logger.add()` file, stream, handler, and callable sinks now receive both
-  structguru and stdlib records. `configure_structlog()` no longer duplicates
-  its configured stream to stdout.
-- Rotating files account for existing bytes, close the active handle before
-  rename (including on Windows), and rotate before the threshold-crossing record.
-- Malformed `exc_info` no longer breaks logging, and slots dataclasses serialize
-  through their declared fields.
-
-### Changed
-
-- Wheel CI validates tag/Python/Rust version coherence and smoke-installs
-  host-native wheel artifacts before publication.
-- Removed the obsolete public processor-chain helpers and modules; native
-  `configure()` options are the sole processing API in v1.
-
-## [1.0.0] - 2026-07-10
+## [1.0.0] - 2026-07-11
 
 ### Changed (breaking)
 
@@ -149,9 +123,27 @@ All notable changes to this project are documented here. The format is based on
   look-around; redaction that silently differs from the configuration is worse
   than a setup-time error. The error message includes rewrite guidance
   (migration plan decision gate B).
+- **Removed the obsolete public processor-chain helpers and modules**; native
+  `configure()` options are the sole processing API in v1.
+- Wheel CI validates tag/Python/Rust version coherence and smoke-installs
+  host-native wheel artifacts before publication.
 
 ### Fixed
 
+- Redaction now covers the rendered message as well as structured fields, and
+  Sentry receives only the already-redacted event while retaining raw
+  `exc_info` solely for exception capture.
+- Callable sinks use a bounded, drainable queue. `flush_native()`, reconfigure,
+  disable, fork, and interpreter shutdown now drain pending callable deliveries;
+  runtime `logger.add()` registrations survive reconfiguration and are removed
+  independently by handler ID.
+- `logger.add()` file, stream, handler, and callable sinks now receive both
+  structguru and stdlib records. `configure_structlog()` no longer duplicates
+  its configured stream to stdout.
+- Rotating files account for existing bytes, close the active handle before
+  rename (including on Windows), and rotate before the threshold-crossing record.
+- Malformed `exc_info` no longer breaks logging, and slots dataclasses serialize
+  through their declared fields.
 - **Redaction marker never leaks into native output.** The internal
   `_structguru_redacted` marker key is stripped by the native renderer,
   matching `strip_redaction_marker` on the standard path.
