@@ -73,22 +73,27 @@ fn redact(value: &mut Value, keys: &[impl AsRef<str>]) {
 /// for exotic Python leaves (datetime/UUID/Enum/...). Descending into it would
 /// require re-parsing the JSON and would break the verbatim-output contract.
 /// Key-based redaction still applies to a `Raw` value's *key* in its parent map.
-fn redact_patterns(value: &mut Value, patterns: &[Regex]) {
+///
+/// `replacement` supports the regex crate's group expansion (`$1`, `${name}`;
+/// `$$` for a literal `$`), so look-behind-style patterns can be rewritten as
+/// capture groups that preserve their prefix, e.g. pattern `password=(\S+)`
+/// with replacement `password=[REDACTED]`.
+fn redact_patterns(value: &mut Value, patterns: &[Regex], replacement: &str) {
     match value {
         Value::Map(entries) => {
             for (_, child) in entries.iter_mut() {
-                redact_patterns(child, patterns);
+                redact_patterns(child, patterns, replacement);
             }
         }
         Value::List(items) => {
             for item in items.iter_mut() {
-                redact_patterns(item, patterns);
+                redact_patterns(item, patterns, replacement);
             }
         }
         Value::String(s) if !patterns.is_empty() => {
             let mut current = std::mem::take(s);
             for re in patterns {
-                current = re.replace_all(&current, REDACTED).into_owned();
+                current = re.replace_all(&current, replacement).into_owned();
             }
             *s = current;
         }
@@ -121,6 +126,7 @@ pub fn render_line(
     stack: Option<&str>,
     sensitive_keys: Option<Vec<String>>,
     sensitive_patterns: Option<&[Regex]>,
+    pattern_replacement: Option<&str>,
 ) -> Result<String, serde_json::Error> {
     // Redact against the caller's keys, or the static defaults with zero
     // per-record allocation (comparison is case-insensitive in `is_sensitive`).
@@ -131,7 +137,7 @@ pub fn render_line(
     }
     // Then apply value-pattern redaction to any string leaves.
     if let Some(patterns) = sensitive_patterns {
-        redact_patterns(&mut root, patterns);
+        redact_patterns(&mut root, patterns, pattern_replacement.unwrap_or(REDACTED));
     }
     let Value::Map(mut entries) = root else {
         unreachable!("root is constructed as a map");
@@ -174,7 +180,7 @@ mod tests {
     fn renders_fields_then_standard_keys_in_order() {
         let fields = vec![("request_id".to_owned(), Value::String("req-1".to_owned()))];
         let line = render_line(
-            fields, "svc.mod", "warning", "checkout", "hello", "TS", None, None, None,
+            fields, "svc.mod", "warning", "checkout", "hello", "TS", None, None, None, None,
         )
         .unwrap();
 
@@ -190,7 +196,7 @@ mod tests {
             ("_structguru_redacted".to_owned(), Value::Bool(true)),
             ("keep".to_owned(), Value::Int(1)),
         ];
-        let line = render_line(fields, "l", "info", "svc", "m", "TS", None, None, None).unwrap();
+        let line = render_line(fields, "l", "info", "svc", "m", "TS", None, None, None, None).unwrap();
 
         assert!(!line.contains("_structguru_redacted"));
         assert!(line.contains(r#""keep":1"#));
@@ -207,6 +213,7 @@ mod tests {
             "m",
             "TS",
             Some("Stack (most recent call last):\n  frame"),
+            None,
             None,
             None,
         )
@@ -231,7 +238,7 @@ mod tests {
             ),
             ("qty".to_owned(), Value::Int(2)),
         ];
-        let line = render_line(fields, "l", "info", "svc", "m", "TS", None, None, None).unwrap();
+        let line = render_line(fields, "l", "info", "svc", "m", "TS", None, None, None, None).unwrap();
 
         assert!(line.contains(r#""Password":"[REDACTED]""#));
         assert!(line.contains(r#""api_key":"[REDACTED]""#));
@@ -245,7 +252,7 @@ mod tests {
             ("service".to_owned(), Value::String("user-svc".to_owned())),
             ("keep".to_owned(), Value::Int(1)),
         ];
-        let line = render_line(fields, "l", "warning", "cfg-svc", "m", "TS", None, None, None).unwrap();
+        let line = render_line(fields, "l", "warning", "cfg-svc", "m", "TS", None, None, None, None).unwrap();
 
         // canonical level overrides the user field; user "service" wins (setdefault)
         assert!(line.contains(r#""level":"WARN""#));
@@ -268,7 +275,7 @@ mod tests {
             ("secret_sauce".to_owned(), Value::String("x".to_owned())),
         ];
         let keys = Some(vec!["secret_sauce".to_owned()]);
-        let line = render_line(fields, "l", "info", "svc", "m", "TS", None, keys, None).unwrap();
+        let line = render_line(fields, "l", "info", "svc", "m", "TS", None, keys, None, None).unwrap();
 
         // "ssn" is a default key but NOT in the custom set → not redacted.
         assert!(line.contains(r#""ssn":"123""#));
@@ -284,7 +291,7 @@ mod tests {
             Value::String("Contact user@example.com for details".to_owned()),
         )];
         let line =
-            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns)).unwrap();
+            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns), None).unwrap();
 
         assert!(line.contains(r#""msg":"Contact [REDACTED] for details""#));
         assert!(!line.contains("user@example.com"));
@@ -311,7 +318,7 @@ mod tests {
             ),
         ];
         let line =
-            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns)).unwrap();
+            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns), None).unwrap();
 
         assert!(line.contains(r#""note":"ssn is [REDACTED]""#));
         assert!(line.contains(r#""ok [REDACTED]""#));
@@ -332,7 +339,7 @@ mod tests {
             ("raw".to_owned(), Value::Raw(r#""escaped""#.to_owned())),
         ];
         let line =
-            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns)).unwrap();
+            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns), None).unwrap();
 
         assert!(line.contains(r#""count":42"#));
         assert!(line.contains(r#""flag":true"#));
@@ -353,9 +360,36 @@ mod tests {
             Value::String("secret email a@b.com here".to_owned()),
         )];
         let line =
-            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns)).unwrap();
+            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns), None).unwrap();
 
         assert!(line.contains(r#""msg":"[REDACTED] email [REDACTED] here""#));
+    }
+
+    #[test]
+    fn pattern_replacement_expands_capture_groups() {
+        // Lookbehind rewrite: `(?<=password=)\S+` becomes `password=(\S+)` with
+        // a replacement that re-emits the prefix.
+        let patterns = vec![Regex::new(r"(password=)\S+").unwrap()];
+        let fields = vec![(
+            "msg".to_owned(),
+            Value::String("login with password=hunter2 ok".to_owned()),
+        )];
+        let line = render_line(
+            fields,
+            "l",
+            "info",
+            "svc",
+            "m",
+            "TS",
+            None,
+            None,
+            Some(&patterns),
+            Some("$1[REDACTED]"),
+        )
+        .unwrap();
+
+        assert!(line.contains(r#""msg":"login with password=[REDACTED] ok""#));
+        assert!(!line.contains("hunter2"));
     }
 
     #[test]
@@ -370,7 +404,7 @@ mod tests {
             ),
         ];
         let line =
-            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns)).unwrap();
+            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns), None).unwrap();
 
         assert!(line.contains(r#""token":"[REDACTED]""#));
         assert!(line.contains(r#""msg":"ping [REDACTED] now""#));

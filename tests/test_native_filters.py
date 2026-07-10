@@ -108,6 +108,41 @@ def test_multiple_patterns_apply_in_order() -> None:
         _native.disable_native()
 
 
+def test_pattern_replacement_expands_capture_groups() -> None:
+    """The look-behind rewrite: `(?<=password=)\\S+` becomes `password=(\\S+)`
+    with a group-preserving replacement — same output, linear-time engine."""
+    _native.enable_native(
+        service="svc",
+        target="memory",
+        level="DEBUG",
+        sensitive_patterns=[r"(password=)\S+"],
+        pattern_replacement="$1[REDACTED]",
+    )
+    try:
+        structguru.logger.info("m", body="login with password=hunter2 ok")
+        record = _drain_last()
+        assert record["body"] == "login with password=[REDACTED] ok"
+        assert "hunter2" not in record["body"]
+    finally:
+        _native.disable_native()
+
+
+def test_pattern_replacement_custom_literal() -> None:
+    _native.enable_native(
+        service="svc",
+        target="memory",
+        level="DEBUG",
+        sensitive_patterns=[r"\b\d{3}-\d{2}-\d{4}\b"],
+        pattern_replacement="***",
+    )
+    try:
+        structguru.logger.info("m", body="ssn is 123-45-6789")
+        record = _drain_last()
+        assert record["body"] == "ssn is ***"
+    finally:
+        _native.disable_native()
+
+
 @pytest.mark.parametrize(
     "pattern",
     [

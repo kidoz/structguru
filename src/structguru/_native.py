@@ -68,6 +68,7 @@ class _RustModule(Protocol):
         sensitive_keys: list[str] | None = None,
         sensitive_patterns: list[str] | None = None,
         stack: str | None = None,
+        pattern_replacement: str | None = None,
     ) -> str: ...
 
     def render_line_with_config(
@@ -85,7 +86,7 @@ class _RustModule(Protocol):
 
     def validate_patterns(self, patterns: list[str]) -> int: ...
 
-    def RedactionConfig(self, patterns: list[str]) -> Any: ...
+    def RedactionConfig(self, patterns: list[str], replacement: str | None = None) -> Any: ...
 
     def NativeFilter(
         self,
@@ -273,6 +274,7 @@ def enable_native(
     otel: bool = False,
     sensitive_keys: list[str] | None = None,
     sensitive_patterns: list[str] | None = None,
+    pattern_replacement: str = "[REDACTED]",
     sample_rate: float = 1.0,
     sample_max_level: str | None = None,
     rate_limit_max: int | None = None,
@@ -294,10 +296,14 @@ def enable_native(
     rate-limited warning; see :func:`native_metrics`).
 
     ``sensitive_patterns`` is a list of regex source strings applied (in addition
-    to key-based redaction) to every string value. Rust's ``regex`` engine does not
-    support backreferences or look-around; if a pattern fails to compile, a
-    ``UserWarning`` is emitted and native mode is **not** enabled — callers fall
-    back to the standard structlog path with ``RedactingProcessor(patterns=...)``.
+    to key-based redaction) to every string value. Rust's ``regex`` engine
+    guarantees linear-time matching and rejects backreferences and look-around:
+    an unsupported pattern raises ``ValueError`` here, at setup time.
+    ``pattern_replacement`` is the substitution text for pattern matches and
+    supports capture-group expansion (``$1``, ``${name}``; ``$$`` for a literal
+    ``$``), so look-behind-style patterns can be rewritten to preserve their
+    prefix — e.g. pattern ``password=(\\S+)`` with replacement
+    ``password=[REDACTED]``.
 
     ``sample_rate`` (0.0–1.0) and ``rate_limit_max``/``rate_limit_period`` add
     pre-render filters: dropped records cost zero rendering. ``sampled`` and
@@ -364,7 +370,7 @@ def enable_native(
                 "e.g. lookbehind '(?<=password=)\\S+' becomes 'password=(\\S+)'."
             )
             raise ValueError(msg) from exc
-        new_config = _RUST.RedactionConfig(list(sensitive_patterns))
+        new_config = _RUST.RedactionConfig(list(sensitive_patterns), pattern_replacement)
         new_patterns: list[str] | None = list(sensitive_patterns)
     else:
         new_config = None

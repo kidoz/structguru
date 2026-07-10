@@ -36,6 +36,13 @@ All notable changes to this project are documented here. The format is based on
   lines are byte-identical (modulo timestamp), locking key order and
   serialization format for the full-Rust migration.
 
+- **Group-preserving pattern replacement.**
+  `enable_native(pattern_replacement=...)` sets the substitution text for
+  `sensitive_patterns` matches and supports capture-group expansion (`$1`,
+  `${name}`; `$$` for a literal `$`). This covers the main look-behind use case
+  on the linear-time engine: `(?<=password=)\S+` becomes pattern
+  `(password=)\S+` with `pattern_replacement="$1[REDACTED]"`.
+
 ### Changed
 
 - **Unsupported `sensitive_patterns` now raise `ValueError` at

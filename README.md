@@ -283,7 +283,7 @@ Public API:
 
 | Symbol | Purpose |
 |--------|---------|
-| `enable_native(*, service="app", maxsize=0, target="stdout", overflow="block", level="INFO", otel=False, sensitive_keys=None, sensitive_patterns=None, sample_rate=1.0, sample_max_level=None, rate_limit_max=None, rate_limit_period=60.0, metric_processor=None, structured_exceptions=False, exception_include_locals=False, exception_max_frames=20, exception_max_local_repr=200)` | Turn native mode on. |
+| `enable_native(*, service="app", maxsize=0, target="stdout", overflow="block", level="INFO", otel=False, sensitive_keys=None, sensitive_patterns=None, pattern_replacement="[REDACTED]", sample_rate=1.0, sample_max_level=None, rate_limit_max=None, rate_limit_period=60.0, metric_processor=None, structured_exceptions=False, exception_include_locals=False, exception_max_frames=20, exception_max_local_repr=200)` | Turn native mode on. |
 | `disable_native()` | Turn it off and stop the background writer. |
 | `set_native_level(level)` | Adjust the level threshold at runtime. |
 | `native_metrics()` | Writer counters (enqueued/written/dropped/depth/...) plus filter counters (`sampled`/`rate_limited`) when active. |
@@ -292,7 +292,7 @@ Public API:
 Behavior notes:
 
 - **Overflow**: `maxsize=0` is unbounded; a positive `maxsize` uses `overflow="block"` (backpressure, no loss — the default) or `overflow="drop"` (drop-newest + counted, rate-limited warning).
-- **Redaction, level filtering, exceptions, and OpenTelemetry** injection are supported natively; `sensitive_keys` overrides the default redaction keys. `sensitive_patterns` adds regex value-pattern redaction (applied to every string value). Rust's `regex` engine guarantees linear-time matching (no ReDoS) and therefore rejects backreferences and look-around: an unsupported pattern raises `ValueError` at `enable_native()` time. Rewrite look-around with a capture group instead — e.g. `(?<=password=)\S+` becomes `password=(\S+)`.
+- **Redaction, level filtering, exceptions, and OpenTelemetry** injection are supported natively; `sensitive_keys` overrides the default redaction keys. `sensitive_patterns` adds regex value-pattern redaction (applied to every string value). Rust's `regex` engine guarantees linear-time matching (no ReDoS) and therefore rejects backreferences and look-around: an unsupported pattern raises `ValueError` at `enable_native()` time. Rewrite look-around with a capture group instead: `pattern_replacement` supports group expansion (`$1`, `${name}`; `$$` for a literal `$`), so `(?<=password=)\S+` becomes pattern `(password=)\S+` with `pattern_replacement="$1[REDACTED]"` — same output, linear-time engine.
 - **Sampling & rate limiting** (`sample_rate`, `rate_limit_max`, `rate_limit_period`) are applied as native pre-render filters — dropped records cost zero rendering. `sampled` and `rate_limited` counters are distinct from the transport `dropped` counter. `sample_max_level` restricts sampling to records at or below that level (more severe records always pass) — the native analog of `ConditionalProcessor(SamplingProcessor(...), max_level=...)`.
 - **Metric hooks** (`metric_processor=...`) invoke a structlog-style processor (e.g. `MetricProcessor`) for every *kept* record on the caller's thread, with `(None, method, {"event": message, **fields})`. Dropped records (level/sampling/rate-limit) never reach it; hook errors are swallowed.
 - **Fork/shutdown safe** — the writer is flushed on exit and respawned in forked children (gunicorn/celery prefork).

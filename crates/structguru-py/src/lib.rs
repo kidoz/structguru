@@ -77,7 +77,7 @@ fn validate_patterns(patterns: Vec<String>) -> PyResult<usize> {
 /// compile patterns once at enable time.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (fields, logger, level, service, message, timestamp=None, sensitive_keys=None, sensitive_patterns=None, stack=None))]
+#[pyo3(signature = (fields, logger, level, service, message, timestamp=None, sensitive_keys=None, sensitive_patterns=None, stack=None, pattern_replacement=None))]
 fn render_line(
     fields: &Bound<'_, PyDict>,
     logger: &str,
@@ -88,6 +88,7 @@ fn render_line(
     sensitive_keys: Option<Vec<String>>,
     sensitive_patterns: Option<Vec<String>>,
     stack: Option<&str>,
+    pattern_replacement: Option<&str>,
 ) -> PyResult<String> {
     let mut entries: Vec<(String, Value)> = Vec::with_capacity(fields.len());
     for (key, value) in fields.iter() {
@@ -129,6 +130,7 @@ fn render_line(
         stack,
         sensitive_keys,
         patterns_ref,
+        pattern_replacement,
     )
     .map_err(|err| PyValueError::new_err(err.to_string()))
 }
@@ -141,18 +143,23 @@ fn render_line(
 #[pyclass(name = "RedactionConfig")]
 struct RedactionConfig {
     patterns: Vec<Regex>,
+    replacement: String,
 }
 
 #[pymethods]
 impl RedactionConfig {
     #[new]
-    fn new(patterns: Vec<String>) -> PyResult<Self> {
+    #[pyo3(signature = (patterns, replacement=None))]
+    fn new(patterns: Vec<String>, replacement: Option<String>) -> PyResult<Self> {
         let compiled = patterns
             .into_iter()
             .map(|p| Regex::new(&p))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|err| PyValueError::new_err(err.to_string()))?;
-        Ok(Self { patterns: compiled })
+        Ok(Self {
+            patterns: compiled,
+            replacement: replacement.unwrap_or_else(|| "[REDACTED]".to_owned()),
+        })
     }
 
     /// Number of compiled patterns.
@@ -213,6 +220,7 @@ fn render_line_with_config(
         stack,
         sensitive_keys,
         patterns_ref,
+        Some(&config.replacement),
     )
     .map_err(|err| PyValueError::new_err(err.to_string()))
 }
