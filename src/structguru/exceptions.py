@@ -1,7 +1,8 @@
-"""Structured exception serialization processor.
+"""Structured exception serialization.
 
 Converts ``exc_info`` into a JSON-serializable dictionary with type, message,
-module, traceback frames, and optional chained-cause information.
+module, traceback frames, and optional chained-cause information. Used by the
+native renderer when ``structured_exceptions=True`` is configured.
 """
 
 from __future__ import annotations
@@ -25,10 +26,9 @@ def build_exception_dict(
 
     Accepts ``True`` (use the current exception), a ``BaseException`` instance,
     or a ``(type, value, tb)`` tuple; returns ``None`` when *exc_info* does not
-    resolve to an active exception. This is the extraction core shared by
-    :class:`ExceptionDictProcessor` (standard path) and the native fast path —
-    frame walking, ``f_locals`` access, and ``repr`` are Python-owned, so the
-    native renderer receives a plain dict and only serializes it.
+    resolve to an active exception. Frame walking, ``f_locals`` access, and
+    ``repr`` are Python-owned — the native renderer receives this dict and only
+    serializes it.
     """
     if isinstance(exc_info, BaseException):
         exc_info = (type(exc_info), exc_info, exc_info.__traceback__)
@@ -39,6 +39,8 @@ def build_exception_dict(
         return None
 
     exc_type, exc_value, exc_tb = exc_info
+    if not isinstance(exc_type, type) or not isinstance(exc_value, BaseException):
+        return None
     keys = sensitive_keys if sensitive_keys is not None else DEFAULT_SENSITIVE_KEYS
 
     frames = []
@@ -108,62 +110,3 @@ def _format_locals(
             rendered = f"{rendered[:limit]}...<{remaining} more>"
         out[name] = rendered
     return out
-
-
-class ExceptionDictProcessor:
-    """Convert ``exc_info`` to a structured dictionary.
-
-    Parameters
-    ----------
-    include_locals:
-        If ``True``, include local variables in each frame (as ``repr``).
-        Values are truncated to *max_local_repr* characters, and locals whose
-        names match *sensitive_keys* are replaced with ``"[REDACTED]"``.
-    max_frames:
-        Maximum number of traceback frames to include.
-    max_local_repr:
-        Maximum length of each local variable ``repr``; longer values are
-        truncated with a trailing ``"...<N more>"`` marker.
-    sensitive_keys:
-        Local-variable names (lower-cased) to redact when *include_locals* is
-        ``True``.  Defaults to :data:`~structguru.redaction.DEFAULT_SENSITIVE_KEYS`.
-    """
-
-    def __init__(
-        self,
-        *,
-        include_locals: bool = False,
-        max_frames: int = 20,
-        max_local_repr: int = 200,
-        sensitive_keys: frozenset[str] | None = None,
-    ) -> None:
-        self._include_locals = include_locals
-        self._max_frames = max_frames
-        self._max_local_repr = max_local_repr
-        self._sensitive_keys = (
-            sensitive_keys if sensitive_keys is not None else DEFAULT_SENSITIVE_KEYS
-        )
-
-    def __call__(
-        self,
-        _logger: Any,
-        _method_name: str,
-        event_dict: dict[str, Any],
-    ) -> dict[str, Any]:
-        exc_info = event_dict.get("exc_info")
-        if not exc_info:
-            return event_dict
-
-        exception_dict = build_exception_dict(
-            exc_info,
-            include_locals=self._include_locals,
-            max_frames=self._max_frames,
-            max_local_repr=self._max_local_repr,
-            sensitive_keys=self._sensitive_keys,
-        )
-        if exception_dict is None:
-            return event_dict
-
-        event_dict["exception"] = exception_dict
-        event_dict.pop("exc_info", None)
-        return event_dict

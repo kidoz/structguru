@@ -285,7 +285,7 @@ def test_parity_exception_with_chained_cause() -> None:
     assert "inner" in native["exception"] and "outer" in native["exception"]
 
 
-# -- Structured exceptions: native output must equal ExceptionDictProcessor ---
+# -- Structured exceptions: native output must equal build_exception_dict ---
 
 
 def _native_structured_exception(exc: BaseException, **enable_kwargs: Any) -> dict[str, Any]:
@@ -305,11 +305,10 @@ def _native_structured_exception(exc: BaseException, **enable_kwargs: Any) -> di
 
 
 def _processor_exception(exc: BaseException, **proc_kwargs: Any) -> dict[str, Any]:
-    from structguru.exceptions import ExceptionDictProcessor
+    from structguru.exceptions import build_exception_dict
 
-    proc = ExceptionDictProcessor(**proc_kwargs)
-    result = proc(None, "error", {"event": "failed", "exc_info": exc})
-    return result["exception"]  # type: ignore[no-any-return]
+    result = build_exception_dict(exc, **proc_kwargs)
+    return result  # type: ignore[no-any-return]
 
 
 def test_parity_structured_exception_matches_processor() -> None:
