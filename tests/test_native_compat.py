@@ -78,7 +78,6 @@ def test_native_picks_up_integration_contextvars() -> None:
 
 
 def test_env_var_auto_enable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("STRUCTGURU_NATIVE", "1")
     monkeypatch.setenv("STRUCTGURU_NATIVE_TARGET", "memory")
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
     _native.disable_native()

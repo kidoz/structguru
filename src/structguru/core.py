@@ -1,8 +1,8 @@
-"""Loguru-like wrapper for structlog.
+"""Loguru-like facade for the native structguru runtime.
 
 Provides a :class:`Logger` dataclass that mirrors Loguru's ergonomic API
 (``bind``, ``contextualize``, ``opt``, level methods) while delegating all
-actual log processing to :mod:`structlog`.
+actual log processing to the bundled Rust renderer and writer.
 
 A global ``logger`` instance is exported for convenience::
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import functools
 import itertools
+import json
 import logging
 import string
 import sys
@@ -73,6 +74,27 @@ def _make_handler(sink: Sink) -> logging.Handler:
         return _CallableHandler(sink)
     msg = f"Unsupported sink type: {type(sink)!r}"
     raise TypeError(msg)
+
+
+def _emit_rendered(handler: logging.Handler, line: str) -> None:
+    """Forward a native rendered line through a stdlib handler."""
+    level = logging.INFO
+    try:
+        rendered = json.loads(line)
+        level_name = str(rendered.get("level", "INFO"))
+        level = _to_logging_level(level_name)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    record = logging.LogRecord(
+        name="structguru",
+        level=level,
+        pathname="",
+        lineno=0,
+        msg=line.rstrip("\n"),
+        args=(),
+        exc_info=None,
+    )
+    handler.handle(record)
 
 
 @functools.lru_cache(maxsize=1024)
@@ -169,7 +191,7 @@ class _Catcher(ContextDecorator):
 
 @dataclass
 class Logger:
-    """A Loguru-like facade for :mod:`structlog`.
+    """A Loguru-like facade for native structured logging.
 
     *   ``trace``, ``debug``, ``info``, ``success``, ``warning``, ``error``,
         ``critical``, ``exception`` methods.
@@ -184,9 +206,8 @@ class Logger:
     _opt_exc_info: Any = None
     _opt_stack_info: bool = False
 
-    _handlers: dict[HandlerId, logging.Handler | Callable[[str], None]] = field(
-        default_factory=dict
-    )
+    _handlers: dict[HandlerId, logging.Handler] = field(default_factory=dict)
+    _native_sink_tokens: dict[HandlerId, int] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     # -- context helpers ----------------------------------------------------
@@ -295,8 +316,7 @@ class Logger:
             kwargs.pop(key, None)
 
         # Pre-render filter (sampling/rate-limit): decide before building fields.
-        # Keys on the formatted message, matching the post-EventRenamer behaviour
-        # of the standard-path RateLimitingProcessor.
+        # Keys on the formatted message, matching the rate-limiter's grouping.
         if _native.is_native_enabled() and not _native.should_render(method, formatted_msg):
             return
 
@@ -314,14 +334,15 @@ class Logger:
             add_otel_context(None, method, fields)
         if exc_info:
             exception = _native.build_exception_field(exc_info)
-            if exception is not None:
+            if exception:
                 fields["exception"] = exception
         # Stack capture is Python-owned (frame walking); rendering places
         # "stack" between "service" and "message" like StackInfoRenderer.
         stack = _native.format_stack() if stack_info else None
         _native.notify_metrics(method, formatted_msg, fields)
-        _native.notify_sentry(method, formatted_msg, fields, exc_info=exc_info)
-        _native.render_and_enqueue(fields, name, method, formatted_msg, stack=stack)
+        sentry_line = _native.render_and_enqueue(fields, name, method, formatted_msg, stack=stack)
+        if sentry_line is not None:
+            _native.notify_sentry(method, sentry_line, tuple(fields), exc_info=exc_info)
 
     # -- sink (handler) management ------------------------------------------
 
@@ -344,28 +365,22 @@ class Logger:
 
         Note
         ----
-        Callable sinks are delivered via the native dispatch thread (off-thread).
-        File/stream sinks registered here create stdlib handlers — they receive
-        third-party ``logging`` records, but native-mode logs are delivered to
-        callable sinks only. For native file output use
-        ``enable_native(file_path=...)``.
+        Every sink receives both structguru records and third-party stdlib records.
+        Native records are delivered via the bounded callable dispatch queue;
+        configured backpressure and flush semantics therefore apply uniformly.
         """
-        # Callable sinks route through the native dispatch thread (deliver native logs).
-        if callable(sink) and not isinstance(sink, logging.Handler):
-            min_level = _to_logging_level(level) if level else 0
-            _native.add_callable_sink(sink, min_level=min_level)
-            with _id_counter_lock:
-                handler_id = next(_id_counter)
-            with self._lock:
-                self._handlers[handler_id] = sink  # store the callable for removal
-            return handler_id
-
-        # File paths, streams, and logging.Handler instances create stdlib handlers
-        # (for third-party records that flow through logging).
         handler = _make_handler(sink)
         log_level = _to_logging_level(level) if level else logging.getLogger().level
+        native_level = _to_logging_level(level) if level else 0
         handler.setLevel(log_level)
         handler.setFormatter(logging.Formatter("%(message)s"))
+
+        native_callback = (
+            sink
+            if callable(sink) and not isinstance(sink, logging.Handler)
+            else functools.partial(_emit_rendered, handler)
+        )
+        native_token = _native.add_callable_sink(native_callback, min_level=native_level)
 
         root = logging.getLogger()
         root.addHandler(handler)
@@ -374,6 +389,7 @@ class Logger:
             handler_id = next(_id_counter)
         with self._lock:
             self._handlers[handler_id] = handler
+            self._native_sink_tokens[handler_id] = native_token
         return handler_id
 
     def remove(self, handler_id: HandlerId | None = None) -> None:
@@ -385,23 +401,25 @@ class Logger:
         root = logging.getLogger()
         with self._lock:
             if handler_id is None:
-                for h in self._handlers.values():
-                    if isinstance(h, logging.Handler):
-                        root.removeHandler(h)
-                        h.close()
-                    else:
-                        # Callable sink — remove from native dispatch.
-                        _native.remove_callable_sink(h)
+                registrations = [
+                    (handler, self._native_sink_tokens.get(sink_id))
+                    for sink_id, handler in self._handlers.items()
+                ]
                 self._handlers.clear()
-                return
-
-            sink_to_remove = self._handlers.pop(handler_id, None)
-            if sink_to_remove is not None:
-                if isinstance(sink_to_remove, logging.Handler):
-                    root.removeHandler(sink_to_remove)
-                    sink_to_remove.close()
-                else:
-                    _native.remove_callable_sink(sink_to_remove)
+                self._native_sink_tokens.clear()
+            else:
+                registrations = [
+                    (
+                        self._handlers.pop(handler_id, None),  # type: ignore[arg-type]
+                        self._native_sink_tokens.pop(handler_id, None),
+                    )
+                ]
+        for handler, token in registrations:
+            if token is not None:
+                _native.remove_callable_sink(token)
+            if handler is not None:
+                root.removeHandler(handler)
+                handler.close()
 
 
 logger = Logger()

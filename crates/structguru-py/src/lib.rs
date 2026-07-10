@@ -396,6 +396,7 @@ impl NativeStringWriter {
             // No file_path and not also_stdout: memory/test targets.
             match target {
                 "stdout" => StringWriter::new_stdout(maxsize),
+                "null" => StringWriter::new_null(maxsize),
                 "memory" => {
                     if let Some(fail_after) = fail_after {
                         StringWriter::new_failing(maxsize, fail_after, paused)
@@ -660,19 +661,21 @@ fn convert_exotic_leaf(
         }
     }
 
-    // dataclass: has __dataclass_fields__ → convert as an ordered Map.
+    // dataclass: use dataclasses.fields() rather than __dict__, so slots=True
+    // dataclasses and inherited fields follow Python's canonical field order.
     if obj.hasattr("__dataclass_fields__")? {
-        let dict = obj.getattr("__dict__")?;
-        if let Ok(d) = dict.cast::<PyDict>() {
-            let container_id = enter_container(obj, containers)?;
-            let mut entries = Vec::with_capacity(d.len());
-            for (key, value) in d.iter() {
-                let key = key.extract::<String>()?;
-                entries.push((key, convert_py_value_inner(&value, depth + 1, containers)?));
-            }
-            leave_container(container_id, containers);
-            return Ok(Value::Map(entries));
+        let dataclasses = obj.py().import("dataclasses")?;
+        let fields = dataclasses.call_method1("fields", (obj,))?;
+        let fields = fields.cast::<PyTuple>()?;
+        let container_id = enter_container(obj, containers)?;
+        let mut entries = Vec::with_capacity(fields.len());
+        for field in fields.iter() {
+            let key = field.getattr("name")?.extract::<String>()?;
+            let value = obj.getattr(key.as_str())?;
+            entries.push((key, convert_py_value_inner(&value, depth + 1, containers)?));
         }
+        leave_container(container_id, containers);
+        return Ok(Value::Map(entries));
     }
 
     // Unsupported type — raise TypeError, matching orjson's rejection of

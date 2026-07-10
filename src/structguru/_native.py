@@ -11,6 +11,7 @@ from __future__ import annotations
 import atexit
 import importlib
 import io
+import itertools
 import json
 import math
 import os
@@ -20,6 +21,7 @@ import threading
 import traceback
 import warnings
 from collections.abc import Callable
+from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Protocol, cast
 
@@ -158,21 +160,7 @@ def native_available() -> bool:
     return _RUST is not None
 
 
-def normalize_level(level: str) -> str | None:
-    """Normalize *level* through the native helper when available."""
-    if _RUST is None:
-        return None
-    return _RUST.normalize_level(level)
-
-
-def syslog_severity(canonical_level: str) -> int | None:
-    """Map *canonical_level* through the native helper when available."""
-    if _RUST is None:
-        return None
-    return _RUST.syslog_severity(canonical_level)
-
-
-# -- native render/enqueue fast path (experimental, opt-in) -----------------
+# -- native configuration ---------------------------------------------------
 
 _state_lock = threading.Lock()
 _enabled = False
@@ -198,17 +186,36 @@ _sentry_processor: Any = None  # structlog-style processor invoked per kept reco
 # Console mode: json=False renders colored human-readable lines instead of JSON.
 _console = False
 _colors = False
+
+
 # Callable sinks: dispatched on a dedicated daemon thread (never the Rust worker,
 # which must not touch the GIL). Each entry is (callable, min_level_num).
-_callable_sinks: list[tuple[Callable[[str], None], int]] | None = None
-_dispatch_queue: queue.Queue[str] | None = None
+@dataclass(frozen=True)
+class _CallableSink:
+    token: int
+    callback: Callable[[str], None]
+    min_level: int
+
+
+@dataclass(frozen=True)
+class _DispatchRecord:
+    line: str
+    level: int
+
+
+_configured_callable_sinks: list[_CallableSink] = []
+_runtime_callable_sinks: dict[int, _CallableSink] = {}
+_sink_tokens = itertools.count(1)
+_callable_queue_maxsize = 1024
+_dispatch_queue: queue.Queue[object] | None = None
 _dispatch_thread: threading.Thread | None = None
 # Synchronous stream sink: when set (by configure_structlog), rendered lines are
 # written to this stream synchronously on the caller's thread IN ADDITION to the
 # Rust writer. This preserves the pre-1.0 contract that logger output is available
 # on the configured stream immediately after the call (no flush needed).
 _stream_sink: Any = None
-_dispatch_stop = threading.Event()
+_DISPATCH_STOP = object()
+_dispatch_dropped = 0
 _hooks_registered = False
 _drop_count = 0
 
@@ -239,38 +246,37 @@ def sensitive_keys() -> list[str] | None:
     return _sensitive_keys
 
 
-def add_callable_sink(fn: Callable[[str], None], min_level: int = 0) -> bool:
-    """Register a callable sink at runtime. Returns True if registered.
+def _has_callable_sinks() -> bool:
+    return bool(_configured_callable_sinks or _runtime_callable_sinks)
+
+
+def add_callable_sink(fn: Callable[[str], None], min_level: int = 0) -> int:
+    """Register a runtime callable sink and return its stable token.
 
     The sink is invoked with each rendered line on the dispatch thread.
     If the dispatch infrastructure is not running, it is started.
     """
-    global _callable_sinks, _dispatch_queue, _dispatch_thread
-    if _RUST is None or not _enabled:
-        return False
+    global _dispatch_queue
+    token = next(_sink_tokens)
     with _state_lock:
-        if _callable_sinks is None:
-            _callable_sinks = []
-        _callable_sinks.append((fn, min_level))
-        if _dispatch_queue is None:
-            _dispatch_queue = queue.Queue()
-    # Start the dispatch thread if not running.
-    if _dispatch_thread is None or not _dispatch_thread.is_alive():
-        _dispatch_stop.clear()
-        _dispatch_thread = threading.Thread(target=_dispatch_loop, daemon=True)
-        _dispatch_thread.start()
-    return True
+        _runtime_callable_sinks[token] = _CallableSink(token, fn, min_level)
+        should_start = _enabled and (_dispatch_thread is None or not _dispatch_thread.is_alive())
+        if should_start and _dispatch_queue is None:
+            _dispatch_queue = queue.Queue(maxsize=_callable_queue_maxsize)
+    if should_start:
+        _start_dispatch_thread()
+    return token
 
 
-def remove_callable_sink(fn: Callable[[str], None]) -> bool:
-    """Remove a callable sink. Returns True if found and removed."""
-    global _callable_sinks
+def remove_callable_sink(token: int) -> bool:
+    """Drain prior records, then remove exactly one runtime sink token."""
+    flush_callable_sinks()
     with _state_lock:
-        if not _callable_sinks:
-            return False
-        before = len(_callable_sinks)
-        _callable_sinks = [(f, lvl) for f, lvl in _callable_sinks if f is not fn]
-        return len(_callable_sinks) < before
+        removed = _runtime_callable_sinks.pop(token, None) is not None
+        should_stop = not _has_callable_sinks()
+    if should_stop and threading.current_thread() is not _dispatch_thread:
+        _stop_dispatch_thread(drain=True)
+    return removed
 
 
 def sensitive_patterns() -> list[str] | None:
@@ -305,28 +311,36 @@ def notify_metrics(method: str, message: str, fields: dict[str, Any]) -> None:
         pass
 
 
-def notify_sentry(method: str, message: str, fields: dict[str, Any], exc_info: Any = None) -> None:
-    """Invoke the configured Sentry processor for a kept record.
+def notify_sentry(
+    method: str,
+    redacted_line: str,
+    field_names: tuple[str, ...],
+    exc_info: Any = None,
+) -> None:
+    """Invoke the configured Sentry processor with the redacted rendered event.
 
     Mirrors :func:`notify_metrics` but passes the raw ``exc_info`` (in the shape
     ``SentryProcessor._resolve_exception`` expects: ``True``, a ``(type, exc, tb)``
-    tuple, or a ``BaseException``) so exception capture works. When redaction is
-    configured (``sensitive_keys`` or ``sensitive_patterns``), the
-    ``REDACTED_MARKER_KEY`` is injected so the processor's ``require_redaction``
-    guard recognizes that redaction already ran in Rust. No-op when no processor
-    is configured; hook errors are swallowed — Sentry must never break logging.
+    tuple, or a ``BaseException``) so exception capture works. Field values and
+    the message are reconstructed from the JSON produced by the Rust renderer,
+    guaranteeing that key and pattern redaction runs before third-party export.
+    Hook errors are swallowed — Sentry must never break logging.
     """
     if _sentry_processor is None:
         return
-    event_dict: dict[str, Any] = {"event": message, **fields}
+    try:
+        rendered = json.loads(redacted_line)
+    except (json.JSONDecodeError, TypeError):
+        return
+    event_dict: dict[str, Any] = {"event": rendered.get("message", "")}
+    for key in field_names:
+        if key in rendered:
+            event_dict[key] = rendered[key]
     if exc_info is not None:
         event_dict["exc_info"] = exc_info
-    # Native Rust redaction already ran; mark the dict so SentryProcessor's
-    # require_redaction guard (which checks REDACTED_MARKER_KEY) recognizes it.
-    if _sensitive_keys is not None or _sensitive_patterns is not None:
-        from structguru.redaction import REDACTED_MARKER_KEY
+    from structguru.redaction import REDACTED_MARKER_KEY
 
-        event_dict.setdefault(REDACTED_MARKER_KEY, True)
+    event_dict[REDACTED_MARKER_KEY] = True
     try:
         _sentry_processor(None, method, event_dict)
     except Exception:  # noqa: BLE001 - hooks must never break logging
@@ -337,7 +351,7 @@ def build_exception_field(exc_info: Any) -> str | dict[str, Any] | None:
     """Build the ``exception`` field value for a native record.
 
     Returns the structured dict when ``structured_exceptions`` is enabled
-    (matching :class:`structguru.exceptions.ExceptionDictProcessor` exactly, or
+    (matching :func:`structguru.exceptions.build_exception_dict` exactly, or
     ``None`` when *exc_info* does not resolve); otherwise the formatted
     traceback string (matching ``format_exc_info``). Frame walking, locals
     capture, and ``repr`` are Python-owned — the native renderer only
@@ -379,10 +393,11 @@ def format_exception(exc_info: Any) -> str:
         exc_info = sys.exc_info()
     elif isinstance(exc_info, BaseException):
         exc_info = (type(exc_info), exc_info, exc_info.__traceback__)
-    if not exc_info or exc_info[0] is None:
+    if not isinstance(exc_info, tuple) or len(exc_info) != 3 or exc_info[0] is None:
         return ""
-    exc_type, exc_value, exc_tb = exc_info
-    assert isinstance(exc_value, BaseException)
+    _exc_type, exc_value, exc_tb = exc_info
+    if not isinstance(exc_value, BaseException):
+        return ""
     tb = cast("TracebackType | None", exc_tb)
     return "".join(traceback.format_exception(type(exc_value), exc_value, tb)).rstrip("\n")
 
@@ -415,6 +430,7 @@ def configure(
     file_backup_count: int = 5,
     also_stdout: bool = False,
     callable_sinks: list[Callable[[str], None]] | None = None,
+    callable_queue_maxsize: int = 1024,
     stream_sink: Any = None,
 ) -> None:
     """Configure the native renderer and background writer.
@@ -442,8 +458,7 @@ def configure(
     ``rate_limited`` counters are reported separately from the writer's transport
     ``dropped`` counter (see :func:`native_metrics`). ``sample_max_level``
     restricts sampling to records at or below that level (more severe records
-    always pass) — the native analog of wrapping ``SamplingProcessor`` in
-    ``ConditionalProcessor(max_level=...)``.
+    always pass) — the native analog of level-gated sampling.
 
     ``metric_processor`` is a structlog-style processor (e.g.
     :class:`structguru.metrics.MetricProcessor`) invoked for every *kept* record
@@ -453,7 +468,7 @@ def configure(
 
     ``structured_exceptions=True`` renders the ``exception`` field as the
     structured dict produced by
-    :class:`structguru.exceptions.ExceptionDictProcessor` (with the
+    :func:`structguru.exceptions.build_exception_dict` (with the
     ``exception_*`` knobs mirroring the processor's parameters and
     ``sensitive_keys`` reused for locals redaction) instead of the formatted
     traceback string.
@@ -469,9 +484,9 @@ def configure(
     the file and stdout (e.g. container + persistent log).
 
     ``callable_sinks`` is a list of ``Callable[[str], None]`` invoked with each
-    *rendered* line. They run on a dedicated daemon thread (never the Rust
-    writer thread, which must not touch the GIL), so a blocking callable cannot
-    deadlock the logging path. Callable errors are swallowed.
+    *rendered* line. They run on a dedicated daemon thread. Their queue is bounded
+    by ``callable_queue_maxsize``; ``overflow="block"`` applies backpressure when
+    full, while ``overflow="drop"`` drops and counts the callable delivery.
 
     Registers shutdown (``atexit``) and fork (``os.register_at_fork``) handlers so
     buffered records are flushed on exit and the background writer is respawned in
@@ -481,7 +496,8 @@ def configure(
     global _file_path, _file_max_bytes, _file_backup_count, _also_stdout
     global _level_threshold, _otel, _sensitive_keys, _sensitive_patterns
     global _redaction_config, _filter, _exception_config, _metric_processor, _sentry_processor
-    global _console, _colors, _callable_sinks, _dispatch_queue, _dispatch_thread, _stream_sink
+    global _console, _colors, _configured_callable_sinks, _dispatch_queue, _stream_sink
+    global _callable_queue_maxsize, _dispatch_dropped
     if _RUST is None:
         msg = "native extension is not available"
         raise RuntimeError(msg)
@@ -506,6 +522,9 @@ def configure(
     if sentry_processor is not None and not callable(sentry_processor):
         msg = f"sentry_processor must be callable, got {type(sentry_processor)!r}"
         raise TypeError(msg)
+    if callable_queue_maxsize < 1:
+        msg = f"callable_queue_maxsize must be >= 1, got {callable_queue_maxsize}"
+        raise ValueError(msg)
 
     # Validate regex patterns against Rust's engine before enabling. Rust's
     # `regex` guarantees linear-time matching and therefore rejects
@@ -566,7 +585,7 @@ def configure(
     new_colors = colors if colors is not None else (sys.stdout.isatty() if new_console else False)
 
     # Stop any existing dispatch thread before re-enabling.
-    _stop_dispatch_thread()
+    _stop_dispatch_thread(drain=True)
 
     with _state_lock:
         if _writer is not None:
@@ -598,15 +617,21 @@ def configure(
             file_backup_count=file_backup_count,
             also_stdout=also_stdout,
         )
-        _callable_sinks = (
-            [(fn, _LEVEL_NUM["debug"]) for fn in callable_sinks] if callable_sinks else None
+        _configured_callable_sinks = (
+            [_CallableSink(-index, fn, 0) for index, fn in enumerate(callable_sinks, 1)]
+            if callable_sinks
+            else []
         )
-        _dispatch_queue = queue.Queue() if _callable_sinks else None
+        _callable_queue_maxsize = callable_queue_maxsize
+        _dispatch_dropped = 0
+        _dispatch_queue = (
+            queue.Queue(maxsize=callable_queue_maxsize) if _has_callable_sinks() else None
+        )
         _stream_sink = stream_sink
         _enabled = True
 
     # Start the dispatch thread outside the state lock.
-    if _callable_sinks:
+    if _has_callable_sinks():
         _start_dispatch_thread()
     _register_lifecycle_hooks()
 
@@ -627,21 +652,23 @@ def _register_lifecycle_hooks() -> None:
 
 
 def _atexit_close() -> None:
-    """Drain + stop the writer on interpreter shutdown (best effort)."""
+    """Drain native and callable sinks on interpreter shutdown."""
+    _stop_dispatch_thread(drain=True)
     with _state_lock:
         if _writer is not None:
             _writer.close()
 
 
 def _before_fork() -> None:
-    """Flush buffered records in the parent before forking (best effort)."""
+    """Flush buffered records in the parent before forking."""
     if _writer is not None:
         _writer.flush()
+    flush_callable_sinks()
 
 
 def _after_in_child() -> None:
     """Respawn the writer in the child: its worker thread did not survive fork."""
-    global _writer, _dispatch_thread, _dispatch_stop
+    global _writer, _dispatch_thread, _dispatch_queue
     if not _enabled or _RUST is None:
         return
     old = _writer
@@ -657,66 +684,83 @@ def _after_in_child() -> None:
         also_stdout=_also_stdout,
     )
     # The dispatch thread also died in the fork; respawn it if callable sinks are active.
-    _dispatch_stop.clear()
     _dispatch_thread = None
-    if _callable_sinks and _dispatch_queue is not None:
-        _dispatch_thread = threading.Thread(target=_dispatch_loop, daemon=True)
-        _dispatch_thread.start()
+    _dispatch_queue = (
+        queue.Queue(maxsize=_callable_queue_maxsize) if _has_callable_sinks() else None
+    )
+    if _dispatch_queue is not None:
+        _start_dispatch_thread()
 
 
 def _start_dispatch_thread() -> None:
     """Start the callable-sink dispatch daemon thread."""
-    global _dispatch_thread, _dispatch_stop
-    _dispatch_stop.clear()
-    _dispatch_thread = threading.Thread(target=_dispatch_loop, daemon=True)
+    global _dispatch_thread
+    dispatch_queue = _dispatch_queue
+    if dispatch_queue is None:
+        return
+    _dispatch_thread = threading.Thread(
+        target=_dispatch_loop,
+        args=(dispatch_queue,),
+        daemon=True,
+    )
     _dispatch_thread.start()
 
 
-def _stop_dispatch_thread() -> None:
-    """Signal the dispatch thread to stop and join it (best effort)."""
-    global _dispatch_thread
-    _dispatch_stop.set()
+def _stop_dispatch_thread(*, drain: bool) -> None:
+    """Stop the dispatch thread, optionally draining every queued delivery."""
+    global _dispatch_thread, _dispatch_queue
     thread = _dispatch_thread
-    if thread is not None and thread.is_alive():
-        thread.join(timeout=2.0)
+    dispatch_queue = _dispatch_queue
+    if thread is not None and thread.is_alive() and dispatch_queue is not None:
+        if threading.current_thread() is thread:
+            dispatch_queue.put(_DISPATCH_STOP)
+            _dispatch_thread = None
+            _dispatch_queue = None
+            return
+        if drain:
+            dispatch_queue.join()
+        dispatch_queue.put(_DISPATCH_STOP)
+        thread.join()
     _dispatch_thread = None
+    _dispatch_queue = None
 
 
-def _dispatch_loop() -> None:
+def _dispatch_loop(dispatch_queue: queue.Queue[object]) -> None:
     """Drain the dispatch queue and invoke each callable sink.
 
     Runs on a dedicated daemon thread so callable sinks (which acquire the GIL)
     never interact with the Rust writer thread. Per-sink level filtering and
     error isolation happen here.
     """
-    assert _dispatch_queue is not None  # set when _callable_sinks is non-empty
-    while not _dispatch_stop.is_set():
-        try:
-            line = _dispatch_queue.get(timeout=0.5)
-        except queue.Empty:
-            continue
-        sinks = _callable_sinks
-        if not sinks:
-            continue
-        # Extract the level for per-sink filtering (best effort; bad JSON → INFO).
-        try:
-            level_str = json.loads(line).get("level", "INFO")
-        except (json.JSONDecodeError, TypeError):
-            level_str = "INFO"
-        level_num = _LEVEL_NUM.get(str(level_str).lower(), _LEVEL_NUM["info"])
-        for fn, min_level in sinks:
-            if level_num >= min_level:
+    while True:
+        item = dispatch_queue.get()
+        if item is _DISPATCH_STOP:
+            dispatch_queue.task_done()
+            return
+        record = cast("_DispatchRecord", item)
+        with _state_lock:
+            sinks = [*_configured_callable_sinks, *_runtime_callable_sinks.values()]
+        for sink in sinks:
+            if record.level >= sink.min_level:
                 try:
-                    fn(line)
+                    sink.callback(record.line)
                 except Exception:  # noqa: BLE001 - callable errors never break logging
                     pass
+        dispatch_queue.task_done()
+
+
+def flush_callable_sinks() -> None:
+    """Block until every queued callable delivery has completed."""
+    dispatch_queue = _dispatch_queue
+    if dispatch_queue is not None and threading.current_thread() is not _dispatch_thread:
+        dispatch_queue.join()
 
 
 def disable_native() -> None:
     """Turn native mode off and stop the background writer."""
     global _enabled, _writer, _redaction_config, _filter, _exception_config, _metric_processor
-    global _sentry_processor, _callable_sinks, _dispatch_queue, _stream_sink, _console, _colors
-    _stop_dispatch_thread()
+    global _sentry_processor, _configured_callable_sinks, _stream_sink, _console, _colors
+    _stop_dispatch_thread(drain=True)
     with _state_lock:
         _enabled = False
         if _writer is not None:
@@ -729,9 +773,34 @@ def disable_native() -> None:
         _sentry_processor = None
         _console = False
         _colors = False
-        _callable_sinks = None
-        _dispatch_queue = None
+        _configured_callable_sinks = []
         _stream_sink = None
+
+
+def _render_json(
+    fields: dict[str, Any],
+    logger: str,
+    level: str,
+    message: str,
+    stack: str | None,
+) -> str:
+    """Render a redacted JSON event, reusing compiled configuration."""
+    assert _RUST is not None
+    if _redaction_config is not None:
+        return _RUST.render_line_with_config(
+            fields,
+            logger,
+            level,
+            _service,
+            message,
+            _redaction_config,
+            None,
+            _sensitive_keys,
+            stack,
+        )
+    return _RUST.render_line(
+        fields, logger, level, _service, message, None, _sensitive_keys, None, stack
+    )
 
 
 def render_and_enqueue(
@@ -740,8 +809,8 @@ def render_and_enqueue(
     level: str,
     message: str,
     stack: str | None = None,
-) -> bool:
-    """Render one record natively and enqueue it; returns False if dropped.
+) -> str | None:
+    """Render and enqueue one record; return redacted JSON for Sentry when enabled.
 
     The timestamp is generated inside the Rust core (cached per second), so no
     Python-side time formatting happens on the hot path. When value-pattern
@@ -776,21 +845,12 @@ def render_and_enqueue(
                 None,
                 stack,
             )
-    elif _redaction_config is not None:
-        rendered = _RUST.render_line_with_config(
-            fields,
-            logger,
-            level,
-            _service,
-            message,
-            _redaction_config,
-            None,
-            _sensitive_keys,
-            stack,
-        )
     else:
-        rendered = _RUST.render_line(
-            fields, logger, level, _service, message, None, _sensitive_keys, None, stack
+        rendered = _render_json(fields, logger, level, message, stack)
+    sentry_line = None
+    if _sentry_processor is not None:
+        sentry_line = (
+            rendered if not _console else _render_json(fields, logger, level, message, stack)
         )
     line = rendered + "\n"
     # Synchronous stream sink (used by configure_structlog for backward compat).
@@ -805,13 +865,22 @@ def render_and_enqueue(
         enqueued = _writer.try_enqueue(line)
     if not enqueued:
         _note_drop()
-    # Dispatch to callable sinks (non-blocking; the dispatch thread handles delivery).
-    if _dispatch_queue is not None:
-        try:
-            _dispatch_queue.put_nowait(line)
-        except queue.Full:
-            _note_drop()
-    return enqueued
+    # Dispatch callable sinks through their bounded queue using the configured
+    # overflow policy: block for lossless backpressure or drop the delivery.
+    dispatch_queue = _dispatch_queue
+    if dispatch_queue is not None:
+        dispatch_record = _DispatchRecord(
+            line=line,
+            level=_LEVEL_NUM.get(level, _LEVEL_NUM["info"]),
+        )
+        if _overflow == "block":
+            dispatch_queue.put(dispatch_record)
+        else:
+            try:
+                dispatch_queue.put_nowait(dispatch_record)
+            except queue.Full:
+                _note_callable_drop()
+    return sentry_line
 
 
 def _note_drop() -> None:
@@ -825,16 +894,30 @@ def _note_drop() -> None:
         )
 
 
+def _note_callable_drop() -> None:
+    """Count a callable-sink delivery dropped by its bounded queue."""
+    global _dispatch_dropped
+    _dispatch_dropped += 1
+    if _dispatch_dropped == 1 or _dispatch_dropped % 1000 == 0:
+        warnings.warn(
+            f"structguru callable sinks dropped {_dispatch_dropped} delivery record(s): "
+            "queue full",
+            stacklevel=3,
+        )
+
+
 def _reset_drop_count() -> None:
     """Reset the drop counter (used by tests)."""
-    global _drop_count
+    global _drop_count, _dispatch_dropped
     _drop_count = 0
+    _dispatch_dropped = 0
 
 
 def flush_native() -> None:
-    """Block until the writer has drained (used by shutdown/tests)."""
+    """Block until native output and callable sinks have fully drained."""
     if _writer is not None:
         _writer.flush()
+    flush_callable_sinks()
 
 
 def drain_messages() -> list[str]:
@@ -852,6 +935,10 @@ def native_metrics() -> dict[str, Any] | None:
     if _writer is None:
         return None
     metrics = dict(_writer.metrics())
+    dispatch_queue = _dispatch_queue
+    metrics["callable_dropped"] = _dispatch_dropped
+    metrics["callable_depth"] = dispatch_queue.qsize() if dispatch_queue is not None else 0
+    metrics["callable_maxsize"] = _callable_queue_maxsize
     if _filter is not None:
         metrics.update(_filter.stats())
     return metrics
@@ -861,8 +948,7 @@ def _maybe_configure_from_env() -> None:
     """Auto-configure native mode at import time (the default since v1.0).
 
     Set ``STRUCTGURU_LEGACY=1`` to skip import-time configuration. Logging then
-    remains disabled until :func:`configure` is called. ``STRUCTGURU_NATIVE`` is
-    a no-op retained for compatibility because native logging is the only path.
+    remains disabled until :func:`configure` is called.
 
     Honors ``LOG_LEVEL``, ``STRUCTGURU_SERVICE``, ``STRUCTGURU_NATIVE_TARGET``,
     ``STRUCTGURU_NATIVE_SAMPLE_RATE`` (float 0.0–1.0), and

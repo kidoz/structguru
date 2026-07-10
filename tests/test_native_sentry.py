@@ -190,3 +190,55 @@ def test_sentry_hook_injects_redaction_marker_when_redaction_configured() -> Non
 
     assert len(captured) == 1
     assert captured[0].get(REDACTED_MARKER_KEY) is True
+    assert captured[0]["password"] == "[REDACTED]"
+
+
+def test_sentry_hook_receives_pattern_redacted_message_and_fields() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def hook(_logger: Any, _method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+        captured.append(event_dict)
+        return event_dict
+
+    _native.configure(
+        target="memory",
+        sensitive_patterns=[r"secret=\w+"],
+        sentry_processor=hook,
+    )
+    try:
+        structguru.logger.error("message secret=abc", detail="field secret=xyz")
+        _drain_all()
+    finally:
+        _native.disable_native()
+
+    assert captured[0]["event"] == "message [REDACTED]"
+    assert captured[0]["detail"] == "field [REDACTED]"
+
+
+def test_real_sentry_processor_never_receives_unredacted_extras() -> None:
+    from structguru.integrations import sentry as sentry_mod
+    from structguru.integrations.sentry import SentryProcessor
+
+    mock_sentry = MagicMock()
+    scope = MagicMock()
+    context = MagicMock()
+    context.__enter__.return_value = scope
+    context.__exit__.return_value = False
+    mock_sentry.new_scope.return_value = context
+
+    _native.configure(
+        target="memory",
+        sensitive_keys=["password"],
+        sentry_processor=SentryProcessor(capture_messages=True),
+    )
+    try:
+        with patch.object(sentry_mod, "_sentry_sdk", mock_sentry):
+            structguru.logger.error("login", password="cleartext")
+            _drain_all()
+    finally:
+        _native.disable_native()
+
+    breadcrumb = mock_sentry.add_breadcrumb.call_args.kwargs
+    assert breadcrumb["data"]["password"] == "[REDACTED]"
+    extras = scope.set_extra.call_args.args[1]
+    assert extras["password"] == "[REDACTED]"

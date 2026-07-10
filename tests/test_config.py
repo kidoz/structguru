@@ -55,6 +55,7 @@ class TestConfigureStructlog:
             service="svc",
             level="DEBUG",
             json=False,
+            target="null",
             stream_sink=buf,
         )
 
@@ -67,6 +68,7 @@ class TestConfigureStructlog:
         output = buf.getvalue()
         assert '"message"' in output
         assert '"testsvc"' in output
+        assert len(output.splitlines()) == 1
         _native.disable_native()
 
     def test_console_output(self) -> None:

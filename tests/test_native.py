@@ -127,6 +127,17 @@ def test_native_converts_dataclass_without_orjson() -> None:
     assert result == {"x": 3, "y": 4}
 
 
+def test_native_converts_slots_dataclass_without_orjson() -> None:
+    from dataclasses import dataclass
+
+    @dataclass(slots=True)
+    class Point:
+        x: int
+        y: int
+
+    assert rust._convert_value_debug(Point(3, 4)) == {"x": 3, "y": 4}
+
+
 def test_native_rejects_non_string_map_keys() -> None:
     with pytest.raises(TypeError, match="map keys must be strings"):
         rust._convert_value_debug({1: "one"})

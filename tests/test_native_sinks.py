@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
-import time
+from pathlib import Path
 
 import pytest
 
@@ -74,9 +76,8 @@ def test_file_sink_rotates_at_max_bytes() -> None:
         # backup_count=3 means at most 3 backups.
         assert not os.path.exists(f"{path}.4"), ".4 should not exist (backup_count=3)"
 
-        # The active file or .1 must contain content (the last record may have
-        # triggered the final rotation, leaving the active file freshly opened —
-        # faithful to CPython RotatingFileHandler: write-then-check-then-rotate).
+        # Rotation happens before the threshold-crossing record, matching
+        # logging.handlers.RotatingFileHandler.
         with open(path) as f:
             active = f.read()
         with open(f"{path}.1") as f:
@@ -130,8 +131,6 @@ def test_callable_sink_receives_rendered_lines() -> None:
         for i in range(5):
             structguru.logger.info("callable {n}", n=i)
         _native.flush_native()
-        # Allow the dispatch thread to drain.
-        time.sleep(0.3)
     finally:
         _native.disable_native()
 
@@ -159,7 +158,6 @@ def test_callable_sink_errors_are_swallowed() -> None:
     try:
         structguru.logger.info("survives")
         _native.flush_native()
-        time.sleep(0.3)
     finally:
         _native.disable_native()
 
@@ -176,15 +174,80 @@ def test_callable_sink_stopped_on_disable() -> None:
 
     _native.configure(service="svc", target="memory", level="DEBUG", callable_sinks=[collector])
     structguru.logger.info("before disable")
-    _native.flush_native()
-    time.sleep(0.2)
     _native.disable_native()
 
     count_before = len(received)
-    # After disable, new logging via the standard path shouldn't reach the sink.
+    assert count_before == 1, "disable_native must drain pending callable deliveries"
     structguru.logger.info("after disable")
-    time.sleep(0.2)
     assert len(received) == count_before
+
+
+def test_reconfigure_drains_old_configured_sinks_before_replacing() -> None:
+    first: list[str] = []
+    second: list[str] = []
+    _native.configure(target="memory", callable_sinks=[first.append])
+    structguru.logger.info("old configuration")
+    _native.configure(target="memory", callable_sinks=[second.append])
+    try:
+        structguru.logger.info("new configuration")
+        _native.flush_native()
+    finally:
+        _native.disable_native()
+
+    assert any("old configuration" in line for line in first)
+    assert not any("new configuration" in line for line in first)
+    assert any("new configuration" in line for line in second)
+
+
+def test_atexit_drains_callable_sinks(tmp_path: Path) -> None:
+    output = tmp_path / "atexit-callback.log"
+    code = f"""
+from pathlib import Path
+import structguru
+
+output = Path({str(output)!r})
+def sink(line):
+    output.write_text(line, encoding="utf-8")
+
+structguru.configure(target="null", callable_sinks=[sink])
+structguru.logger.info("delivered at exit")
+"""
+    subprocess.run([sys.executable, "-c", code], check=True)
+    assert "delivered at exit" in output.read_text(encoding="utf-8")
+
+
+def test_callable_sink_queue_is_bounded_and_counts_drops() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_sink(_line: str) -> None:
+        started.set()
+        release.wait(timeout=2)
+
+    _native.configure(
+        target="memory",
+        overflow="drop",
+        callable_sinks=[blocking_sink],
+        callable_queue_maxsize=1,
+    )
+    try:
+        structguru.logger.info("first")
+        assert started.wait(timeout=1)
+        structguru.logger.info("second")
+        with pytest.warns(UserWarning, match="callable sinks dropped"):
+            structguru.logger.info("third")
+        metrics = _native.native_metrics()
+        assert metrics is not None
+        assert metrics["callable_maxsize"] == 1
+        assert metrics["callable_dropped"] == 1
+    finally:
+        release.set()
+        _native.disable_native()
+
+
+def test_invalid_callable_queue_maxsize_raises() -> None:
+    with pytest.raises(ValueError, match="callable_queue_maxsize"):
+        _native.configure(callable_queue_maxsize=0)
 
 
 def test_non_callable_sink_raises() -> None:

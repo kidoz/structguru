@@ -261,6 +261,15 @@ class TestLoggerAddRemove:
 
         log.remove(hid)
 
+    def test_remove_drains_records_queued_before_removal(self) -> None:
+        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
+        log = Logger()
+        messages: list[str] = []
+        handler_id = log.add(messages.append)
+        log.info("before removal")
+        log.remove(handler_id)
+        assert any("before removal" in message for message in messages)
+
     def test_remove_all(self) -> None:
         configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
         log = Logger()
@@ -274,18 +283,67 @@ class TestLoggerAddRemove:
         # Callable sinks route through the native dispatch thread and receive
         # rendered log lines.
         configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
-        import time
-
         log = Logger()
         messages: list[str] = []
         hid = log.add(messages.append, level="DEBUG")
         try:
             log.info("captured")
             _native.flush_native()
-            time.sleep(0.3)  # allow dispatch thread to deliver
         finally:
             log.remove(hid)
         assert any("captured" in m for m in messages), f"expected delivery, got {messages}"
+
+    def test_duplicate_callable_registrations_are_removed_by_handler_id(self) -> None:
+        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
+        log = Logger()
+        messages: list[str] = []
+        first = log.add(messages.append)
+        second = log.add(messages.append)
+        log.remove(first)
+        try:
+            log.info("once")
+            _native.flush_native()
+        finally:
+            log.remove(second)
+        assert len(messages) == 1
+
+    def test_callable_added_while_disabled_activates_on_configure(self) -> None:
+        _native.disable_native()
+        log = Logger()
+        messages: list[str] = []
+        handler_id = log.add(messages.append)
+        try:
+            _native.configure(target="memory")
+            log.info("activated")
+            _native.flush_native()
+        finally:
+            log.remove(handler_id)
+        assert any("activated" in message for message in messages)
+
+    def test_runtime_callable_survives_reconfigure(self) -> None:
+        _native.configure(target="memory")
+        log = Logger()
+        messages: list[str] = []
+        handler_id = log.add(messages.append)
+        try:
+            _native.configure(target="memory", level="DEBUG")
+            log.info("after reconfigure")
+            _native.flush_native()
+        finally:
+            log.remove(handler_id)
+        assert any("after reconfigure" in message for message in messages)
+
+    def test_stream_sink_receives_native_records(self) -> None:
+        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
+        log = Logger()
+        stream = io.StringIO()
+        handler_id = log.add(stream)
+        try:
+            log.info("native stream")
+            _native.flush_native()
+        finally:
+            log.remove(handler_id)
+        assert "native stream" in stream.getvalue()
 
     def test_remove_closes_handler(self, tmp_path: Path) -> None:
         configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
@@ -294,8 +352,11 @@ class TestLoggerAddRemove:
         handler = log._handlers[hid]
         stream = handler.stream  # type: ignore[attr-defined]
         assert stream is not None
+        log.info("native file")
+        _native.flush_native()
         log.remove(hid)
         assert stream.closed
+        assert "native file" in (tmp_path / "test.log").read_text()
 
     def test_remove_all_closes_handlers(self, tmp_path: Path) -> None:
         configure(service="test", level="DEBUG", json=True, stream=io.StringIO())

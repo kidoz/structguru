@@ -48,7 +48,7 @@ def configure_structlog(
         will be removed in v2.0.
 
     Since v1.0, this is a compatibility shim that wires the native Rust renderer
-    to the given *stream* (via a callable sink), preserving the pre-1.0 contract
+    synchronously to the given *stream*, preserving the pre-1.0 contract
     that ``logger`` output lands on the configured stream. The native renderer
     handles all JSON/console formatting, redaction, and level filtering.
 
@@ -61,7 +61,7 @@ def configure_structlog(
     json_logs:
         ``True`` for JSON output, ``False`` for colored console output.
     stream:
-        Output stream.  Defaults to ``sys.stdout``. Wired as a callable sink.
+        Output stream. Defaults to ``sys.stdout`` and is the sole output target.
     clear_handlers:
         Kept for backward compatibility; the native path does not use root
         logger handlers.
@@ -85,6 +85,7 @@ def configure_structlog(
         service=service,
         level=level,
         json=json_logs,
+        target="null",
         stream_sink=stream,
     )
 
@@ -135,9 +136,8 @@ def setup_structlog(
         if issubclass(exc_type, KeyboardInterrupt):
             sys.__excepthook__(exc_type, exc_value, exc_traceback)
             return
-        logging.getLogger().error(
-            "Uncaught exception",
-            exc_info=(exc_type, exc_value, exc_traceback),
-        )
+        from structguru.core import logger
+
+        logger.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
 
     sys.excepthook = _log_exception

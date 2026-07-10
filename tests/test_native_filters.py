@@ -42,6 +42,22 @@ def test_pattern_redacts_matching_substring_in_string_value() -> None:
         _native.disable_native()
 
 
+def test_pattern_redacts_matching_substring_in_message() -> None:
+    _native.configure(
+        service="svc",
+        target="memory",
+        level="DEBUG",
+        sensitive_patterns=[r"secret=\w+"],
+    )
+    try:
+        structguru.logger.info("token secret=abc")
+        record = _drain_last()
+    finally:
+        _native.disable_native()
+
+    assert record["message"] == "token [REDACTED]"
+
+
 def test_pattern_redaction_descends_into_nested_maps_and_lists() -> None:
     ssn = r"\b\d{3}-\d{2}-\d{4}\b"
     _native.configure(service="svc", target="memory", level="DEBUG", sensitive_patterns=[ssn])
@@ -290,7 +306,6 @@ def test_patterns_and_sampling_combine() -> None:
 
 
 def test_env_var_sample_rate(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("STRUCTGURU_NATIVE", "1")
     monkeypatch.setenv("STRUCTGURU_NATIVE_TARGET", "memory")
     monkeypatch.setenv("STRUCTGURU_NATIVE_SAMPLE_RATE", "0.0")
     _native.disable_native()
@@ -302,12 +317,10 @@ def test_env_var_sample_rate(monkeypatch: pytest.MonkeyPatch) -> None:
         assert len(_native.drain_messages()) == 0
     finally:
         _native.disable_native()
-        monkeypatch.delenv("STRUCTGURU_NATIVE", raising=False)
         monkeypatch.delenv("STRUCTGURU_NATIVE_SAMPLE_RATE", raising=False)
 
 
 def test_env_var_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("STRUCTGURU_NATIVE", "1")
     monkeypatch.setenv("STRUCTGURU_NATIVE_TARGET", "memory")
     monkeypatch.setenv("STRUCTGURU_NATIVE_RATE_LIMIT", "2/60")
     _native.disable_native()
@@ -321,11 +334,10 @@ def test_env_var_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
         assert _native.native_metrics()["rate_limited"] == 1
     finally:
         _native.disable_native()
-        monkeypatch.delenv("STRUCTGURU_NATIVE", raising=False)
         monkeypatch.delenv("STRUCTGURU_NATIVE_RATE_LIMIT", raising=False)
 
 
-# -- level-gated sampling (ConditionalProcessor analog) -----------------------
+# -- level-gated sampling ----------------------------------------------------
 
 
 def test_sample_max_level_gates_sampling() -> None:

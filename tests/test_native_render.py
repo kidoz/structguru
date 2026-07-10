@@ -140,6 +140,19 @@ def test_native_exception_matches_structlog() -> None:
     assert native["code"] == 1
 
 
+def test_malformed_exc_info_does_not_break_logging() -> None:
+    _native.configure(service="svc", target="memory", level="DEBUG")
+    try:
+        structguru.logger.error("bad metadata", exc_info="invalid")
+        _native.flush_native()
+        record = json.loads(_native.drain_messages()[-1])
+    finally:
+        _native.disable_native()
+
+    assert record["message"] == "bad metadata"
+    assert "exception" not in record
+
+
 def test_native_level_filtering_drops_below_threshold() -> None:
     _native.configure(service="svc", target="memory", level="WARNING")
     try:

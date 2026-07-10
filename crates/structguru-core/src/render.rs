@@ -101,6 +101,34 @@ fn redact_patterns(value: &mut Value, patterns: &[Regex], replacement: &str) {
     }
 }
 
+fn redact_message(
+    message: &str,
+    sensitive_keys: Option<&Vec<String>>,
+    sensitive_patterns: Option<&[Regex]>,
+    pattern_replacement: Option<&str>,
+) -> String {
+    let message_is_sensitive = match sensitive_keys {
+        Some(custom) => is_sensitive("message", custom),
+        None => is_sensitive("message", DEFAULT_SENSITIVE_KEYS),
+    };
+    if message_is_sensitive {
+        return REDACTED.to_owned();
+    }
+
+    let mut value = Value::String(message.to_owned());
+    if let Some(patterns) = sensitive_patterns {
+        redact_patterns(
+            &mut value,
+            patterns,
+            pattern_replacement.unwrap_or(REDACTED),
+        );
+    }
+    let Value::String(redacted) = value else {
+        unreachable!("message redaction preserves the string value variant");
+    };
+    redacted
+}
+
 /// Replace the value of an existing `key` in place, or append it.
 fn upsert(entries: &mut Vec<(String, Value)>, key: &str, value: Value) {
     match entries.iter_mut().find(|(k, _)| k == key) {
@@ -128,6 +156,12 @@ pub fn render_line(
     sensitive_patterns: Option<&[Regex]>,
     pattern_replacement: Option<&str>,
 ) -> Result<String, serde_json::Error> {
+    let redacted_message = redact_message(
+        message,
+        sensitive_keys.as_ref(),
+        sensitive_patterns,
+        pattern_replacement,
+    );
     // Redact against the caller's keys, or the static defaults with zero
     // per-record allocation (comparison is case-insensitive in `is_sensitive`).
     let mut root = Value::Map(fields);
@@ -171,7 +205,7 @@ pub fn render_line(
     if let Some(stack) = stack {
         upsert(&mut entries, "stack", Value::String(stack.to_owned()));
     }
-    upsert(&mut entries, "message", Value::String(message.to_owned()));
+    upsert(&mut entries, "message", Value::String(redacted_message));
 
     Value::Map(entries).to_json_string()
 }
@@ -249,6 +283,12 @@ pub fn render_line_console(
     pattern_replacement: Option<&str>,
     stack: Option<&str>,
 ) -> String {
+    let redacted_message = redact_message(
+        message,
+        sensitive_keys.as_ref(),
+        sensitive_patterns,
+        pattern_replacement,
+    );
     let mut root = Value::Map(fields);
     match &sensitive_keys {
         Some(custom) => redact(&mut root, custom),
@@ -278,7 +318,7 @@ pub fn render_line_console(
         out.push_str(ANSI_RESET);
     }
     out.push(' ');
-    out.push_str(message);
+    out.push_str(&redacted_message);
 
     // Append user fields as k=v pairs (skip standard keys).
     let standard: &[&str] = &[
@@ -473,6 +513,47 @@ mod tests {
 
         assert!(line.contains(r#""msg":"Contact [REDACTED] for details""#));
         assert!(!line.contains("user@example.com"));
+    }
+
+    #[test]
+    fn pattern_redacts_matching_substring_in_message() {
+        let patterns = vec![Regex::new(r"secret=\w+").unwrap()];
+        let line = render_line(
+            vec![],
+            "l",
+            "info",
+            "svc",
+            "token secret=abc",
+            "TS",
+            None,
+            None,
+            Some(&patterns),
+            None,
+        )
+        .unwrap();
+
+        assert!(line.contains(r#""message":"token [REDACTED]""#));
+        assert!(!line.contains("secret=abc"));
+    }
+
+    #[test]
+    fn custom_message_key_redacts_entire_message() {
+        let line = render_line(
+            vec![],
+            "l",
+            "info",
+            "svc",
+            "top secret",
+            "TS",
+            None,
+            Some(vec!["message".to_owned()]),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(line.contains(r#""message":"[REDACTED]""#));
+        assert!(!line.contains("top secret"));
     }
 
     #[test]
@@ -689,6 +770,26 @@ mod tests {
         );
         assert!(line.contains("password=\"[REDACTED]\""));
         assert!(!line.contains("hunter2"));
+    }
+
+    #[test]
+    fn console_redacts_sensitive_patterns_in_message() {
+        let patterns = vec![Regex::new(r"secret=\w+").unwrap()];
+        let line = render_line_console(
+            vec![],
+            "l",
+            "info",
+            "svc",
+            "token secret=abc",
+            false,
+            "TS",
+            None,
+            Some(&patterns),
+            None,
+            None,
+        );
+        assert!(line.contains("token [REDACTED]"));
+        assert!(!line.contains("secret=abc"));
     }
 
     #[test]

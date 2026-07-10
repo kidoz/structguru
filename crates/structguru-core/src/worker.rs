@@ -36,6 +36,15 @@ pub trait StringSink: Send {
     }
 }
 
+#[derive(Default)]
+pub struct NullSink;
+
+impl StringSink for NullSink {
+    fn write(&mut self, _message: String) -> Result<(), SinkError> {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct MemorySinkHandle {
     messages: Arc<Mutex<Vec<String>>>,
@@ -150,14 +159,13 @@ impl StringSink for FailingSink {
 /// Writes to `path`; when the cumulative written bytes reach `max_bytes`, the
 /// file is rotated: the active file becomes `path.1`, `.1 → .2`, …, and the
 /// oldest backup beyond `backup_count` is deleted. A fresh active file is then
-/// opened. `max_bytes == 0` disables rotation. The write happens before the
-/// size check (matching CPython: the record that crosses the threshold stays in
-/// the current file, then rotation occurs).
+/// opened. `max_bytes == 0` disables rotation. The size check happens before
+/// each write, matching CPython's `RotatingFileHandler` behavior.
 ///
 /// Like CPython, there is no cross-process lock — concurrent writers sharing one
 /// path will corrupt rotation. Within a single writer thread this is sound.
 pub struct RotatingFileSink {
-    file: BufWriter<File>,
+    file: Option<BufWriter<File>>,
     path: PathBuf,
     max_bytes: usize,
     backup_count: usize,
@@ -179,28 +187,27 @@ impl RotatingFileSink {
             fs::create_dir_all(parent).map_err(|err| SinkError::new(err.to_string()))?;
         }
         let file = open_append(&path)?;
+        let bytes_written = file
+            .get_ref()
+            .metadata()
+            .map_err(|err| SinkError::new(err.to_string()))?
+            .len() as usize;
         Ok(Self {
-            file,
+            file: Some(file),
             path,
             max_bytes,
             backup_count,
-            bytes_written: 0,
+            bytes_written,
         })
     }
 
     fn rotate(&mut self) -> Result<(), SinkError> {
-        // Flush + close the active file before renaming.
-        self.file
-            .flush()
-            .map_err(|err| SinkError::new(err.to_string()))?;
-        // Re-open to close the current handle, then drop it.
-        {
-            let raw = self
-                .file
-                .get_ref()
-                .try_clone()
+        // Flush and drop the actual active handle before renaming. Windows does
+        // not permit renaming a file while this process still has it open.
+        if let Some(mut file) = self.file.take() {
+            file.flush()
                 .map_err(|err| SinkError::new(err.to_string()))?;
-            drop(raw);
+            drop(file);
         }
 
         if self.backup_count > 0 {
@@ -223,7 +230,7 @@ impl RotatingFileSink {
         }
 
         // Open a fresh active file.
-        self.file = open_append(&self.path)?;
+        self.file = Some(open_append(&self.path)?);
         self.bytes_written = 0;
         Ok(())
     }
@@ -232,19 +239,28 @@ impl RotatingFileSink {
 impl StringSink for RotatingFileSink {
     fn write(&mut self, message: String) -> Result<(), SinkError> {
         let bytes = message.as_bytes();
+        // Match RotatingFileHandler: when the active file is non-empty, roll
+        // before writing the record that would reach or cross the threshold.
+        if self.max_bytes > 0
+            && self.backup_count > 0
+            && self.bytes_written > 0
+            && self.bytes_written.saturating_add(bytes.len()) >= self.max_bytes
+        {
+            self.rotate()?;
+        }
         self.file
+            .as_mut()
+            .expect("rotating file sink always owns an active file")
             .write_all(bytes)
             .map_err(|err| SinkError::new(err.to_string()))?;
         self.bytes_written += bytes.len();
-
-        if self.max_bytes > 0 && self.bytes_written >= self.max_bytes {
-            self.rotate()?;
-        }
         Ok(())
     }
 
     fn flush(&mut self) -> Result<(), SinkError> {
         self.file
+            .as_mut()
+            .expect("rotating file sink always owns an active file")
             .flush()
             .map_err(|err| SinkError::new(err.to_string()))
     }
@@ -382,6 +398,15 @@ impl StringWriter {
             maxsize,
             false,
             Box::new(WriteSink::new(std::io::stdout())),
+            MemorySinkHandle::default(),
+        )
+    }
+
+    pub fn new_null(maxsize: usize) -> Self {
+        Self::with_sink(
+            maxsize,
+            false,
+            Box::new(NullSink),
             MemorySinkHandle::default(),
         )
     }
@@ -938,6 +963,39 @@ mod tests {
             !active.contains("0123456789"),
             "rotated content moved to .1"
         );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn rotating_file_accounts_for_existing_bytes() {
+        let path = temp_log_path("rotate-existing");
+        std::fs::write(&path, "existing").unwrap();
+        let mut sink = RotatingFileSink::new(&path, 10, 2).unwrap();
+        sink.write("new".to_owned()).unwrap();
+        sink.flush().unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(backup_path(&path, 1)).unwrap(),
+            "existing"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        cleanup(&path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rotating_file_closes_active_handle_before_windows_rename() {
+        let path = temp_log_path("rotate-windows-handle");
+        let mut sink = RotatingFileSink::new(&path, 8, 1).unwrap();
+        sink.write("first".to_owned()).unwrap();
+        sink.write("second".to_owned()).unwrap();
+        sink.flush().unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(backup_path(&path, 1)).unwrap(),
+            "first"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
         cleanup(&path);
     }
 
