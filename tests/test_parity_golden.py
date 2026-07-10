@@ -283,22 +283,43 @@ def test_parity_exception_with_chained_cause() -> None:
     assert "inner" in native["exception"] and "outer" in native["exception"]
 
 
-# -- Tier 3: coverage gaps (each xfail is a Phase 1 work item) ----------------
+# -- Tier 3: stack_info -------------------------------------------------------
+# Semantic parity: the stack *content* intentionally diverges — structlog's
+# StackInfoRenderer only skips structlog frames, so the standard path's stack
+# ends inside structguru internals; the native path also skips structguru
+# frames and ends at the user's calling frame. Header, key position, and
+# format match exactly.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 1: stack_info falls back to the structlog path (migration plan §Phase 1)",
-)
 def test_parity_stack_info_handled_natively() -> None:
-    """stack_info=True must produce a native record with a ``stack`` field."""
     _native.enable_native(service="svc", target="memory", level="DEBUG")
     try:
         structguru.logger.info("where am I", stack_info=True)
         _native.flush_native()
         messages = _native.drain_messages()
         assert messages, "stack_info call bypassed the native path"
-        record = json.loads(messages[-1])
-        assert "stack" in record
+        line = messages[-1]
+        record = json.loads(line)
     finally:
         _native.disable_native()
+
+    assert record["stack"].startswith("Stack (most recent call last):\n")
+    assert "test_parity_golden.py" in record["stack"]  # ends at the user frame
+    assert "structguru/core.py" not in record["stack"]  # internals skipped
+    assert not record["stack"].endswith("\n")
+    # position matches StackInfoRenderer: between "service" and "message"
+    assert '"service":"svc","stack":"' in line
+    assert "stack_info" not in record  # consumed, like the processor's pop()
+
+
+def test_parity_stack_info_via_opt() -> None:
+    _native.enable_native(service="svc", target="memory", level="DEBUG")
+    try:
+        structguru.logger.opt(stack_info=True).warning("careful")
+        _native.flush_native()
+        record = json.loads(_native.drain_messages()[-1])
+    finally:
+        _native.disable_native()
+
+    assert record["stack"].startswith("Stack (most recent call last):\n")
+    assert record["level"] == "WARN"

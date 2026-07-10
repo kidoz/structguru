@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import atexit
 import importlib
+import io
 import math
 import os
 import sys
@@ -66,6 +67,7 @@ class _RustModule(Protocol):
         timestamp: str | None = None,
         sensitive_keys: list[str] | None = None,
         sensitive_patterns: list[str] | None = None,
+        stack: str | None = None,
     ) -> str: ...
 
     def render_line_with_config(
@@ -78,6 +80,7 @@ class _RustModule(Protocol):
         config: Any,
         timestamp: str | None = None,
         sensitive_keys: list[str] | None = None,
+        stack: str | None = None,
     ) -> str: ...
 
     def validate_patterns(self, patterns: list[str]) -> int: ...
@@ -185,6 +188,24 @@ def should_render(method: str, message: str) -> bool:
     if _filter is None:
         return True
     return bool(_filter.allow(message, method))
+
+
+def format_stack() -> str:
+    """Format the caller's stack like structlog's ``StackInfoRenderer``.
+
+    Matches ``structlog._frames._format_stack`` (the logging-style header, the
+    trailing-newline strip) but skips *structguru* frames the way structlog
+    skips its own, so the rendered stack ends at the user's calling frame
+    instead of at structguru internals.
+    """
+    frame: Any = sys._getframe()
+    while frame is not None and frame.f_globals.get("__name__", "").startswith("structguru"):
+        frame = frame.f_back
+    sio = io.StringIO()
+    sio.write("Stack (most recent call last):\n")
+    traceback.print_stack(frame, file=sio)
+    stack = sio.getvalue()
+    return stack[:-1] if stack.endswith("\n") else stack
 
 
 def format_exception(exc_info: Any) -> str:
@@ -366,6 +387,7 @@ def render_and_enqueue(
     logger: str,
     level: str,
     message: str,
+    stack: str | None = None,
 ) -> bool:
     """Render one record natively and enqueue it; returns False if dropped.
 
@@ -377,11 +399,19 @@ def render_and_enqueue(
     assert _RUST is not None and _writer is not None  # guarded by is_native_enabled
     if _redaction_config is not None:
         rendered = _RUST.render_line_with_config(
-            fields, logger, level, _service, message, _redaction_config, None, _sensitive_keys
+            fields,
+            logger,
+            level,
+            _service,
+            message,
+            _redaction_config,
+            None,
+            _sensitive_keys,
+            stack,
         )
     else:
         rendered = _RUST.render_line(
-            fields, logger, level, _service, message, None, _sensitive_keys
+            fields, logger, level, _service, message, None, _sensitive_keys, None, stack
         )
     line = rendered + "\n"
     if _overflow == "block":

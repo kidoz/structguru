@@ -295,7 +295,8 @@ Behavior notes:
 - **Redaction, level filtering, exceptions, and OpenTelemetry** injection are supported natively; `sensitive_keys` overrides the default redaction keys. `sensitive_patterns` adds regex value-pattern redaction (applied to every string value); Rust's `regex` engine does not support backreferences or look-around, so an unsupported pattern emits a `UserWarning` and falls back to the standard path.
 - **Sampling & rate limiting** (`sample_rate`, `rate_limit_max`, `rate_limit_period`) are applied as native pre-render filters — dropped records cost zero rendering. `sampled` and `rate_limited` counters are distinct from the transport `dropped` counter.
 - **Fork/shutdown safe** — the writer is flushed on exit and respawned in forked children (gunicorn/celery prefork).
-- **Scope (v1)**: native mode renders **JSON to stdout/file**. `stack_info`, console output (`json_logs=False`), custom `logger.add()` sinks, and advanced processors (routing/metrics) continue to use the standard structlog path.
+- **`stack_info` is supported natively**: the stack is captured in Python and rendered in the same position as `StackInfoRenderer` (`stack` between `service` and `message`). Unlike the standard path, the stack ends at the *user's* calling frame (structguru-internal frames are skipped, the way structlog skips its own).
+- **Scope (v1)**: native mode renders **JSON to stdout/file**. Console output (`json_logs=False`), custom `logger.add()` sinks, and advanced processors (routing/metrics) continue to use the standard structlog path.
 
 ## Framework integrations
 

@@ -287,10 +287,8 @@ class Logger:
         kwargs: dict[str, Any],
     ) -> None:
         """Internal dispatch."""
-        # Native fast path handles the common case (incl. exceptions); stack_info
-        # still falls back to the structlog path (Python-owned frame walking).
         stack_info = bool(kwargs.get("stack_info") or self._opt_stack_info)
-        use_native = _native.is_native_enabled() and not stack_info
+        use_native = _native.is_native_enabled()
 
         # Cheap disabled path: level-filter before any formatting.
         if use_native and _native.is_below_level(method):
@@ -324,7 +322,10 @@ class Logger:
                 add_otel_context(None, method, fields)
             if exc_info:
                 fields["exception"] = _native.format_exception(exc_info)
-            _native.render_and_enqueue(fields, name, method, formatted_msg)
+            # Stack capture is Python-owned (frame walking); rendering places
+            # "stack" between "service" and "message" like StackInfoRenderer.
+            stack = _native.format_stack() if stack_info else None
+            _native.render_and_enqueue(fields, name, method, formatted_msg, stack=stack)
             return
 
         structlog_logger = self._get_structlog_logger()

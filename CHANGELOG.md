@@ -8,6 +8,25 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Native `stack_info` support.** `logger.info(..., stack_info=True)` (and
+  `logger.opt(stack_info=True)`) no longer falls back to the standard structlog
+  path. The stack is captured in Python and rendered by the native renderer in
+  the same position as `StackInfoRenderer` (`stack` between `service` and
+  `message`). The native stack ends at the user's calling frame —
+  structguru-internal frames are skipped, the way structlog skips its own.
+- **Golden byte-parity suite.** `tests/test_parity_golden.py` runs every
+  scenario through both the standard and native paths and asserts the JSON
+  lines are byte-identical (modulo timestamp), locking key order and
+  serialization format for the full-Rust migration.
+
+### Fixed
+
+- **Native key order now matches structlog exactly.** User fields colliding
+  with standard keys (`level`, `severity`, `logger`, `timestamp`) are
+  overridden *in place* (previously dropped and re-appended), and contextvars
+  are appended after event fields with setdefault semantics (previously
+  prepended), matching `merge_contextvars`.
+
 - **Native value-pattern redaction.** `enable_native(sensitive_patterns=[...])`
   applies compiled regex patterns to every string value (in addition to
   key-based redaction), mirroring `RedactingProcessor(patterns=...)` on the

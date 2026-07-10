@@ -77,7 +77,7 @@ fn validate_patterns(patterns: Vec<String>) -> PyResult<usize> {
 /// compile patterns once at enable time.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (fields, logger, level, service, message, timestamp=None, sensitive_keys=None, sensitive_patterns=None))]
+#[pyo3(signature = (fields, logger, level, service, message, timestamp=None, sensitive_keys=None, sensitive_patterns=None, stack=None))]
 fn render_line(
     fields: &Bound<'_, PyDict>,
     logger: &str,
@@ -87,6 +87,7 @@ fn render_line(
     timestamp: Option<&str>,
     sensitive_keys: Option<Vec<String>>,
     sensitive_patterns: Option<Vec<String>>,
+    stack: Option<&str>,
 ) -> PyResult<String> {
     let mut entries: Vec<(String, Value)> = Vec::with_capacity(fields.len());
     for (key, value) in fields.iter() {
@@ -125,6 +126,7 @@ fn render_line(
         service,
         message,
         timestamp,
+        stack,
         sensitive_keys,
         patterns_ref,
     )
@@ -167,7 +169,7 @@ impl RedactionConfig {
 /// Hot-path render using a pre-built `RedactionConfig` (patterns compiled once).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (fields, logger, level, service, message, config, timestamp=None, sensitive_keys=None))]
+#[pyo3(signature = (fields, logger, level, service, message, config, timestamp=None, sensitive_keys=None, stack=None))]
 fn render_line_with_config(
     fields: &Bound<'_, PyDict>,
     logger: &str,
@@ -177,6 +179,7 @@ fn render_line_with_config(
     config: &RedactionConfig,
     timestamp: Option<&str>,
     sensitive_keys: Option<Vec<String>>,
+    stack: Option<&str>,
 ) -> PyResult<String> {
     let mut entries: Vec<(String, Value)> = Vec::with_capacity(fields.len());
     for (key, value) in fields.iter() {
@@ -207,6 +210,7 @@ fn render_line_with_config(
         service,
         message,
         timestamp,
+        stack,
         sensitive_keys,
         patterns_ref,
     )

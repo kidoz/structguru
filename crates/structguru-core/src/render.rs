@@ -112,6 +112,7 @@ pub fn render_line(
     service: &str,
     message: &str,
     timestamp: &str,
+    stack: Option<&str>,
     sensitive_keys: Option<Vec<String>>,
     sensitive_patterns: Option<&[Regex]>,
 ) -> Result<String, serde_json::Error> {
@@ -146,6 +147,11 @@ pub fn render_line(
     if !entries.iter().any(|(key, _)| key == "service") {
         entries.push(("service".to_owned(), Value::String(service.to_owned())));
     }
+    // "stack" sits between "service" and "message": StackInfoRenderer runs
+    // after add_service and before EventRenamer in the shared chain.
+    if let Some(stack) = stack {
+        upsert(&mut entries, "stack", Value::String(stack.to_owned()));
+    }
     upsert(&mut entries, "message", Value::String(message.to_owned()));
 
     Value::Map(entries).to_json_string()
@@ -159,13 +165,35 @@ mod tests {
     fn renders_fields_then_standard_keys_in_order() {
         let fields = vec![("request_id".to_owned(), Value::String("req-1".to_owned()))];
         let line = render_line(
-            fields, "svc.mod", "warning", "checkout", "hello", "TS", None, None,
+            fields, "svc.mod", "warning", "checkout", "hello", "TS", None, None, None,
         )
         .unwrap();
 
         assert_eq!(
             line,
             r#"{"request_id":"req-1","logger":"svc.mod","level":"WARN","severity":4,"timestamp":"TS","service":"checkout","message":"hello"}"#,
+        );
+    }
+
+    #[test]
+    fn stack_renders_between_service_and_message() {
+        let fields = vec![("id".to_owned(), Value::Int(1))];
+        let line = render_line(
+            fields,
+            "l",
+            "info",
+            "svc",
+            "m",
+            "TS",
+            Some("Stack (most recent call last):\n  frame"),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            line,
+            r#"{"id":1,"logger":"l","level":"INFO","severity":6,"timestamp":"TS","service":"svc","stack":"Stack (most recent call last):\n  frame","message":"m"}"#,
         );
     }
 
@@ -182,7 +210,7 @@ mod tests {
             ),
             ("qty".to_owned(), Value::Int(2)),
         ];
-        let line = render_line(fields, "l", "info", "svc", "m", "TS", None, None).unwrap();
+        let line = render_line(fields, "l", "info", "svc", "m", "TS", None, None, None).unwrap();
 
         assert!(line.contains(r#""Password":"[REDACTED]""#));
         assert!(line.contains(r#""api_key":"[REDACTED]""#));
@@ -196,7 +224,7 @@ mod tests {
             ("service".to_owned(), Value::String("user-svc".to_owned())),
             ("keep".to_owned(), Value::Int(1)),
         ];
-        let line = render_line(fields, "l", "warning", "cfg-svc", "m", "TS", None, None).unwrap();
+        let line = render_line(fields, "l", "warning", "cfg-svc", "m", "TS", None, None, None).unwrap();
 
         // canonical level overrides the user field; user "service" wins (setdefault)
         assert!(line.contains(r#""level":"WARN""#));
@@ -219,7 +247,7 @@ mod tests {
             ("secret_sauce".to_owned(), Value::String("x".to_owned())),
         ];
         let keys = Some(vec!["secret_sauce".to_owned()]);
-        let line = render_line(fields, "l", "info", "svc", "m", "TS", keys, None).unwrap();
+        let line = render_line(fields, "l", "info", "svc", "m", "TS", None, keys, None).unwrap();
 
         // "ssn" is a default key but NOT in the custom set → not redacted.
         assert!(line.contains(r#""ssn":"123""#));
@@ -235,7 +263,7 @@ mod tests {
             Value::String("Contact user@example.com for details".to_owned()),
         )];
         let line =
-            render_line(fields, "l", "info", "svc", "m", "TS", None, Some(&patterns)).unwrap();
+            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns)).unwrap();
 
         assert!(line.contains(r#""msg":"Contact [REDACTED] for details""#));
         assert!(!line.contains("user@example.com"));
@@ -262,7 +290,7 @@ mod tests {
             ),
         ];
         let line =
-            render_line(fields, "l", "info", "svc", "m", "TS", None, Some(&patterns)).unwrap();
+            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns)).unwrap();
 
         assert!(line.contains(r#""note":"ssn is [REDACTED]""#));
         assert!(line.contains(r#""ok [REDACTED]""#));
@@ -283,7 +311,7 @@ mod tests {
             ("raw".to_owned(), Value::Raw(r#""escaped""#.to_owned())),
         ];
         let line =
-            render_line(fields, "l", "info", "svc", "m", "TS", None, Some(&patterns)).unwrap();
+            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns)).unwrap();
 
         assert!(line.contains(r#""count":42"#));
         assert!(line.contains(r#""flag":true"#));
@@ -304,7 +332,7 @@ mod tests {
             Value::String("secret email a@b.com here".to_owned()),
         )];
         let line =
-            render_line(fields, "l", "info", "svc", "m", "TS", None, Some(&patterns)).unwrap();
+            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns)).unwrap();
 
         assert!(line.contains(r#""msg":"[REDACTED] email [REDACTED] here""#));
     }
@@ -321,7 +349,7 @@ mod tests {
             ),
         ];
         let line =
-            render_line(fields, "l", "info", "svc", "m", "TS", None, Some(&patterns)).unwrap();
+            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns)).unwrap();
 
         assert!(line.contains(r#""token":"[REDACTED]""#));
         assert!(line.contains(r#""msg":"ping [REDACTED] now""#));
