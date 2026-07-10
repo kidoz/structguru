@@ -61,10 +61,66 @@ def test_native_conversion_stats_for_realistic_record() -> None:
 
 
 def test_native_rejects_unsupported_objects() -> None:
-    # Exotic leaves are delegated to orjson; genuinely unserializable objects
-    # still raise TypeError (orjson.JSONEncodeError), matching the live renderer.
-    with pytest.raises(TypeError):
-        rust._convert_value_debug(object())
+    # Genuinely unserializable types raise TypeError, matching the orjson
+    # rejection contract for bytes/set/Decimal/etc. (no orjson in the path now).
+    for unsupported in (object(), b"bytes", {1, 2}, frozenset({3})):
+        with pytest.raises(TypeError):
+            rust._convert_value_debug(unsupported)
+
+
+def test_native_converts_datetime_without_orjson() -> None:
+    import datetime as dt
+
+    d = dt.datetime(2026, 7, 10, 12, 0, 0, 5)
+    result = rust._convert_value_debug(d)
+    assert result == "2026-07-10T12:00:00.000005"
+
+
+def test_native_converts_date_without_orjson() -> None:
+    import datetime as dt
+
+    d = dt.date(2026, 7, 10)
+    result = rust._convert_value_debug(d)
+    assert result == "2026-07-10"
+
+
+def test_native_converts_tz_aware_datetime() -> None:
+    import datetime as dt
+
+    d = dt.datetime(2026, 7, 10, 12, 0, 0, tzinfo=dt.UTC)
+    result = rust._convert_value_debug(d)
+    assert "+00:00" in result
+
+
+def test_native_converts_uuid_without_orjson() -> None:
+    import uuid
+
+    u = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    result = rust._convert_value_debug(u)
+    assert result == "12345678-1234-5678-1234-567812345678"
+
+
+def test_native_converts_enum_without_orjson() -> None:
+    import enum
+
+    class _Color(enum.Enum):
+        RED = "red"
+        GREEN = 2
+
+    assert rust._convert_value_debug(_Color.RED) == "red"
+    assert rust._convert_value_debug(_Color.GREEN) == 2
+
+
+def test_native_converts_dataclass_without_orjson() -> None:
+    from dataclasses import dataclass
+
+    @dataclass
+    class Point:
+        x: int
+        y: int
+
+    result = rust._convert_value_debug(Point(3, 4))
+    assert result == {"x": 3, "y": 4}
 
 
 def test_native_rejects_non_string_map_keys() -> None:

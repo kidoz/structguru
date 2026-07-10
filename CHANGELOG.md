@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Native exotic-value conversion (orjson-free native path).** The native Rust
+  renderer now converts `datetime`, `date`, `UUID`, `Enum`, and dataclasses
+  natively via the objects' own `isoformat()`/`str()`/`.value` methods, producing
+  byte-identical output to the previous orjson delegation. The native path no
+  longer imports `orjson` at all. Unsupported types (`bytes`, `set`, `Decimal`)
+  raise `TypeError`, matching the orjson rejection contract. The `Value::Raw`
+  reverse path uses `json.loads` (stdlib) instead of `orjson.loads`.
 - **Native Sentry integration.** `enable_native(sentry_processor=...)` invokes a
   structlog-style processor (e.g. `SentryProcessor`) for every kept record on
   the caller's thread, mirroring the `metric_processor` hook. The raw `exc_info`

@@ -612,14 +612,79 @@ fn convert_py_value_inner(
         return Ok(Value::List(values));
     }
 
-    // Exotic leaf (datetime/date/UUID/Enum/dataclass/...): delegate to orjson so
-    // the output matches the current renderer exactly, and so genuinely
-    // unsupported types (Decimal/bytes/set) raise the same TypeError they do today.
-    let orjson = obj.py().import("orjson")?;
-    let dumped = orjson.call_method1("dumps", (obj,))?;
-    let json = String::from_utf8(dumped.extract::<Vec<u8>>()?)
-        .map_err(|err| PyValueError::new_err(err.to_string()))?;
-    Ok(Value::Raw(json))
+    // Exotic leaves: handle datetime/date/UUID/Enum/dataclass natively by
+    // delegating to the Python object's own serialization methods, which
+    // produce byte-identical output to orjson for the parity-tested cases.
+    // Genuinely unsupported types (Decimal/bytes/set/timedelta/Path) raise
+    // TypeError, matching the orjson rejection contract.
+    convert_exotic_leaf(obj, depth, containers)
+}
+
+/// Handle exotic Python leaves (datetime, date, UUID, Enum, dataclass) natively
+/// without crossing into orjson. Falls back to `TypeError` for unsupported types,
+/// matching orjson's default rejection behavior.
+fn convert_exotic_leaf(
+    obj: &Bound<'_, PyAny>,
+    depth: usize,
+    containers: &mut ContainerStack,
+) -> PyResult<Value> {
+    // Enum: has a `.value` attribute and its type's `__class__` has `__members__`.
+    // Detect via getattr("value") + checking the *type* has __members__ (Enum
+    // metaclass marker). This avoids misdetecting objects that happen to have a
+    // `value` attribute but aren't enums.
+    if obj.hasattr("value")? && obj.get_type().hasattr("__members__")? {
+        let value = obj.getattr("value")?;
+        return convert_py_value_inner(&value, depth, containers);
+    }
+
+    // datetime.datetime / datetime.date: have an .isoformat() method.
+    // (datetime is a subclass of date, so both are covered.)
+    if obj.hasattr("isoformat")? {
+        let iso = obj.call_method0("isoformat")?;
+        let s = iso.extract::<&str>()?.to_owned();
+        return Ok(Value::String(s));
+    }
+
+    // uuid.UUID: has both .hex and .int attributes; str() gives canonical form.
+    if obj.hasattr("hex")? && obj.hasattr("int")? {
+        // Verify it's actually from the uuid module to avoid misdetecting objects
+        // that happen to have both attributes.
+        let type_name = obj
+            .get_type()
+            .name()
+            .map(|n| n.to_string())
+            .unwrap_or_default();
+        if type_name == "UUID" {
+            let s = obj.str()?.to_str()?.to_owned();
+            return Ok(Value::String(s));
+        }
+    }
+
+    // dataclass: has __dataclass_fields__ → convert as an ordered Map.
+    if obj.hasattr("__dataclass_fields__")? {
+        let dict = obj.getattr("__dict__")?;
+        if let Ok(d) = dict.cast::<PyDict>() {
+            let container_id = enter_container(obj, containers)?;
+            let mut entries = Vec::with_capacity(d.len());
+            for (key, value) in d.iter() {
+                let key = key.extract::<String>()?;
+                entries.push((key, convert_py_value_inner(&value, depth + 1, containers)?));
+            }
+            leave_container(container_id, containers);
+            return Ok(Value::Map(entries));
+        }
+    }
+
+    // Unsupported type — raise TypeError, matching orjson's rejection of
+    // Decimal/bytes/bytearray/set/frozenset/timedelta/Path/etc.
+    let type_name = obj
+        .get_type()
+        .name()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|_| "unknown".to_owned());
+    Err(PyTypeError::new_err(format!(
+        "Object of type {type_name} is not serializable"
+    )))
 }
 
 fn enter_container(obj: &Bound<'_, PyAny>, containers: &mut ContainerStack) -> PyResult<usize> {
@@ -658,7 +723,7 @@ fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny
             }
             Ok(dict.into_any())
         }
-        Value::Raw(json) => py.import("orjson")?.call_method1("loads", (json.as_str(),)),
+        Value::Raw(json) => py.import("json")?.call_method1("loads", (json.as_str(),)),
     }
 }
 
