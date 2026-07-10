@@ -5,6 +5,7 @@ use pyo3::types::{
     PyAny, PyBool, PyDict, PyDictMethods, PyFloat, PyInt, PyList, PyListMethods, PyString, PyTuple,
     PyTupleMethods,
 };
+use regex::Regex;
 use structguru_core::{StringWriter, Value};
 
 const MAX_VALUE_DEPTH: usize = 64;
@@ -54,15 +55,125 @@ fn _render_json_debug(obj: Bound<'_, PyAny>) -> PyResult<String> {
         .map_err(|err| PyValueError::new_err(err.to_string()))
 }
 
-/// Render one log line: convert + redact `fields`, append the standard keys, emit JSON.
+/// Validate regex pattern strings for native value-pattern redaction.
+///
+/// Compiles each pattern with Rust's `regex` engine and returns the count.
+/// Raises `ValueError` on the first pattern that fails to compile (e.g.
+/// backreferences, look-around) so the Python bridge can fall back to the
+/// standard structlog path with a warning.
 #[pyfunction]
-#[pyo3(signature = (fields, logger, level, service, message, timestamp=None, sensitive_keys=None))]
+fn validate_patterns(patterns: Vec<String>) -> PyResult<usize> {
+    for p in &patterns {
+        Regex::new(p).map_err(|err| PyValueError::new_err(err.to_string()))?;
+    }
+    Ok(patterns.len())
+}
+
+/// Render one log line: convert + redact `fields`, append the standard keys, emit JSON.
+///
+/// This is the standalone form: patterns (if any) are recompiled per call. For
+/// the hot path, prefer `render_line_with_config` + `RedactionConfig`, which
+/// compile patterns once at enable time.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (fields, logger, level, service, message, timestamp=None, sensitive_keys=None, sensitive_patterns=None))]
 fn render_line(
     fields: &Bound<'_, PyDict>,
     logger: &str,
     level: &str,
     service: &str,
     message: &str,
+    timestamp: Option<&str>,
+    sensitive_keys: Option<Vec<String>>,
+    sensitive_patterns: Option<Vec<String>>,
+) -> PyResult<String> {
+    let mut entries: Vec<(String, Value)> = Vec::with_capacity(fields.len());
+    for (key, value) in fields.iter() {
+        let key = key
+            .cast::<PyString>()
+            .map_err(|_| PyTypeError::new_err("field keys must be strings"))?
+            .to_str()?
+            .to_owned();
+        entries.push((key, convert_py_value(&value)?));
+    }
+    let generated;
+    let timestamp = match timestamp {
+        Some(value) => value,
+        None => {
+            generated = structguru_core::now_iso8601();
+            &generated
+        }
+    };
+    let compiled_patterns: Vec<Regex> = match &sensitive_patterns {
+        Some(patterns) => patterns
+            .iter()
+            .map(|p| Regex::new(p))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| PyValueError::new_err(err.to_string()))?,
+        None => Vec::new(),
+    };
+    let patterns_ref = if compiled_patterns.is_empty() {
+        None
+    } else {
+        Some(compiled_patterns.as_slice())
+    };
+    structguru_core::render_line(
+        entries,
+        logger,
+        level,
+        service,
+        message,
+        timestamp,
+        sensitive_keys,
+        patterns_ref,
+    )
+    .map_err(|err| PyValueError::new_err(err.to_string()))
+}
+
+/// Compiled redaction patterns held across calls to avoid per-record recompilation.
+///
+/// Built once at `enable_native()` time and passed to `render_line_with_config`
+/// on the hot path. If a pattern fails to compile, construction raises
+/// `ValueError` so the Python bridge can fall back to the standard path.
+#[pyclass(name = "RedactionConfig")]
+struct RedactionConfig {
+    patterns: Vec<Regex>,
+}
+
+#[pymethods]
+impl RedactionConfig {
+    #[new]
+    fn new(patterns: Vec<String>) -> PyResult<Self> {
+        let compiled = patterns
+            .into_iter()
+            .map(|p| Regex::new(&p))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        Ok(Self { patterns: compiled })
+    }
+
+    /// Number of compiled patterns.
+    #[getter]
+    fn len(&self) -> usize {
+        self.patterns.len()
+    }
+
+    fn __bool__(&self) -> bool {
+        !self.patterns.is_empty()
+    }
+}
+
+/// Hot-path render using a pre-built `RedactionConfig` (patterns compiled once).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (fields, logger, level, service, message, config, timestamp=None, sensitive_keys=None))]
+fn render_line_with_config(
+    fields: &Bound<'_, PyDict>,
+    logger: &str,
+    level: &str,
+    service: &str,
+    message: &str,
+    config: &RedactionConfig,
     timestamp: Option<&str>,
     sensitive_keys: Option<Vec<String>>,
 ) -> PyResult<String> {
@@ -83,6 +194,11 @@ fn render_line(
             &generated
         }
     };
+    let patterns_ref = if config.patterns.is_empty() {
+        None
+    } else {
+        Some(config.patterns.as_slice())
+    };
     structguru_core::render_line(
         entries,
         logger,
@@ -91,6 +207,7 @@ fn render_line(
         message,
         timestamp,
         sensitive_keys,
+        patterns_ref,
     )
     .map_err(|err| PyValueError::new_err(err.to_string()))
 }
@@ -319,7 +436,10 @@ fn rust_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_convert_value_debug, module)?)?;
     module.add_function(wrap_pyfunction!(_conversion_stats, module)?)?;
     module.add_function(wrap_pyfunction!(_render_json_debug, module)?)?;
+    module.add_function(wrap_pyfunction!(validate_patterns, module)?)?;
     module.add_function(wrap_pyfunction!(render_line, module)?)?;
+    module.add_function(wrap_pyfunction!(render_line_with_config, module)?)?;
     module.add_class::<NativeStringWriter>()?;
+    module.add_class::<RedactionConfig>()?;
     Ok(())
 }

@@ -15,4 +15,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { workspace = true, features = ["abi3-py311", "extension-module"] }
+regex.workspace = true
 structguru-core.workspace = true

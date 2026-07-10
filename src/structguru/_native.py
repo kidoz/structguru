@@ -64,7 +64,24 @@ class _RustModule(Protocol):
         message: str,
         timestamp: str | None = None,
         sensitive_keys: list[str] | None = None,
+        sensitive_patterns: list[str] | None = None,
     ) -> str: ...
+
+    def render_line_with_config(
+        self,
+        fields: dict[str, Any],
+        logger: str,
+        level: str,
+        service: str,
+        message: str,
+        config: Any,
+        timestamp: str | None = None,
+        sensitive_keys: list[str] | None = None,
+    ) -> str: ...
+
+    def validate_patterns(self, patterns: list[str]) -> int: ...
+
+    def RedactionConfig(self, patterns: list[str]) -> Any: ...
 
     def _NativeStringWriter(self, maxsize: int, target: str = ...) -> _NativeWriter: ...
 
@@ -113,6 +130,8 @@ _overflow = "block"
 _level_threshold = _LEVEL_NUM["info"]
 _otel = False
 _sensitive_keys: list[str] | None = None
+_sensitive_patterns: list[str] | None = None
+_redaction_config: Any = None  # compiled RedactionConfig, None when no patterns configured
 _hooks_registered = False
 _drop_count = 0
 
@@ -143,6 +162,11 @@ def sensitive_keys() -> list[str] | None:
     return _sensitive_keys
 
 
+def sensitive_patterns() -> list[str] | None:
+    """Custom regex value-patterns for native mode, or None if unset."""
+    return _sensitive_patterns
+
+
 def format_exception(exc_info: Any) -> str:
     """Format ``exc_info`` to a traceback string matching structlog's output.
 
@@ -170,6 +194,7 @@ def enable_native(
     level: str = "INFO",
     otel: bool = False,
     sensitive_keys: list[str] | None = None,
+    sensitive_patterns: list[str] | None = None,
 ) -> None:
     """Route the common log path through the native renderer + writer.
 
@@ -181,18 +206,45 @@ def enable_native(
     GIL released) or ``"drop"`` (drop the new record, count it, and emit a
     rate-limited warning; see :func:`native_metrics`).
 
+    ``sensitive_patterns`` is a list of regex source strings applied (in addition
+    to key-based redaction) to every string value. Rust's ``regex`` engine does not
+    support backreferences or look-around; if a pattern fails to compile, a
+    ``UserWarning`` is emitted and native mode is **not** enabled — callers fall
+    back to the standard structlog path with ``RedactingProcessor(patterns=...)``.
+
     Registers shutdown (``atexit``) and fork (``os.register_at_fork``) handlers so
     buffered records are flushed on exit and the background writer is respawned in
     forked children (gunicorn/celery prefork) instead of deadlocking.
     """
     global _enabled, _writer, _service, _maxsize, _target, _overflow
-    global _level_threshold, _otel, _sensitive_keys
+    global _level_threshold, _otel, _sensitive_keys, _sensitive_patterns
+    global _redaction_config
     if _RUST is None:
         msg = "native extension is not available"
         raise RuntimeError(msg)
     if overflow not in ("block", "drop"):
         msg = f"overflow must be 'block' or 'drop', not {overflow!r}"
         raise ValueError(msg)
+
+    # Validate regex patterns against Rust's engine before enabling. If any fail
+    # (backreferences, look-around, ...), warn once and refuse to enable native
+    # mode so the standard path (with RedactingProcessor) runs instead.
+    if sensitive_patterns:
+        try:
+            _RUST.validate_patterns(list(sensitive_patterns))
+        except ValueError as exc:
+            warnings.warn(
+                f"native pattern redaction unsupported ({exc}); "
+                "falling back to the standard structlog path",
+                stacklevel=2,
+            )
+            return
+        new_config = _RUST.RedactionConfig(list(sensitive_patterns))
+        new_patterns: list[str] | None = list(sensitive_patterns)
+    else:
+        new_config = None
+        new_patterns = None
+
     with _state_lock:
         if _writer is not None:
             _writer.close()
@@ -203,6 +255,8 @@ def enable_native(
         _level_threshold = _LEVEL_NUM.get(level.lower(), _LEVEL_NUM["info"])
         _otel = otel
         _sensitive_keys = list(sensitive_keys) if sensitive_keys is not None else None
+        _sensitive_patterns = new_patterns
+        _redaction_config = new_config
         _writer = _RUST._NativeStringWriter(maxsize, target=target)
         _enabled = True
     _register_lifecycle_hooks()
@@ -249,12 +303,13 @@ def _after_in_child() -> None:
 
 def disable_native() -> None:
     """Turn native mode off and stop the background writer."""
-    global _enabled, _writer
+    global _enabled, _writer, _redaction_config
     with _state_lock:
         _enabled = False
         if _writer is not None:
             _writer.close()
             _writer = None
+        _redaction_config = None
 
 
 def render_and_enqueue(
@@ -266,10 +321,19 @@ def render_and_enqueue(
     """Render one record natively and enqueue it; returns False if dropped.
 
     The timestamp is generated inside the Rust core (cached per second), so no
-    Python-side time formatting happens on the hot path.
+    Python-side time formatting happens on the hot path. When value-pattern
+    redaction is configured, the pre-built ``RedactionConfig`` is reused so no
+    per-record regex compilation occurs.
     """
     assert _RUST is not None and _writer is not None  # guarded by is_native_enabled
-    rendered = _RUST.render_line(fields, logger, level, _service, message, None, _sensitive_keys)
+    if _redaction_config is not None:
+        rendered = _RUST.render_line_with_config(
+            fields, logger, level, _service, message, _redaction_config, None, _sensitive_keys
+        )
+    else:
+        rendered = _RUST.render_line(
+            fields, logger, level, _service, message, None, _sensitive_keys
+        )
     line = rendered + "\n"
     if _overflow == "block":
         enqueued = _writer.enqueue_blocking(line)

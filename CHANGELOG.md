@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Native value-pattern redaction.** `enable_native(sensitive_patterns=[...])`
+  applies compiled regex patterns to every string value (in addition to
+  key-based redaction), mirroring `RedactingProcessor(patterns=...)` on the
+  native fast path. Patterns are compiled once at enable time into a reusable
+  `RedactionConfig`; Rust's `regex` engine does not support backreferences or
+  look-around, so an unsupported pattern emits a `UserWarning` and falls back to
+  the standard structlog path.
+
 ## [0.3.0] - 2026-07-09
 
 ### Added
