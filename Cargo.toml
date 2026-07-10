@@ -29,12 +29,11 @@ time = { version = "0.3", features = ["macros", "formatting"] }
 # `unicode` is on by default in the regex crate; keep it so character classes
 # match Python's `re` defaults (which are Unicode-aware on `str`).
 regex = { version = "1", default-features = false, features = ["std", "unicode"] }
-rand = { version = "0.9", default-features = false, features = [
+# Only `rand::random` is used (sampling filter); `thread_rng` pulls in the
+# std/sys_rng machinery it needs.
+rand = { version = "0.10", default-features = false, features = [
     "std",
     "std_rng",
-    "alloc",
-    "small_rng",
-    "os_rng",
     "thread_rng",
 ] }
 structguru-core = { path = "crates/structguru-core" }
