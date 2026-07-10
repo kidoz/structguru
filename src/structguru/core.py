@@ -321,7 +321,9 @@ class Logger:
             if _native.otel_enabled():
                 add_otel_context(None, method, fields)
             if exc_info:
-                fields["exception"] = _native.format_exception(exc_info)
+                exception = _native.build_exception_field(exc_info)
+                if exception is not None:
+                    fields["exception"] = exception
             # Stack capture is Python-owned (frame walking); rendering places
             # "stack" between "service" and "message" like StackInfoRenderer.
             stack = _native.format_stack() if stack_info else None

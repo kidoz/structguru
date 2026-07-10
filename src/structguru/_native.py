@@ -144,6 +144,7 @@ _sensitive_keys: list[str] | None = None
 _sensitive_patterns: list[str] | None = None
 _redaction_config: Any = None  # compiled RedactionConfig, None when no patterns configured
 _filter: Any = None  # NativeFilter, None when no sampling/rate-limit configured
+_exception_config: dict[str, Any] | None = None  # structured-exception knobs, None = string
 _hooks_registered = False
 _drop_count = 0
 
@@ -188,6 +189,24 @@ def should_render(method: str, message: str) -> bool:
     if _filter is None:
         return True
     return bool(_filter.allow(message, method))
+
+
+def build_exception_field(exc_info: Any) -> str | dict[str, Any] | None:
+    """Build the ``exception`` field value for a native record.
+
+    Returns the structured dict when ``structured_exceptions`` is enabled
+    (matching :class:`structguru.exceptions.ExceptionDictProcessor` exactly, or
+    ``None`` when *exc_info* does not resolve); otherwise the formatted
+    traceback string (matching ``format_exc_info``). Frame walking, locals
+    capture, and ``repr`` are Python-owned — the native renderer only
+    serializes the result.
+    """
+    if _exception_config is None:
+        return format_exception(exc_info)
+
+    from structguru.exceptions import build_exception_dict
+
+    return build_exception_dict(exc_info, **_exception_config)
 
 
 def format_stack() -> str:
@@ -239,6 +258,10 @@ def enable_native(
     sample_rate: float = 1.0,
     rate_limit_max: int | None = None,
     rate_limit_period: float = 60.0,
+    structured_exceptions: bool = False,
+    exception_include_locals: bool = False,
+    exception_max_frames: int = 20,
+    exception_max_local_repr: int = 200,
 ) -> None:
     """Route the common log path through the native renderer + writer.
 
@@ -261,13 +284,20 @@ def enable_native(
     ``rate_limited`` counters are reported separately from the writer's transport
     ``dropped`` counter (see :func:`native_metrics`).
 
+    ``structured_exceptions=True`` renders the ``exception`` field as the
+    structured dict produced by
+    :class:`structguru.exceptions.ExceptionDictProcessor` (with the
+    ``exception_*`` knobs mirroring the processor's parameters and
+    ``sensitive_keys`` reused for locals redaction) instead of the formatted
+    traceback string.
+
     Registers shutdown (``atexit``) and fork (``os.register_at_fork``) handlers so
     buffered records are flushed on exit and the background writer is respawned in
     forked children (gunicorn/celery prefork) instead of deadlocking.
     """
     global _enabled, _writer, _service, _maxsize, _target, _overflow
     global _level_threshold, _otel, _sensitive_keys, _sensitive_patterns
-    global _redaction_config, _filter
+    global _redaction_config, _filter, _exception_config
     if _RUST is None:
         msg = "native extension is not available"
         raise RuntimeError(msg)
@@ -303,6 +333,21 @@ def enable_native(
         new_config = None
         new_patterns = None
 
+    new_exception_config: dict[str, Any] | None = None
+    if structured_exceptions:
+        new_exception_config = {
+            "include_locals": exception_include_locals,
+            "max_frames": exception_max_frames,
+            "max_local_repr": exception_max_local_repr,
+            # Reuse the record-redaction keys for locals redaction; the
+            # processor compares lower-cased names against a frozenset.
+            "sensitive_keys": (
+                frozenset(k.lower() for k in sensitive_keys)
+                if sensitive_keys is not None
+                else None
+            ),
+        }
+
     new_filter: Any = None
     if sample_rate < 1.0 or rate_limit_max is not None:
         new_filter = _RUST.NativeFilter(
@@ -326,6 +371,7 @@ def enable_native(
         _sensitive_patterns = new_patterns
         _redaction_config = new_config
         _filter = new_filter
+        _exception_config = new_exception_config
         _writer = _RUST._NativeStringWriter(maxsize, target=target)
         _enabled = True
     _register_lifecycle_hooks()
@@ -372,7 +418,7 @@ def _after_in_child() -> None:
 
 def disable_native() -> None:
     """Turn native mode off and stop the background writer."""
-    global _enabled, _writer, _redaction_config, _filter
+    global _enabled, _writer, _redaction_config, _filter, _exception_config
     with _state_lock:
         _enabled = False
         if _writer is not None:
@@ -380,6 +426,7 @@ def disable_native() -> None:
             _writer = None
         _redaction_config = None
         _filter = None
+        _exception_config = None
 
 
 def render_and_enqueue(

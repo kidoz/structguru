@@ -283,6 +283,139 @@ def test_parity_exception_with_chained_cause() -> None:
     assert "inner" in native["exception"] and "outer" in native["exception"]
 
 
+# -- Structured exceptions: native output must equal ExceptionDictProcessor ---
+
+
+def _native_structured_exception(exc: BaseException, **enable_kwargs: Any) -> dict[str, Any]:
+    _native.enable_native(
+        service="svc",
+        target="memory",
+        level="DEBUG",
+        structured_exceptions=True,
+        **enable_kwargs,
+    )
+    try:
+        structguru.logger.error("failed", exc_info=exc)
+        _native.flush_native()
+        return json.loads(_native.drain_messages()[-1])  # type: ignore[no-any-return]
+    finally:
+        _native.disable_native()
+
+
+def _processor_exception(exc: BaseException, **proc_kwargs: Any) -> dict[str, Any]:
+    from structguru.exceptions import ExceptionDictProcessor
+
+    proc = ExceptionDictProcessor(**proc_kwargs)
+    result = proc(None, "error", {"event": "failed", "exc_info": exc})
+    return result["exception"]  # type: ignore[no-any-return]
+
+
+def test_parity_structured_exception_matches_processor() -> None:
+    try:
+        raise ValueError("nope")
+    except ValueError as err:
+        exc = err
+
+    record = _native_structured_exception(exc)
+    assert record["exception"] == _processor_exception(exc)
+    assert record["exception"]["type"] == "ValueError"
+    assert record["exception"]["frames"]
+
+
+def test_parity_structured_exception_chained_cause() -> None:
+    try:
+        try:
+            raise KeyError("inner")
+        except KeyError as inner:
+            raise RuntimeError("outer") from inner
+    except RuntimeError as err:
+        exc = err
+
+    record = _native_structured_exception(exc)
+    assert record["exception"] == _processor_exception(exc)
+    assert record["exception"]["cause"] == {"type": "KeyError", "message": "'inner'"}
+
+
+def _capture(fn: Any) -> BaseException:
+    """Run *fn* and return the raised exception.
+
+    The try/except lives in this helper (not in the test body) so the
+    traceback's outermost frame is settled — extracting locals twice sees
+    identical frame state, instead of picking up the test's own variables
+    as they are assigned between the two extractions.
+    """
+    try:
+        fn()
+    except BaseException as err:  # noqa: BLE001
+        return err
+    raise AssertionError("fn did not raise")
+
+
+def test_parity_structured_exception_locals_and_truncation() -> None:
+    def _boom() -> None:
+        password = "hunter2"  # noqa: F841 - captured via f_locals
+        blob = "x" * 500  # noqa: F841
+        raise ValueError("with locals")
+
+    exc = _capture(_boom)
+
+    record = _native_structured_exception(
+        exc,
+        exception_include_locals=True,
+        exception_max_local_repr=100,
+    )
+    expected = _processor_exception(exc, include_locals=True, max_local_repr=100)
+    assert record["exception"] == expected
+
+    boom_locals = record["exception"]["frames"][-1]["locals"]
+    assert boom_locals["password"] == "[REDACTED]"
+    assert boom_locals["blob"].endswith("...<402 more>")
+
+
+def test_parity_structured_exception_max_frames() -> None:
+    def _level1() -> None:
+        raise ValueError("deep")
+
+    def _level2() -> None:
+        _level1()
+
+    def _level3() -> None:
+        _level2()
+
+    try:
+        _level3()
+    except ValueError as err:
+        exc = err
+
+    record = _native_structured_exception(exc, exception_max_frames=2)
+    assert record["exception"] == _processor_exception(exc, max_frames=2)
+    assert len(record["exception"]["frames"]) == 2
+
+
+def test_parity_structured_exception_custom_sensitive_keys() -> None:
+    def _boom() -> None:
+        secret_sauce = "x"  # noqa: F841
+        password = "visible with custom keys"  # noqa: F841
+        raise ValueError("custom keys")
+
+    exc = _capture(_boom)
+
+    record = _native_structured_exception(
+        exc,
+        sensitive_keys=["Secret_Sauce"],
+        exception_include_locals=True,
+    )
+    expected = _processor_exception(
+        exc,
+        include_locals=True,
+        sensitive_keys=frozenset({"secret_sauce"}),
+    )
+    assert record["exception"] == expected
+    boom_locals = record["exception"]["frames"][-1]["locals"]
+    assert boom_locals["secret_sauce"] == "[REDACTED]"
+    assert boom_locals["password"] == "'visible with custom keys'"
+
+
 # -- Tier 3: stack_info -------------------------------------------------------
 # Semantic parity: the stack *content* intentionally diverges — structlog's
 # StackInfoRenderer only skips structlog frames, so the standard path's stack

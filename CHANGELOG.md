@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Native structured exceptions.** `enable_native(structured_exceptions=True)`
+  renders the `exception` field as the structured dict produced by
+  `ExceptionDictProcessor` (type/message/module/frames, chained cause, optional
+  locals with redaction and repr truncation) instead of the formatted traceback
+  string. The `exception_include_locals`, `exception_max_frames`, and
+  `exception_max_local_repr` knobs mirror the processor's parameters;
+  `sensitive_keys` is reused for locals redaction. Extraction is shared with
+  the processor via the new `structguru.exceptions.build_exception_dict()`.
 - **Native `stack_info` support.** `logger.info(..., stack_info=True)` (and
   `logger.opt(stack_info=True)`) no longer falls back to the standard structlog
   path. The stack is captured in Python and rendered by the native renderer in
