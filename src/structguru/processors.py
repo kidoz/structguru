@@ -1,15 +1,12 @@
-"""Structlog processors for structured JSON logging.
+"""Processors for structured JSON logging.
 
 Provides processors that enrich event dicts with standardized fields:
 - ``level``: normalized to ``CRITICAL``, ``ERROR``, ``WARN``, ``INFO``, ``DEBUG``.
 - ``severity``: RFC 5424 syslog severity code (``2``–``7``).
-- ``service``: application name.
-- ``event``: guaranteed to be a string.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
 from structguru import _native
@@ -36,22 +33,6 @@ _SEVERITY_MAP: dict[str, int] = {
     "ERROR": 3,
     "CRITICAL": 2,
 }
-
-
-def add_service(
-    service_name: str,
-) -> Callable[[Any, str, dict[str, Any]], dict[str, Any]]:
-    """Return a processor that adds a ``service`` field to every log record."""
-
-    def _processor(
-        _logger: Any,
-        _method_name: str,
-        event_dict: dict[str, Any],
-    ) -> dict[str, Any]:
-        event_dict.setdefault("service", service_name)
-        return event_dict
-
-    return _processor
 
 
 def normalize_level(
@@ -92,16 +73,4 @@ def add_syslog_severity(
             event_dict["severity"] = native_severity
             return event_dict
     event_dict["severity"] = _SEVERITY_MAP.get(level, 6)
-    return event_dict
-
-
-def ensure_event_is_str(
-    _logger: Any,
-    _method_name: str,
-    event_dict: dict[str, Any],
-) -> dict[str, Any]:
-    """Ensure the main log message (``event``) is a string."""
-    event = event_dict.get("event")
-    if event is not None and not isinstance(event, str):
-        event_dict["event"] = str(event)
     return event_dict

@@ -6,9 +6,7 @@ from structguru import _native
 from structguru.processors import (
     _LEVEL_MAP,
     _SEVERITY_MAP,
-    add_service,
     add_syslog_severity,
-    ensure_event_is_str,
     normalize_level,
 )
 
@@ -68,20 +66,6 @@ class TestSeverityMap:
         assert _SEVERITY_MAP["WARN"] == 4
         assert _SEVERITY_MAP["ERROR"] == 3
         assert _SEVERITY_MAP["CRITICAL"] == 2
-
-
-class TestAddService:
-    def test_adds_service_field(self) -> None:
-        processor = add_service("myapp")
-        event_dict: dict = {}
-        result = processor(None, "info", event_dict)
-        assert result["service"] == "myapp"
-
-    def test_does_not_overwrite_existing(self) -> None:
-        processor = add_service("myapp")
-        event_dict: dict = {"service": "other"}
-        result = processor(None, "info", event_dict)
-        assert result["service"] == "other"
 
 
 class TestNormalizeLevel:
@@ -165,25 +149,3 @@ class TestAddSyslogSeverity:
         ]
         for event_dict in cases:
             _assert_native_matches_fallback(monkeypatch, add_syslog_severity, "info", event_dict)
-
-
-class TestEnsureEventIsStr:
-    def test_converts_non_string(self) -> None:
-        event_dict: dict = {"event": 42}
-        result = ensure_event_is_str(None, "info", event_dict)
-        assert result["event"] == "42"
-
-    def test_preserves_string(self) -> None:
-        event_dict: dict = {"event": "hello"}
-        result = ensure_event_is_str(None, "info", event_dict)
-        assert result["event"] == "hello"
-
-    def test_ignores_none(self) -> None:
-        event_dict: dict = {"event": None}
-        result = ensure_event_is_str(None, "info", event_dict)
-        assert result["event"] is None
-
-    def test_handles_missing_event(self) -> None:
-        event_dict: dict = {}
-        result = ensure_event_is_str(None, "info", event_dict)
-        assert "event" not in result

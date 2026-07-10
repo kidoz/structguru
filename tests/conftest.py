@@ -6,7 +6,6 @@ import logging
 import sys
 
 import pytest
-import structlog
 
 
 @pytest.fixture(autouse=True)
@@ -24,10 +23,3 @@ def _reset_logging() -> None:  # type: ignore[misc]
     root.setLevel(original_level)
     logging.setLogRecordFactory(original_factory)
     sys.excepthook = original_excepthook
-
-
-@pytest.fixture(autouse=True)
-def _reset_structlog() -> None:  # type: ignore[misc]
-    """Reset structlog configuration after each test."""
-    yield  # type: ignore[misc]
-    structlog.reset_defaults()

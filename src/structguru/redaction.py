@@ -12,17 +12,6 @@ from typing import Any
 
 REDACTED_MARKER_KEY = "_structguru_redacted"
 
-
-def strip_redaction_marker(
-    _logger: Any,
-    _method_name: str,
-    event_dict: dict[str, Any],
-) -> dict[str, Any]:
-    """Remove :data:`REDACTED_MARKER_KEY` so it does not reach the renderer."""
-    event_dict.pop(REDACTED_MARKER_KEY, None)
-    return event_dict
-
-
 DEFAULT_SENSITIVE_KEYS: frozenset[str] = frozenset(
     {
         "password",
