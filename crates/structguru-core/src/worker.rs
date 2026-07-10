@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
 use std::fmt;
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -143,6 +145,174 @@ impl StringSink for FailingSink {
     }
 }
 
+/// Rotating file sink mirroring CPython's `logging.handlers.RotatingFileHandler`.
+///
+/// Writes to `path`; when the cumulative written bytes reach `max_bytes`, the
+/// file is rotated: the active file becomes `path.1`, `.1 → .2`, …, and the
+/// oldest backup beyond `backup_count` is deleted. A fresh active file is then
+/// opened. `max_bytes == 0` disables rotation. The write happens before the
+/// size check (matching CPython: the record that crosses the threshold stays in
+/// the current file, then rotation occurs).
+///
+/// Like CPython, there is no cross-process lock — concurrent writers sharing one
+/// path will corrupt rotation. Within a single writer thread this is sound.
+pub struct RotatingFileSink {
+    file: BufWriter<File>,
+    path: PathBuf,
+    max_bytes: usize,
+    backup_count: usize,
+    bytes_written: usize,
+}
+
+impl RotatingFileSink {
+    /// Open `path` for append (created if missing). Parent directories are
+    /// created if they do not exist (a small convenience over CPython).
+    pub fn new(
+        path: impl Into<PathBuf>,
+        max_bytes: usize,
+        backup_count: usize,
+    ) -> Result<Self, SinkError> {
+        let path = path.into();
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).map_err(|err| SinkError::new(err.to_string()))?;
+        }
+        let file = open_append(&path)?;
+        Ok(Self {
+            file,
+            path,
+            max_bytes,
+            backup_count,
+            bytes_written: 0,
+        })
+    }
+
+    fn rotate(&mut self) -> Result<(), SinkError> {
+        // Flush + close the active file before renaming.
+        self.file
+            .flush()
+            .map_err(|err| SinkError::new(err.to_string()))?;
+        // Re-open to close the current handle, then drop it.
+        {
+            let raw = self
+                .file
+                .get_ref()
+                .try_clone()
+                .map_err(|err| SinkError::new(err.to_string()))?;
+            drop(raw);
+        }
+
+        if self.backup_count > 0 {
+            // Delete the oldest backup if it exists.
+            let oldest = backup_path(&self.path, self.backup_count);
+            if oldest.exists() {
+                fs::remove_file(&oldest).map_err(|err| SinkError::new(err.to_string()))?;
+            }
+            // Shift .i → .(i+1) for i in (backup_count-1 .. 1).
+            for i in (1..self.backup_count).rev() {
+                let from = backup_path(&self.path, i);
+                let to = backup_path(&self.path, i + 1);
+                if from.exists() {
+                    fs::rename(&from, &to).map_err(|err| SinkError::new(err.to_string()))?;
+                }
+            }
+            // Active → .1.
+            let first = backup_path(&self.path, 1);
+            fs::rename(&self.path, &first).map_err(|err| SinkError::new(err.to_string()))?;
+        }
+
+        // Open a fresh active file.
+        self.file = open_append(&self.path)?;
+        self.bytes_written = 0;
+        Ok(())
+    }
+}
+
+impl StringSink for RotatingFileSink {
+    fn write(&mut self, message: String) -> Result<(), SinkError> {
+        let bytes = message.as_bytes();
+        self.file
+            .write_all(bytes)
+            .map_err(|err| SinkError::new(err.to_string()))?;
+        self.bytes_written += bytes.len();
+
+        if self.max_bytes > 0 && self.bytes_written >= self.max_bytes {
+            self.rotate()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), SinkError> {
+        self.file
+            .flush()
+            .map_err(|err| SinkError::new(err.to_string()))
+    }
+}
+
+fn open_append(path: &Path) -> Result<BufWriter<File>, SinkError> {
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| SinkError::new(err.to_string()))?;
+    Ok(BufWriter::new(file))
+}
+
+fn backup_path(base: &Path, index: usize) -> PathBuf {
+    let mut name = base
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(format!(".{index}"));
+    base.with_file_name(name)
+}
+
+/// Fan-out sink: writes every message to all child sinks.
+///
+/// One child failing does not stop the others; `write` returns `Err` only when
+/// every child fails (so the worker continues draining and counts partial
+/// failures via `sink_errors`).
+pub struct MultiSink {
+    sinks: Vec<Box<dyn StringSink>>,
+}
+
+impl MultiSink {
+    pub fn new(sinks: Vec<Box<dyn StringSink>>) -> Self {
+        Self { sinks }
+    }
+}
+
+impl StringSink for MultiSink {
+    fn write(&mut self, message: String) -> Result<(), SinkError> {
+        let mut last_err: Option<SinkError> = None;
+        let mut ok_count = 0;
+        for sink in &mut self.sinks {
+            // Clone for all but the last sink to avoid an owned copy per child.
+            match sink.write(message.clone()) {
+                Ok(()) => ok_count += 1,
+                Err(err) => last_err = Some(err),
+            }
+        }
+        if ok_count == 0 {
+            Err(last_err.unwrap_or_else(|| SinkError::new("multi-sink has no children")))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn flush(&mut self) -> Result<(), SinkError> {
+        let mut last_err: Option<SinkError> = None;
+        for sink in &mut self.sinks {
+            if let Err(err) = sink.flush() {
+                last_err = Some(err);
+            }
+        }
+        // flush is best-effort; report the last error but don't suppress others
+        last_err.map(Err).unwrap_or(Ok(()))
+    }
+}
+
 /// Point-in-time view of native writer state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkerMetrics {
@@ -219,6 +389,37 @@ impl StringWriter {
     pub fn new_failing(maxsize: usize, fail_after: usize, paused: bool) -> Self {
         let (sink, handle) = FailingSink::new(fail_after);
         Self::with_sink(maxsize, paused, Box::new(sink), handle)
+    }
+
+    /// Writer that drains to a rotating file (append mode, size-based rotation).
+    pub fn new_file(
+        maxsize: usize,
+        path: impl Into<PathBuf>,
+        max_bytes: usize,
+        backup_count: usize,
+    ) -> Result<Self, SinkError> {
+        let sink = RotatingFileSink::new(path, max_bytes, backup_count)?;
+        Ok(Self::with_sink(
+            maxsize,
+            false,
+            Box::new(sink),
+            MemorySinkHandle::default(),
+        ))
+    }
+
+    /// Writer that fans out to multiple sinks.
+    pub fn new_multi(maxsize: usize, sinks: Vec<Box<dyn StringSink>>) -> Self {
+        Self::with_sink(
+            maxsize,
+            false,
+            Box::new(MultiSink::new(sinks)),
+            MemorySinkHandle::default(),
+        )
+    }
+
+    /// Writer wrapping a caller-built sink (for PyO3-layer composition).
+    pub fn with_boxed_sink(maxsize: usize, sink: Box<dyn StringSink>) -> Self {
+        Self::with_sink(maxsize, false, sink, MemorySinkHandle::default())
     }
 
     fn with_paused(maxsize: usize, paused: bool) -> Self {
@@ -649,5 +850,127 @@ mod tests {
         assert_eq!(metrics.written, 1);
         assert_eq!(metrics.sink_errors, 2);
         assert_eq!(metrics.depth, 0);
+    }
+
+    // -- rotating file sink --------------------------------------------------
+
+    fn temp_log_path(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("structguru-test-{}-{name}", std::process::id()));
+        // Clean any leftovers from a prior run.
+        for i in 0..=6 {
+            let _ = std::fs::remove_file(backup_path(&p, i));
+        }
+        p
+    }
+
+    fn cleanup(path: &Path) {
+        for i in 0..=6 {
+            let _ = std::fs::remove_file(backup_path(path, i));
+        }
+    }
+
+    #[test]
+    fn rotating_file_writes_and_rotates_at_threshold() {
+        let path = temp_log_path("rotate-basic");
+        // Each write is 10 bytes; rotate after 25.
+        let mut sink = RotatingFileSink::new(&path, 25, 3).unwrap();
+        sink.write("0123456789".to_owned()).unwrap(); // 10 bytes, no rotate
+        sink.flush().unwrap();
+        assert!(!backup_path(&path, 1).exists());
+        sink.write("0123456789".to_owned()).unwrap(); // 20 bytes, no rotate
+        sink.write("0123456789".to_owned()).unwrap(); // 30 bytes → rotate
+        sink.flush().unwrap();
+        assert!(
+            backup_path(&path, 1).exists(),
+            ".1 should exist after rotation"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn rotating_file_shifts_backups_and_drops_oldest() {
+        let path = temp_log_path("rotate-shift");
+        let mut sink = RotatingFileSink::new(&path, 10, 2).unwrap();
+        // Each write is 10 bytes → rotate every write.
+        for _ in 0..4 {
+            sink.write("0123456789".to_owned()).unwrap();
+        }
+        sink.flush().unwrap();
+        assert!(backup_path(&path, 1).exists(), ".1 exists");
+        assert!(backup_path(&path, 2).exists(), ".2 exists");
+        assert!(
+            !backup_path(&path, 3).exists(),
+            ".3 dropped (backup_count=2)"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn rotating_file_max_bytes_zero_never_rotates() {
+        let path = temp_log_path("rotate-none");
+        let mut sink = RotatingFileSink::new(&path, 0, 5).unwrap();
+        for _ in 0..20 {
+            sink.write("data-line\n".to_owned()).unwrap();
+        }
+        sink.flush().unwrap();
+        assert!(
+            !backup_path(&path, 1).exists(),
+            "no rotation when max_bytes=0"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn rotating_file_reopens_after_rotation() {
+        let path = temp_log_path("rotate-reopen");
+        let mut sink = RotatingFileSink::new(&path, 10, 3).unwrap();
+        sink.write("0123456789".to_owned()).unwrap(); // rotate
+        sink.write("after".to_owned()).unwrap(); // lands in fresh active file
+        sink.flush().unwrap();
+
+        let active = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            active.contains("after"),
+            "post-rotation write in active file"
+        );
+        assert!(
+            !active.contains("0123456789"),
+            "rotated content moved to .1"
+        );
+        cleanup(&path);
+    }
+
+    // -- multi sink ----------------------------------------------------------
+
+    #[test]
+    fn multi_sink_fans_out_to_all_sinks() {
+        let (a, ha) = MemorySink::new();
+        let (b, hb) = MemorySink::new();
+        let mut multi = MultiSink::new(vec![Box::new(a), Box::new(b)]);
+        multi.write("hello".to_owned()).unwrap();
+
+        assert_eq!(ha.messages(), vec!["hello".to_owned()]);
+        assert_eq!(hb.messages(), vec!["hello".to_owned()]);
+    }
+
+    #[test]
+    fn multi_sink_continues_if_one_sink_fails() {
+        let (failing, _hf) = FailingSink::new(0); // fails immediately
+        let (mem, hm) = MemorySink::new();
+        let mut multi = MultiSink::new(vec![Box::new(failing), Box::new(mem)]);
+        let result = multi.write("survives".to_owned()).unwrap();
+
+        assert_eq!(result, ());
+        assert_eq!(hm.messages(), vec!["survives".to_owned()]);
+    }
+
+    #[test]
+    fn multi_sink_errors_only_when_all_fail() {
+        let (a, _) = FailingSink::new(0);
+        let (b, _) = FailingSink::new(0);
+        let mut multi = MultiSink::new(vec![Box::new(a), Box::new(b)]);
+        let result = multi.write("nothing".to_owned());
+        assert!(result.is_err(), "Err when every child fails");
     }
 }

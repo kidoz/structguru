@@ -225,6 +225,121 @@ fn render_line_with_config(
     .map_err(|err| PyValueError::new_err(err.to_string()))
 }
 
+/// Render a colored, human-readable console line (patterns compiled per call).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (fields, logger, level, service, message, colors, timestamp=None, sensitive_keys=None, sensitive_patterns=None, stack=None, pattern_replacement=None))]
+fn render_line_console(
+    fields: &Bound<'_, PyDict>,
+    logger: &str,
+    level: &str,
+    service: &str,
+    message: &str,
+    colors: bool,
+    timestamp: Option<&str>,
+    sensitive_keys: Option<Vec<String>>,
+    sensitive_patterns: Option<Vec<String>>,
+    stack: Option<&str>,
+    pattern_replacement: Option<&str>,
+) -> PyResult<String> {
+    let mut entries: Vec<(String, Value)> = Vec::with_capacity(fields.len());
+    for (key, value) in fields.iter() {
+        let key = key
+            .cast::<PyString>()
+            .map_err(|_| PyTypeError::new_err("field keys must be strings"))?
+            .to_str()?
+            .to_owned();
+        entries.push((key, convert_py_value(&value)?));
+    }
+    let generated;
+    let timestamp = match timestamp {
+        Some(value) => value,
+        None => {
+            generated = structguru_core::now_iso8601();
+            &generated
+        }
+    };
+    let compiled: Vec<Regex> = match &sensitive_patterns {
+        Some(patterns) => patterns
+            .iter()
+            .map(|p| Regex::new(p))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| PyValueError::new_err(err.to_string()))?,
+        None => Vec::new(),
+    };
+    let patterns_ref = if compiled.is_empty() {
+        None
+    } else {
+        Some(compiled.as_slice())
+    };
+    Ok(structguru_core::render_line_console(
+        entries,
+        logger,
+        level,
+        service,
+        message,
+        colors,
+        timestamp,
+        sensitive_keys,
+        patterns_ref,
+        pattern_replacement,
+        stack,
+    ))
+}
+
+/// Hot-path console render using a pre-built `RedactionConfig`.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (fields, logger, level, service, message, colors, config, timestamp=None, sensitive_keys=None, stack=None))]
+fn render_console_with_config(
+    fields: &Bound<'_, PyDict>,
+    logger: &str,
+    level: &str,
+    service: &str,
+    message: &str,
+    colors: bool,
+    config: &RedactionConfig,
+    timestamp: Option<&str>,
+    sensitive_keys: Option<Vec<String>>,
+    stack: Option<&str>,
+) -> PyResult<String> {
+    let mut entries: Vec<(String, Value)> = Vec::with_capacity(fields.len());
+    for (key, value) in fields.iter() {
+        let key = key
+            .cast::<PyString>()
+            .map_err(|_| PyTypeError::new_err("field keys must be strings"))?
+            .to_str()?
+            .to_owned();
+        entries.push((key, convert_py_value(&value)?));
+    }
+    let generated;
+    let timestamp = match timestamp {
+        Some(value) => value,
+        None => {
+            generated = structguru_core::now_iso8601();
+            &generated
+        }
+    };
+    let patterns_ref = if config.patterns.is_empty() {
+        None
+    } else {
+        Some(config.patterns.as_slice())
+    };
+    Ok(structguru_core::render_line_console(
+        entries,
+        logger,
+        level,
+        service,
+        message,
+        colors,
+        timestamp,
+        sensitive_keys,
+        patterns_ref,
+        Some(&config.replacement),
+        stack,
+    ))
+}
+
 #[pyclass(name = "_NativeStringWriter")]
 struct NativeStringWriter {
     writer: StringWriter,
@@ -233,28 +348,68 @@ struct NativeStringWriter {
 #[pymethods]
 impl NativeStringWriter {
     #[new]
-    #[pyo3(signature = (maxsize, paused=false, fail_after=None, target="memory"))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        maxsize,
+        paused=false,
+        fail_after=None,
+        target="memory",
+        file_path=None,
+        file_max_bytes=0,
+        file_backup_count=0,
+        also_stdout=false,
+    ))]
     fn new(
         maxsize: usize,
         paused: bool,
         fail_after: Option<usize>,
         target: &str,
+        file_path: Option<String>,
+        file_max_bytes: usize,
+        file_backup_count: usize,
+        also_stdout: bool,
     ) -> PyResult<Self> {
-        let writer = match target {
-            "stdout" => StringWriter::new_stdout(maxsize),
-            "memory" => {
-                if let Some(fail_after) = fail_after {
-                    StringWriter::new_failing(maxsize, fail_after, paused)
-                } else if paused {
-                    StringWriter::new_paused(maxsize)
-                } else {
-                    StringWriter::new(maxsize)
-                }
+        use structguru_core::{MultiSink, RotatingFileSink, StringSink, WriteSink};
+
+        // Compose sinks. file_path (if set) drives real output; also_stdout
+        // mirrors to stdout as well. When no file_path is given, `target`
+        // selects stdout or a memory/test sink.
+        let mut sinks: Vec<Box<dyn StringSink>> = Vec::new();
+
+        if let Some(path) = &file_path {
+            let file = RotatingFileSink::new(path, file_max_bytes, file_backup_count)
+                .map_err(|err| PyValueError::new_err(err.to_string()))?;
+            sinks.push(Box::new(file));
+        }
+        if also_stdout {
+            sinks.push(Box::new(WriteSink::new(std::io::stdout())));
+        }
+
+        let writer = if !sinks.is_empty() {
+            // Real output sink(s) composed.
+            if sinks.len() == 1 {
+                StringWriter::with_boxed_sink(maxsize, sinks.pop().unwrap())
+            } else {
+                StringWriter::with_boxed_sink(maxsize, Box::new(MultiSink::new(sinks)))
             }
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "unknown writer target: {other}"
-                )));
+        } else {
+            // No file_path and not also_stdout: memory/test targets.
+            match target {
+                "stdout" => StringWriter::new_stdout(maxsize),
+                "memory" => {
+                    if let Some(fail_after) = fail_after {
+                        StringWriter::new_failing(maxsize, fail_after, paused)
+                    } else if paused {
+                        StringWriter::new_paused(maxsize)
+                    } else {
+                        StringWriter::new(maxsize)
+                    }
+                }
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "unknown writer target: {other}"
+                    )));
+                }
             }
         };
         Ok(Self { writer })
@@ -519,6 +674,8 @@ fn rust_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(validate_patterns, module)?)?;
     module.add_function(wrap_pyfunction!(render_line, module)?)?;
     module.add_function(wrap_pyfunction!(render_line_with_config, module)?)?;
+    module.add_function(wrap_pyfunction!(render_line_console, module)?)?;
+    module.add_function(wrap_pyfunction!(render_console_with_config, module)?)?;
     module.add_class::<NativeStringWriter>()?;
     module.add_class::<NativeFilter>()?;
     module.add_class::<RedactionConfig>()?;

@@ -158,7 +158,11 @@ pub fn render_line(
     upsert(&mut entries, "logger", Value::String(logger.to_owned()));
     upsert(&mut entries, "level", Value::String(canonical));
     upsert(&mut entries, "severity", Value::Int(i64::from(severity)));
-    upsert(&mut entries, "timestamp", Value::String(timestamp.to_owned()));
+    upsert(
+        &mut entries,
+        "timestamp",
+        Value::String(timestamp.to_owned()),
+    );
     if !entries.iter().any(|(key, _)| key == "service") {
         entries.push(("service".to_owned(), Value::String(service.to_owned())));
     }
@@ -170,6 +174,157 @@ pub fn render_line(
     upsert(&mut entries, "message", Value::String(message.to_owned()));
 
     Value::Map(entries).to_json_string()
+}
+
+/// ANSI color codes for console rendering (applied only when `colors` is true).
+/// ANSI color codes for console rendering (applied only when `colors` is true).
+#[allow(dead_code)]
+const ANSI_DEBUG: &str = "\x1b[2m"; // dim
+#[allow(dead_code)]
+const ANSI_YELLOW: &str = "\x1b[33m";
+#[allow(dead_code)]
+const ANSI_RED: &str = "\x1b[31m";
+#[allow(dead_code)]
+const ANSI_BOLD_RED: &str = "\x1b[1;31m";
+#[allow(dead_code)]
+const ANSI_RESET: &str = "\x1b[0m";
+
+/// Format a [`Value`] for the console renderer (human-readable, not JSON).
+#[allow(dead_code)]
+fn display_value(value: &Value, buf: &mut String) {
+    match value {
+        Value::Null => buf.push_str("None"),
+        Value::Bool(b) => buf.push_str(if *b { "True" } else { "False" }),
+        Value::Int(i) => buf.push_str(&i.to_string()),
+        Value::Float(f) => buf.push_str(&f.to_string()),
+        Value::String(s) => {
+            buf.push('"');
+            buf.push_str(s);
+            buf.push('"');
+        }
+        Value::List(items) => {
+            buf.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    buf.push_str(", ");
+                }
+                display_value(item, buf);
+            }
+            buf.push(']');
+        }
+        Value::Map(entries) => {
+            buf.push('{');
+            for (i, (k, v)) in entries.iter().enumerate() {
+                if i > 0 {
+                    buf.push_str(", ");
+                }
+                buf.push_str(k);
+                buf.push(':');
+                display_value(v, buf);
+            }
+            buf.push('}');
+        }
+        Value::Raw(json) => buf.push_str(json), // already-serialized; emit verbatim
+    }
+}
+
+/// Render a single log line as a colored, human-readable console string.
+///
+/// Format: ``<timestamp> [<LEVEL>] <message>  k1=v1 k2=v2``
+///
+/// This is structguru's own stable dev format, not a structlog
+/// ``ConsoleRenderer`` clone. Fields are rendered as ``k=v`` pairs after the
+/// message. The same redaction pipeline as [`render_line`] is applied first.
+#[allow(clippy::too_many_arguments, dead_code)]
+pub fn render_line_console(
+    fields: Vec<(String, Value)>,
+    logger: &str,
+    level: &str,
+    service: &str,
+    message: &str,
+    colors: bool,
+    timestamp: &str,
+    sensitive_keys: Option<Vec<String>>,
+    sensitive_patterns: Option<&[Regex]>,
+    pattern_replacement: Option<&str>,
+    stack: Option<&str>,
+) -> String {
+    let mut root = Value::Map(fields);
+    match &sensitive_keys {
+        Some(custom) => redact(&mut root, custom),
+        None => redact(&mut root, DEFAULT_SENSITIVE_KEYS),
+    }
+    if let Some(patterns) = sensitive_patterns {
+        redact_patterns(&mut root, patterns, pattern_replacement.unwrap_or(REDACTED));
+    }
+    let Value::Map(mut entries) = root else {
+        unreachable!("root is constructed as a map");
+    };
+    entries.retain(|(key, _)| key != REDACTED_MARKER_KEY);
+
+    let canonical = normalize_level(level);
+    let (level_pad, color) = level_style(&canonical, colors);
+
+    let mut out = String::with_capacity(128);
+    out.push_str(timestamp);
+    out.push(' ');
+    if colors {
+        out.push_str(color);
+    }
+    out.push('[');
+    out.push_str(&level_pad);
+    out.push(']');
+    if colors {
+        out.push_str(ANSI_RESET);
+    }
+    out.push(' ');
+    out.push_str(message);
+
+    // Append user fields as k=v pairs (skip standard keys).
+    let standard: &[&str] = &[
+        "logger",
+        "level",
+        "severity",
+        "timestamp",
+        "service",
+        "message",
+        "stack",
+    ];
+    for (key, value) in &entries {
+        if standard.contains(&key.as_str()) {
+            continue;
+        }
+        out.push_str("  ");
+        out.push_str(key);
+        out.push('=');
+        display_value(value, &mut out);
+    }
+    // Suppress unused-variable lint for logger/service (kept in signature for API symmetry).
+    let _ = (logger, service);
+
+    if let Some(stack) = stack {
+        out.push('\n');
+        out.push_str(stack);
+    }
+    out
+}
+
+#[allow(dead_code)]
+fn level_style(canonical_level: &str, colors: bool) -> (String, &'static str) {
+    // Right-pad level to 8 chars inside the brackets: [INFO    ], [DEBUG   ], [CRITICAL].
+    let pad = format!("{:<8}", canonical_level);
+    let color = if !colors {
+        ""
+    } else {
+        match canonical_level {
+            "DEBUG" => ANSI_DEBUG,
+            "WARN" => ANSI_YELLOW,
+            "ERROR" => ANSI_RED,
+            "CRITICAL" => ANSI_BOLD_RED,
+            _ => "",
+        }
+    };
+    (pad, color)
 }
 
 #[cfg(test)]
@@ -196,7 +351,10 @@ mod tests {
             ("_structguru_redacted".to_owned(), Value::Bool(true)),
             ("keep".to_owned(), Value::Int(1)),
         ];
-        let line = render_line(fields, "l", "info", "svc", "m", "TS", None, None, None, None).unwrap();
+        let line = render_line(
+            fields, "l", "info", "svc", "m", "TS", None, None, None, None,
+        )
+        .unwrap();
 
         assert!(!line.contains("_structguru_redacted"));
         assert!(line.contains(r#""keep":1"#));
@@ -238,7 +396,10 @@ mod tests {
             ),
             ("qty".to_owned(), Value::Int(2)),
         ];
-        let line = render_line(fields, "l", "info", "svc", "m", "TS", None, None, None, None).unwrap();
+        let line = render_line(
+            fields, "l", "info", "svc", "m", "TS", None, None, None, None,
+        )
+        .unwrap();
 
         assert!(line.contains(r#""Password":"[REDACTED]""#));
         assert!(line.contains(r#""api_key":"[REDACTED]""#));
@@ -252,7 +413,10 @@ mod tests {
             ("service".to_owned(), Value::String("user-svc".to_owned())),
             ("keep".to_owned(), Value::Int(1)),
         ];
-        let line = render_line(fields, "l", "warning", "cfg-svc", "m", "TS", None, None, None, None).unwrap();
+        let line = render_line(
+            fields, "l", "warning", "cfg-svc", "m", "TS", None, None, None, None,
+        )
+        .unwrap();
 
         // canonical level overrides the user field; user "service" wins (setdefault)
         assert!(line.contains(r#""level":"WARN""#));
@@ -275,7 +439,10 @@ mod tests {
             ("secret_sauce".to_owned(), Value::String("x".to_owned())),
         ];
         let keys = Some(vec!["secret_sauce".to_owned()]);
-        let line = render_line(fields, "l", "info", "svc", "m", "TS", None, keys, None, None).unwrap();
+        let line = render_line(
+            fields, "l", "info", "svc", "m", "TS", None, keys, None, None,
+        )
+        .unwrap();
 
         // "ssn" is a default key but NOT in the custom set → not redacted.
         assert!(line.contains(r#""ssn":"123""#));
@@ -290,8 +457,19 @@ mod tests {
             "msg".to_owned(),
             Value::String("Contact user@example.com for details".to_owned()),
         )];
-        let line =
-            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns), None).unwrap();
+        let line = render_line(
+            fields,
+            "l",
+            "info",
+            "svc",
+            "m",
+            "TS",
+            None,
+            None,
+            Some(&patterns),
+            None,
+        )
+        .unwrap();
 
         assert!(line.contains(r#""msg":"Contact [REDACTED] for details""#));
         assert!(!line.contains("user@example.com"));
@@ -317,8 +495,19 @@ mod tests {
                 ]),
             ),
         ];
-        let line =
-            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns), None).unwrap();
+        let line = render_line(
+            fields,
+            "l",
+            "info",
+            "svc",
+            "m",
+            "TS",
+            None,
+            None,
+            Some(&patterns),
+            None,
+        )
+        .unwrap();
 
         assert!(line.contains(r#""note":"ssn is [REDACTED]""#));
         assert!(line.contains(r#""ok [REDACTED]""#));
@@ -338,8 +527,19 @@ mod tests {
             // Raw holds pre-serialized JSON; patterns must not descend into it.
             ("raw".to_owned(), Value::Raw(r#""escaped""#.to_owned())),
         ];
-        let line =
-            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns), None).unwrap();
+        let line = render_line(
+            fields,
+            "l",
+            "info",
+            "svc",
+            "m",
+            "TS",
+            None,
+            None,
+            Some(&patterns),
+            None,
+        )
+        .unwrap();
 
         assert!(line.contains(r#""count":42"#));
         assert!(line.contains(r#""flag":true"#));
@@ -359,8 +559,19 @@ mod tests {
             "msg".to_owned(),
             Value::String("secret email a@b.com here".to_owned()),
         )];
-        let line =
-            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns), None).unwrap();
+        let line = render_line(
+            fields,
+            "l",
+            "info",
+            "svc",
+            "m",
+            "TS",
+            None,
+            None,
+            Some(&patterns),
+            None,
+        )
+        .unwrap();
 
         assert!(line.contains(r#""msg":"[REDACTED] email [REDACTED] here""#));
     }
@@ -403,11 +614,98 @@ mod tests {
                 Value::String("ping leak@x.io now".to_owned()),
             ),
         ];
-        let line =
-            render_line(fields, "l", "info", "svc", "m", "TS", None, None, Some(&patterns), None).unwrap();
+        let line = render_line(
+            fields,
+            "l",
+            "info",
+            "svc",
+            "m",
+            "TS",
+            None,
+            None,
+            Some(&patterns),
+            None,
+        )
+        .unwrap();
 
         assert!(line.contains(r#""token":"[REDACTED]""#));
         assert!(line.contains(r#""msg":"ping [REDACTED] now""#));
         assert!(!line.contains("leak@x.io"));
+    }
+
+    // -- console renderer ----------------------------------------------------
+
+    #[test]
+    fn console_renders_human_readable_line_without_colors() {
+        let fields = vec![
+            ("request_id".to_owned(), Value::String("req-1".to_owned())),
+            ("count".to_owned(), Value::Int(42)),
+        ];
+        let line = render_line_console(
+            fields,
+            "svc.mod",
+            "info",
+            "svc",
+            "hello world",
+            false,
+            "TS",
+            None,
+            None,
+            None,
+            None,
+        );
+        // No ANSI escape codes when colors=false.
+        assert!(!line.contains('\x1b'));
+        assert!(line.starts_with("TS [INFO    ] hello world"));
+        assert!(line.contains("request_id=\"req-1\""));
+        assert!(line.contains("count=42"));
+    }
+
+    #[test]
+    fn console_applies_colors_per_level() {
+        let line = render_line_console(
+            vec![],
+            "l",
+            "error",
+            "svc",
+            "boom",
+            true,
+            "TS",
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(line.contains("\x1b[31m")); // ANSI_RED
+        assert!(line.contains("\x1b[0m")); // ANSI_RESET
+        assert!(line.contains("[ERROR   ]"));
+    }
+
+    #[test]
+    fn console_redacts_sensitive_keys() {
+        let fields = vec![("password".to_owned(), Value::String("hunter2".to_owned()))];
+        let line = render_line_console(
+            fields, "l", "info", "svc", "login", false, "TS", None, None, None, None,
+        );
+        assert!(line.contains("password=\"[REDACTED]\""));
+        assert!(!line.contains("hunter2"));
+    }
+
+    #[test]
+    fn console_appends_stack_when_provided() {
+        let line = render_line_console(
+            vec![],
+            "l",
+            "info",
+            "svc",
+            "m",
+            false,
+            "TS",
+            None,
+            None,
+            None,
+            Some("Stack (most recent call last):\n  File x"),
+        );
+        assert!(line.contains("Stack (most recent call last)"));
     }
 }

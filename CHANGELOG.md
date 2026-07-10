@@ -8,6 +8,20 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Native rotating-file sink.** `enable_native(file_path=...)` writes rendered
+  lines to a rotating file natively (append mode, size-based rotation). Defaults
+  mirror `logging.handlers.RotatingFileHandler` (50 MB, 5 backups); configure via
+  `file_max_bytes`/`file_backup_count`. Set `also_stdout=True` to mirror output
+  to both file and stdout.
+- **Native callable sinks.** `enable_native(callable_sinks=[fn, ...])` invokes
+  `Callable[[str], None]` with each rendered line. They run on a dedicated
+  daemon thread (never the Rust writer, which must not touch the GIL), so a
+  blocking callable cannot deadlock the logging path. Callable errors are
+  swallowed.
+- **Native console renderer.** `enable_native(json=False)` renders colored,
+  human-readable lines instead of JSON — structguru's own stable dev format
+  (`<timestamp> [<LEVEL>] <message>  k=v`), with ANSI colors by default on a
+  TTY. Override with `colors=True/False`. Not a `ConsoleRenderer` clone.
 - **Native metric hooks.** `enable_native(metric_processor=...)` invokes a
   structlog-style processor (e.g. `MetricProcessor`) for every kept record on
   the caller's thread before rendering, with the pre-`EventRenamer` event-dict

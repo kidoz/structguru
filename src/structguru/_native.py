@@ -12,12 +12,15 @@ from __future__ import annotations
 import atexit
 import importlib
 import io
+import json
 import math
 import os
+import queue
 import sys
 import threading
 import traceback
 import warnings
+from collections.abc import Callable
 from types import TracebackType
 from typing import Any, Protocol, cast
 
@@ -84,6 +87,35 @@ class _RustModule(Protocol):
         stack: str | None = None,
     ) -> str: ...
 
+    def render_line_console(
+        self,
+        fields: dict[str, Any],
+        logger: str,
+        level: str,
+        service: str,
+        message: str,
+        colors: bool,
+        timestamp: str | None = None,
+        sensitive_keys: list[str] | None = None,
+        sensitive_patterns: list[str] | None = None,
+        stack: str | None = None,
+        pattern_replacement: str | None = None,
+    ) -> str: ...
+
+    def render_console_with_config(
+        self,
+        fields: dict[str, Any],
+        logger: str,
+        level: str,
+        service: str,
+        message: str,
+        colors: bool,
+        config: Any,
+        timestamp: str | None = None,
+        sensitive_keys: list[str] | None = None,
+        stack: str | None = None,
+    ) -> str: ...
+
     def validate_patterns(self, patterns: list[str]) -> int: ...
 
     def RedactionConfig(self, patterns: list[str], replacement: str | None = None) -> Any: ...
@@ -96,7 +128,17 @@ class _RustModule(Protocol):
         rate_limit_period: float = ...,
     ) -> Any: ...
 
-    def _NativeStringWriter(self, maxsize: int, target: str = ...) -> _NativeWriter: ...
+    def _NativeStringWriter(
+        self,
+        maxsize: int,
+        paused: bool = ...,
+        fail_after: int | None = ...,
+        target: str = ...,
+        file_path: str | None = ...,
+        file_max_bytes: int = ...,
+        file_backup_count: int = ...,
+        also_stdout: bool = ...,
+    ) -> _NativeWriter: ...
 
 
 def _load_rust_module() -> _RustModule | None:
@@ -148,6 +190,15 @@ _redaction_config: Any = None  # compiled RedactionConfig, None when no patterns
 _filter: Any = None  # NativeFilter, None when no sampling/rate-limit configured
 _exception_config: dict[str, Any] | None = None  # structured-exception knobs, None = string
 _metric_processor: Any = None  # structlog-style processor invoked per kept record
+# Console mode: json=False renders colored human-readable lines instead of JSON.
+_console = False
+_colors = False
+# Callable sinks: dispatched on a dedicated daemon thread (never the Rust worker,
+# which must not touch the GIL). Each entry is (callable, min_level_num).
+_callable_sinks: list[tuple[Callable[[str], None], int]] | None = None
+_dispatch_queue: queue.Queue[str] | None = None
+_dispatch_thread: threading.Thread | None = None
+_dispatch_stop = threading.Event()
 _hooks_registered = False
 _drop_count = 0
 
@@ -284,6 +335,13 @@ def enable_native(
     exception_include_locals: bool = False,
     exception_max_frames: int = 20,
     exception_max_local_repr: int = 200,
+    json: bool = True,
+    colors: bool | None = None,
+    file_path: str | None = None,
+    file_max_bytes: int = 50 * 1024 * 1024,
+    file_backup_count: int = 5,
+    also_stdout: bool = False,
+    callable_sinks: list[Callable[[str], None]] | None = None,
 ) -> None:
     """Route the common log path through the native renderer + writer.
 
@@ -326,6 +384,21 @@ def enable_native(
     ``sensitive_keys`` reused for locals redaction) instead of the formatted
     traceback string.
 
+    ``json=False`` selects the native console renderer (colored, human-readable
+    dev output) instead of JSON. ``colors`` defaults to ``sys.stdout.isatty()``
+    in console mode; set it explicitly to override. The console format is
+    structguru's own stable dev format, not a structlog ``ConsoleRenderer`` clone.
+
+    ``file_path`` enables a native rotating-file sink (append mode). Defaults
+    mirror :class:`logging.handlers.RotatingFileHandler`: ``file_max_bytes=50MB``,
+    ``file_backup_count=5``. Set ``also_stdout=True`` to mirror output to both
+    the file and stdout (e.g. container + persistent log).
+
+    ``callable_sinks`` is a list of ``Callable[[str], None]`` invoked with each
+    *rendered* line. They run on a dedicated daemon thread (never the Rust
+    writer thread, which must not touch the GIL), so a blocking callable cannot
+    deadlock the logging path. Callable errors are swallowed.
+
     Registers shutdown (``atexit``) and fork (``os.register_at_fork``) handlers so
     buffered records are flushed on exit and the background writer is respawned in
     forked children (gunicorn/celery prefork) instead of deadlocking.
@@ -333,6 +406,7 @@ def enable_native(
     global _enabled, _writer, _service, _maxsize, _target, _overflow
     global _level_threshold, _otel, _sensitive_keys, _sensitive_patterns
     global _redaction_config, _filter, _exception_config, _metric_processor
+    global _console, _colors, _callable_sinks, _dispatch_queue, _dispatch_thread
     if _RUST is None:
         msg = "native extension is not available"
         raise RuntimeError(msg)
@@ -402,6 +476,20 @@ def enable_native(
         if new_filter.is_empty():
             new_filter = None
 
+    # Validate callable sinks: each must be callable.
+    if callable_sinks is not None:
+        for i, fn in enumerate(callable_sinks):
+            if not callable(fn):
+                msg = f"callable_sinks[{i}] must be callable, got {type(fn)!r}"
+                raise TypeError(msg)
+
+    # Resolve console/colors.
+    new_console = not json
+    new_colors = colors if colors is not None else (sys.stdout.isatty() if new_console else False)
+
+    # Stop any existing dispatch thread before re-enabling.
+    _stop_dispatch_thread()
+
     with _state_lock:
         if _writer is not None:
             _writer.close()
@@ -417,8 +505,25 @@ def enable_native(
         _filter = new_filter
         _exception_config = new_exception_config
         _metric_processor = metric_processor
-        _writer = _RUST._NativeStringWriter(maxsize, target=target)
+        _console = new_console
+        _colors = new_colors
+        _writer = _RUST._NativeStringWriter(
+            maxsize,
+            target=target,
+            file_path=file_path,
+            file_max_bytes=file_max_bytes,
+            file_backup_count=file_backup_count,
+            also_stdout=also_stdout,
+        )
+        _callable_sinks = (
+            [(fn, _LEVEL_NUM["debug"]) for fn in callable_sinks] if callable_sinks else None
+        )
+        _dispatch_queue = queue.Queue() if _callable_sinks else None
         _enabled = True
+
+    # Start the dispatch thread outside the state lock.
+    if _callable_sinks:
+        _start_dispatch_thread()
     _register_lifecycle_hooks()
 
 
@@ -452,18 +557,74 @@ def _before_fork() -> None:
 
 def _after_in_child() -> None:
     """Respawn the writer in the child: its worker thread did not survive fork."""
-    global _writer
+    global _writer, _dispatch_thread, _dispatch_stop
     if not _enabled or _RUST is None:
         return
     old = _writer
     if old is not None:
         old.abandon()  # never join the parent's (now absent) worker thread
     _writer = _RUST._NativeStringWriter(_maxsize, target=_target)
+    # The dispatch thread also died in the fork; respawn it if callable sinks are active.
+    _dispatch_stop.clear()
+    _dispatch_thread = None
+    if _callable_sinks and _dispatch_queue is not None:
+        _dispatch_thread = threading.Thread(target=_dispatch_loop, daemon=True)
+        _dispatch_thread.start()
+
+
+def _start_dispatch_thread() -> None:
+    """Start the callable-sink dispatch daemon thread."""
+    global _dispatch_thread, _dispatch_stop
+    _dispatch_stop.clear()
+    _dispatch_thread = threading.Thread(target=_dispatch_loop, daemon=True)
+    _dispatch_thread.start()
+
+
+def _stop_dispatch_thread() -> None:
+    """Signal the dispatch thread to stop and join it (best effort)."""
+    global _dispatch_thread
+    _dispatch_stop.set()
+    thread = _dispatch_thread
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=2.0)
+    _dispatch_thread = None
+
+
+def _dispatch_loop() -> None:
+    """Drain the dispatch queue and invoke each callable sink.
+
+    Runs on a dedicated daemon thread so callable sinks (which acquire the GIL)
+    never interact with the Rust writer thread. Per-sink level filtering and
+    error isolation happen here.
+    """
+    assert _dispatch_queue is not None  # set when _callable_sinks is non-empty
+    while not _dispatch_stop.is_set():
+        try:
+            line = _dispatch_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
+        sinks = _callable_sinks
+        if not sinks:
+            continue
+        # Extract the level for per-sink filtering (best effort; bad JSON → INFO).
+        try:
+            level_str = json.loads(line).get("level", "INFO")
+        except (json.JSONDecodeError, TypeError):
+            level_str = "INFO"
+        level_num = _LEVEL_NUM.get(str(level_str).lower(), _LEVEL_NUM["info"])
+        for fn, min_level in sinks:
+            if level_num >= min_level:
+                try:
+                    fn(line)
+                except Exception:  # noqa: BLE001 - callable errors never break logging
+                    pass
 
 
 def disable_native() -> None:
     """Turn native mode off and stop the background writer."""
     global _enabled, _writer, _redaction_config, _filter, _exception_config, _metric_processor
+    global _callable_sinks, _dispatch_queue, _console, _colors
+    _stop_dispatch_thread()
     with _state_lock:
         _enabled = False
         if _writer is not None:
@@ -473,6 +634,10 @@ def disable_native() -> None:
         _filter = None
         _exception_config = None
         _metric_processor = None
+        _console = False
+        _colors = False
+        _callable_sinks = None
+        _dispatch_queue = None
 
 
 def render_and_enqueue(
@@ -490,7 +655,34 @@ def render_and_enqueue(
     per-record regex compilation occurs.
     """
     assert _RUST is not None and _writer is not None  # guarded by is_native_enabled
-    if _redaction_config is not None:
+    if _console:
+        if _redaction_config is not None:
+            rendered = _RUST.render_console_with_config(
+                fields,
+                logger,
+                level,
+                _service,
+                message,
+                _colors,
+                _redaction_config,
+                None,
+                _sensitive_keys,
+                stack,
+            )
+        else:
+            rendered = _RUST.render_line_console(
+                fields,
+                logger,
+                level,
+                _service,
+                message,
+                _colors,
+                None,
+                _sensitive_keys,
+                None,
+                stack,
+            )
+    elif _redaction_config is not None:
         rendered = _RUST.render_line_with_config(
             fields,
             logger,
@@ -513,6 +705,12 @@ def render_and_enqueue(
         enqueued = _writer.try_enqueue(line)
     if not enqueued:
         _note_drop()
+    # Dispatch to callable sinks (non-blocking; the dispatch thread handles delivery).
+    if _dispatch_queue is not None:
+        try:
+            _dispatch_queue.put_nowait(line)
+        except queue.Full:
+            _note_drop()
     return enqueued
 
 

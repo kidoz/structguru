@@ -283,7 +283,7 @@ Public API:
 
 | Symbol | Purpose |
 |--------|---------|
-| `enable_native(*, service="app", maxsize=0, target="stdout", overflow="block", level="INFO", otel=False, sensitive_keys=None, sensitive_patterns=None, pattern_replacement="[REDACTED]", sample_rate=1.0, sample_max_level=None, rate_limit_max=None, rate_limit_period=60.0, metric_processor=None, structured_exceptions=False, exception_include_locals=False, exception_max_frames=20, exception_max_local_repr=200)` | Turn native mode on. |
+| `enable_native(*, service="app", maxsize=0, target="stdout", overflow="block", level="INFO", otel=False, sensitive_keys=None, sensitive_patterns=None, pattern_replacement="[REDACTED]", sample_rate=1.0, sample_max_level=None, rate_limit_max=None, rate_limit_period=60.0, metric_processor=None, structured_exceptions=False, exception_include_locals=False, exception_max_frames=20, exception_max_local_repr=200, json=True, colors=None, file_path=None, file_max_bytes=52428800, file_backup_count=5, also_stdout=False, callable_sinks=None)` | Turn native mode on. |
 | `disable_native()` | Turn it off and stop the background writer. |
 | `set_native_level(level)` | Adjust the level threshold at runtime. |
 | `native_metrics()` | Writer counters (enqueued/written/dropped/depth/...) plus filter counters (`sampled`/`rate_limited`) when active. |
@@ -298,7 +298,10 @@ Behavior notes:
 - **Fork/shutdown safe** — the writer is flushed on exit and respawned in forked children (gunicorn/celery prefork).
 - **Structured exceptions** (`structured_exceptions=True`) render the `exception` field as the dict produced by `ExceptionDictProcessor` (type/message/module/frames, optional locals with redaction + repr truncation via the `exception_*` knobs) instead of the formatted traceback string. Extraction stays in Python (frame walking, `repr`); the native renderer serializes the dict.
 - **`stack_info` is supported natively**: the stack is captured in Python and rendered in the same position as `StackInfoRenderer` (`stack` between `service` and `message`). Unlike the standard path, the stack ends at the *user's* calling frame (structguru-internal frames are skipped, the way structlog skips its own).
-- **Scope (v1)**: native mode renders **JSON to stdout/file**. Console output (`json_logs=False`), custom `logger.add()` sinks, and advanced processors (routing/metrics) continue to use the standard structlog path.
+- **Console mode** (`json=False`): renders colored, human-readable lines instead of JSON — structguru's own stable dev format (`<timestamp> [<LEVEL>] <message>  k=v`), with ANSI colors by default on a TTY. Override with `colors=True/False`.
+- **File sinks** (`file_path=...`): write to a rotating file natively. Defaults mirror `RotatingFileHandler` (50 MB, 5 backups); configure via `file_max_bytes`/`file_backup_count`. Set `also_stdout=True` to mirror output to both file and stdout (e.g. container + persistent log).
+- **Callable sinks** (`callable_sinks=[fn, ...]`): invoke `Callable[[str], None]` with each rendered line. They run on a dedicated daemon thread (never the Rust writer, which must not touch the GIL), so a blocking callable cannot deadlock the logging path. Callable errors are swallowed.
+- **Scope**: native mode covers JSON and console rendering, file/stdout/callable sinks, and all processors (redaction/sampling/rate-limit/metrics/exceptions/stack_info). `logger.add()`/`logger.remove()` sink management still uses the standard structlog path until a future unification.
 
 ## Framework integrations
 
