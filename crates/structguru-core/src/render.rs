@@ -27,13 +27,15 @@ pub const DEFAULT_SENSITIVE_KEYS: &[&str] = &[
     "private_key",
 ];
 
-fn is_sensitive(key: &str, keys: &[String]) -> bool {
-    keys.contains(&key.to_ascii_lowercase())
+fn is_sensitive(key: &str, keys: &[impl AsRef<str>]) -> bool {
+    // Case-insensitive compare without allocating a lowercase copy per key.
+    keys.iter()
+        .any(|candidate| candidate.as_ref().eq_ignore_ascii_case(key))
 }
 
 /// Recursively redact sensitive keys in place (key-based, matches the default
 /// `RedactingProcessor`: no value-pattern matching).
-fn redact(value: &mut Value, keys: &[String]) {
+fn redact(value: &mut Value, keys: &[impl AsRef<str>]) {
     match value {
         Value::Map(entries) => {
             for (key, child) in entries.iter_mut() {
@@ -68,15 +70,13 @@ pub fn render_line(
     timestamp: &str,
     sensitive_keys: Option<Vec<String>>,
 ) -> Result<String, serde_json::Error> {
-    let keys: Vec<String> = match sensitive_keys {
-        Some(custom) => custom.into_iter().map(|k| k.to_ascii_lowercase()).collect(),
-        None => DEFAULT_SENSITIVE_KEYS
-            .iter()
-            .map(|k| (*k).to_owned())
-            .collect(),
-    };
+    // Redact against the caller's keys, or the static defaults with zero
+    // per-record allocation (comparison is case-insensitive in `is_sensitive`).
     let mut root = Value::Map(fields);
-    redact(&mut root, &keys);
+    match &sensitive_keys {
+        Some(custom) => redact(&mut root, custom),
+        None => redact(&mut root, DEFAULT_SENSITIVE_KEYS),
+    }
     let Value::Map(mut entries) = root else {
         unreachable!("root is constructed as a map");
     };
