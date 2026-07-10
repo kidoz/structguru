@@ -257,18 +257,32 @@ configure_structlog(service="myapp", json_logs=True)
 listener = configure_queued_logging()  # replaces handler with queue pair
 ```
 
-## Native mode (experimental Rust accelerator)
+## Native mode (Rust accelerator — default since v0.4.0)
 
-structguru ships an optional Rust extension that renders and enqueues the common
-JSON logging path natively, off-thread. It is **opt-in** and accelerates
-`logger` calls (~4× on a realistic record in local benchmarks); when it is not
-enabled — or the compiled extension is unavailable — everything falls back to the
-standard structlog path.
+structguru ships a Rust extension that renders and enqueues the common JSON
+logging path natively, off-thread. **Native mode is the default** — it is
+auto-enabled at import time, accelerating `logger` calls (~4× on a realistic
+record in local benchmarks). The native path no longer depends on `orjson`;
+exotic values (`datetime`, `UUID`, `Enum`, dataclasses) are converted natively
+in Rust.
 
 ```python
 import structguru
 
-structguru.enable_native(service="myapp", level="INFO")  # opt in
+# Native mode is already on. Logger calls route through the Rust renderer.
+structguru.logger.info("order {id} accepted", id=987)
+# → JSON line written to stdout by a background writer thread
+```
+
+To opt back into the standard structlog path (pre-v0.4 behavior), either call
+`configure_structlog(...)` (which sets up the structlog pipeline and disables
+native) or set the `STRUCTGURU_LEGACY=1` environment variable. You can also
+fine-tune the native path explicitly:
+
+```python
+import structguru
+
+structguru.enable_native(service="myapp", level="INFO", file_path="/var/log/app.log")  # reconfigure
 structguru.logger.bind(request_id="abc").info("order {id} accepted", id=987)
 # → JSON line written to stdout by a background writer thread
 ```

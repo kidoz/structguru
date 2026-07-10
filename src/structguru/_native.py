@@ -793,16 +793,21 @@ def native_metrics() -> dict[str, Any] | None:
 
 
 def _maybe_enable_from_env() -> None:
-    """Auto-enable native mode when ``STRUCTGURU_NATIVE`` is set (12-factor switch).
+    """Auto-enable native mode at import time (the default since v0.4.0).
+
+    Set ``STRUCTGURU_LEGACY=1`` to opt out and use the standard structlog path
+    (the pre-0.4 default). ``STRUCTGURU_NATIVE`` is now a no-op (deprecated) —
+    native is on by default.
 
     Honors ``LOG_LEVEL``, ``STRUCTGURU_SERVICE``, ``STRUCTGURU_NATIVE_TARGET``,
     ``STRUCTGURU_NATIVE_SAMPLE_RATE`` (float 0.0–1.0), and
     ``STRUCTGURU_NATIVE_RATE_LIMIT`` (``"MAX/PERIOD"`` seconds, e.g. ``"100/60"``).
     Never breaks import: a missing extension or bad config is silently ignored.
     """
-    if os.environ.get("STRUCTGURU_NATIVE", "").strip().lower() not in ("1", "true", "yes", "on"):
-        return
     if _RUST is None:
+        return
+    # STRUCTGURU_LEGACY=1 opts out of native mode (old standard-path default).
+    if os.environ.get("STRUCTGURU_LEGACY", "").strip().lower() in ("1", "true", "yes", "on"):
         return
     try:
         kwargs: dict[str, Any] = {

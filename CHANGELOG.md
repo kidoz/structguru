@@ -15,6 +15,11 @@ All notable changes to this project are documented here. The format is based on
   longer imports `orjson` at all. Unsupported types (`bytes`, `set`, `Decimal`)
   raise `TypeError`, matching the orjson rejection contract. The `Value::Raw`
   reverse path uses `json.loads` (stdlib) instead of `orjson.loads`.
+- **Native mode is now the default.** The Rust renderer is auto-enabled at import
+  time (no `enable_native()` call needed). `configure_structlog()` opts back into
+  the standard structlog path (disabling native, so output lands on the configured
+  stream). Set `STRUCTGURU_LEGACY=1` to opt out of auto-enable entirely. The
+  `STRUCTGURU_NATIVE` env var is now a no-op (deprecated).
 - **Native Sentry integration.** `enable_native(sentry_processor=...)` invokes a
   structlog-style processor (e.g. `SentryProcessor`) for every kept record on
   the caller's thread, mirroring the `metric_processor` hook. The raw `exc_info`

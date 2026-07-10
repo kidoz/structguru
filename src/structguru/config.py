@@ -21,6 +21,7 @@ import orjson
 import structlog
 from structlog.contextvars import merge_contextvars
 
+from structguru._native import disable_native as _disable_native
 from structguru.processors import (
     add_service,
     add_syslog_severity,
@@ -196,6 +197,13 @@ def configure_structlog(
     """
     if stream is None:
         stream = sys.stdout
+
+    # configure_structlog explicitly sets up the standard structlog path.
+    # Disable native mode so logger calls route through this pipeline (not the
+    # native Rust writer). Users wanting native mode can call enable_native()
+    # after configure_structlog(). This preserves the observable contract that
+    # logger output lands on the configured stream.
+    _disable_native()
 
     _install_exc_info_record_factory()
 
