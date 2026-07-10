@@ -181,6 +181,11 @@ _service = "app"
 _maxsize = 0
 _target = "stdout"
 _overflow = "block"
+# File-sink config (stored for fork respawn — _after_in_child reconstructs the writer).
+_file_path: str | None = None
+_file_max_bytes = 50 * 1024 * 1024
+_file_backup_count = 5
+_also_stdout = False
 _level_threshold = _LEVEL_NUM["info"]
 _otel = False
 _sensitive_keys: list[str] | None = None
@@ -232,6 +237,40 @@ def otel_enabled() -> bool:
 def sensitive_keys() -> list[str] | None:
     """Custom redaction keys for native mode, or None for the defaults."""
     return _sensitive_keys
+
+
+def add_callable_sink(fn: Callable[[str], None], min_level: int = 0) -> bool:
+    """Register a callable sink at runtime. Returns True if registered.
+
+    The sink is invoked with each rendered line on the dispatch thread.
+    If the dispatch infrastructure is not running, it is started.
+    """
+    global _callable_sinks, _dispatch_queue, _dispatch_thread
+    if _RUST is None or not _enabled:
+        return False
+    with _state_lock:
+        if _callable_sinks is None:
+            _callable_sinks = []
+        _callable_sinks.append((fn, min_level))
+        if _dispatch_queue is None:
+            _dispatch_queue = queue.Queue()
+    # Start the dispatch thread if not running.
+    if _dispatch_thread is None or not _dispatch_thread.is_alive():
+        _dispatch_stop.clear()
+        _dispatch_thread = threading.Thread(target=_dispatch_loop, daemon=True)
+        _dispatch_thread.start()
+    return True
+
+
+def remove_callable_sink(fn: Callable[[str], None]) -> bool:
+    """Remove a callable sink. Returns True if found and removed."""
+    global _callable_sinks
+    with _state_lock:
+        if not _callable_sinks:
+            return False
+        before = len(_callable_sinks)
+        _callable_sinks = [(f, lvl) for f, lvl in _callable_sinks if f is not fn]
+        return len(_callable_sinks) < before
 
 
 def sensitive_patterns() -> list[str] | None:
@@ -439,6 +478,7 @@ def configure(
     forked children (gunicorn/celery prefork) instead of deadlocking.
     """
     global _enabled, _writer, _service, _maxsize, _target, _overflow
+    global _file_path, _file_max_bytes, _file_backup_count, _also_stdout
     global _level_threshold, _otel, _sensitive_keys, _sensitive_patterns
     global _redaction_config, _filter, _exception_config, _metric_processor, _sentry_processor
     global _console, _colors, _callable_sinks, _dispatch_queue, _dispatch_thread, _stream_sink
@@ -535,6 +575,10 @@ def configure(
         _target = target
         _service = service
         _overflow = overflow
+        _file_path = file_path
+        _file_max_bytes = file_max_bytes
+        _file_backup_count = file_backup_count
+        _also_stdout = also_stdout
         _level_threshold = _LEVEL_NUM.get(level.lower(), _LEVEL_NUM["info"])
         _otel = otel
         _sensitive_keys = list(sensitive_keys) if sensitive_keys is not None else None
@@ -603,7 +647,15 @@ def _after_in_child() -> None:
     old = _writer
     if old is not None:
         old.abandon()  # never join the parent's (now absent) worker thread
-    _writer = _RUST._NativeStringWriter(_maxsize, target=_target)
+    # Replay the full sink config so file paths and stdout mirroring survive fork.
+    _writer = _RUST._NativeStringWriter(
+        _maxsize,
+        target=_target,
+        file_path=_file_path,
+        file_max_bytes=_file_max_bytes,
+        file_backup_count=_file_backup_count,
+        also_stdout=_also_stdout,
+    )
     # The dispatch thread also died in the fork; respawn it if callable sinks are active.
     _dispatch_stop.clear()
     _dispatch_thread = None

@@ -184,7 +184,9 @@ class Logger:
     _opt_exc_info: Any = None
     _opt_stack_info: bool = False
 
-    _handlers: dict[HandlerId, logging.Handler] = field(default_factory=dict)
+    _handlers: dict[HandlerId, logging.Handler | Callable[[str], None]] = field(
+        default_factory=dict
+    )
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     # -- context helpers ----------------------------------------------------
@@ -324,22 +326,42 @@ class Logger:
     # -- sink (handler) management ------------------------------------------
 
     def add(self, sink: Sink, *, level: str | None = None) -> HandlerId:
-        """Add a new logging handler (*sink*).
+        """Add a sink that receives rendered log lines.
 
         Parameters
         ----------
         sink:
-            A file path, a :class:`logging.Handler`, or a callable accepting
-            a single string.
+            A callable accepting a single string (the rendered log line),
+            a file path (``str``/``Path``), a stream-like object with ``.write``,
+            or a :class:`logging.Handler` (for third-party stdlib interop).
         level:
-            Minimum level for this handler.  Inherits from the root logger
-            when *None*.
+            Minimum level for this sink (callable sinks only). Defaults to all levels.
 
         Returns
         -------
         HandlerId
             An identifier that can be passed to :meth:`remove`.
+
+        Note
+        ----
+        Callable sinks are delivered via the native dispatch thread (off-thread).
+        File/stream sinks registered here create stdlib handlers — they receive
+        third-party ``logging`` records, but native-mode logs are delivered to
+        callable sinks only. For native file output use
+        ``enable_native(file_path=...)``.
         """
+        # Callable sinks route through the native dispatch thread (deliver native logs).
+        if callable(sink) and not isinstance(sink, logging.Handler):
+            min_level = _to_logging_level(level) if level else 0
+            _native.add_callable_sink(sink, min_level=min_level)
+            with _id_counter_lock:
+                handler_id = next(_id_counter)
+            with self._lock:
+                self._handlers[handler_id] = sink  # store the callable for removal
+            return handler_id
+
+        # File paths, streams, and logging.Handler instances create stdlib handlers
+        # (for third-party records that flow through logging).
         handler = _make_handler(sink)
         log_level = _to_logging_level(level) if level else logging.getLogger().level
         handler.setLevel(log_level)
@@ -355,24 +377,31 @@ class Logger:
         return handler_id
 
     def remove(self, handler_id: HandlerId | None = None) -> None:
-        """Remove a handler by its *handler_id*.
+        """Remove a sink by its *handler_id*.
 
-        If *handler_id* is ``None``, all handlers added via this logger
+        If *handler_id* is ``None``, all sinks added via this logger
         instance are removed.
         """
         root = logging.getLogger()
         with self._lock:
             if handler_id is None:
                 for h in self._handlers.values():
-                    root.removeHandler(h)
-                    h.close()
+                    if isinstance(h, logging.Handler):
+                        root.removeHandler(h)
+                        h.close()
+                    else:
+                        # Callable sink — remove from native dispatch.
+                        _native.remove_callable_sink(h)
                 self._handlers.clear()
                 return
 
-            handler_to_remove = self._handlers.pop(handler_id, None)
-            if handler_to_remove:
-                root.removeHandler(handler_to_remove)
-                handler_to_remove.close()
+            sink_to_remove = self._handlers.pop(handler_id, None)
+            if sink_to_remove is not None:
+                if isinstance(sink_to_remove, logging.Handler):
+                    root.removeHandler(sink_to_remove)
+                    sink_to_remove.close()
+                else:
+                    _native.remove_callable_sink(sink_to_remove)
 
 
 logger = Logger()
