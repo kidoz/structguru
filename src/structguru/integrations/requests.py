@@ -16,13 +16,14 @@ from structguru.core import Logger
 _logger = Logger(name="structguru.requests")
 
 
-class StructguruRequestsSession(requests.Session):  # type: ignore[misc]
+class StructguruRequestsSession(requests.Session):
     """A wrapper around `requests.Session` that logs requests and responses."""
 
     def request(
         self, method: str | bytes, url: str | bytes, *args: Any, **kwargs: Any
     ) -> requests.Response:
         """Send a request and log the result."""
+        method_str = method if isinstance(method, str) else method.decode()
         start_time = time.perf_counter()
 
         # Extract an x-request-id from the per-call headers, falling back to
@@ -38,7 +39,7 @@ class StructguruRequestsSession(requests.Session):  # type: ignore[misc]
         failed = False
         status_code = None
         try:
-            response = super().request(method, url, *args, **kwargs)
+            response = super().request(method_str, url, *args, **kwargs)
             status_code = response.status_code
             return response
         except Exception:
@@ -48,9 +49,7 @@ class StructguruRequestsSession(requests.Session):  # type: ignore[misc]
             duration_ms = (time.perf_counter() - start_time) * 1000
 
             extra: dict[str, Any] = {
-                "http_method": method.upper()
-                if isinstance(method, str)
-                else method.decode().upper(),
+                "http_method": method_str.upper(),
                 "http_url": str(url),
                 "duration_ms": round(duration_ms, 2),
             }
