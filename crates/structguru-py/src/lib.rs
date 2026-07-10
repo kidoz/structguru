@@ -512,7 +512,12 @@ impl NativeFilter {
                 "rate_limit_period must be > 0, got {rate_limit_period}"
             )));
         }
-        let period = Duration::from_secs_f64(rate_limit_period);
+        // `from_secs_f64` panics on values too large for `Duration` (e.g. 1e300,
+        // reachable via configure() or STRUCTGURU_NATIVE_RATE_LIMIT at import).
+        // A panic here crosses PyO3 as an uncatchable PanicException; fail with a
+        // clean ValueError instead.
+        let period = Duration::try_from_secs_f64(rate_limit_period)
+            .map_err(|err| PyValueError::new_err(format!("rate_limit_period too large: {err}")))?;
         Ok(Self {
             pipeline: Pipeline::new(sample_rate, sample_max_level, rate_limit_max, period),
         })
@@ -640,7 +645,11 @@ fn convert_exotic_leaf(
     // `value` attribute but aren't enums.
     if obj.hasattr("value")? && obj.get_type().hasattr("__members__")? {
         let value = obj.getattr("value")?;
-        return convert_py_value_inner(&value, depth, containers);
+        // Recurse with depth + 1 like every other container path: an enum whose
+        // `.value` cycles back (e.g. a member whose `_value_` is itself) would
+        // otherwise recurse forever at constant depth, bypass MAX_VALUE_DEPTH,
+        // and overflow the native stack into an uncatchable process abort.
+        return convert_py_value_inner(&value, depth + 1, containers);
     }
 
     // datetime.datetime / datetime.date: have an .isoformat() method.

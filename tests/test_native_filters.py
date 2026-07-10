@@ -262,6 +262,20 @@ def test_invalid_pattern_raises_even_with_backtracking_opt_in() -> None:
     assert not _native.is_native_enabled()
 
 
+def test_huge_rate_limit_period_raises_not_crashes() -> None:
+    # A finite-but-enormous period overflows Rust's Duration; it must surface as
+    # a ValueError, not an uncatchable panic at configure()/import time.
+    with pytest.raises(ValueError, match="rate_limit_period"):
+        _native.configure(
+            service="svc",
+            target="memory",
+            level="DEBUG",
+            rate_limit_max=5,
+            rate_limit_period=1e300,
+        )
+    assert not _native.is_native_enabled()
+
+
 # -- sampling ---------------------------------------------------------------
 
 

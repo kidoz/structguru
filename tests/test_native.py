@@ -72,6 +72,19 @@ def test_native_rejects_unsupported_objects() -> None:
             rust._convert_value_debug(unsupported)
 
 
+def test_native_cyclic_enum_value_raises_not_aborts() -> None:
+    # An enum whose .value cycles back to itself must hit the recursion-depth
+    # guard and raise cleanly, not recurse forever into a process abort.
+    import enum
+
+    class Cyclic(enum.Enum):
+        A = 1
+
+    Cyclic.A._value_ = Cyclic.A  # .value now returns the member itself
+    with pytest.raises((RecursionError, ValueError)):
+        rust._convert_value_debug(Cyclic.A)
+
+
 def test_native_converts_datetime_without_orjson() -> None:
     import datetime as dt
 

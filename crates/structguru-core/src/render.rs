@@ -304,6 +304,29 @@ const ANSI_BOLD_RED: &str = "\x1b[1;31m";
 #[allow(dead_code)]
 const ANSI_RESET: &str = "\x1b[0m";
 
+/// Append `s` with control characters escaped.
+///
+/// The JSON renderer gets this from serde_json; the human-readable console path
+/// does not, so without it a request-controlled field value or message could
+/// embed a newline (forging a separate log line) or an ANSI escape sequence
+/// (manipulating the operator's terminal). Escaping neutralizes both while
+/// keeping ordinary text readable.
+#[allow(dead_code)]
+fn push_escaped(buf: &mut String, s: &str) {
+    use std::fmt::Write;
+    for ch in s.chars() {
+        match ch {
+            '\n' => buf.push_str("\\n"),
+            '\r' => buf.push_str("\\r"),
+            '\t' => buf.push_str("\\t"),
+            c if c.is_control() => {
+                let _ = write!(buf, "\\x{:02x}", c as u32);
+            }
+            c => buf.push(c),
+        }
+    }
+}
+
 /// Format a [`Value`] for the console renderer (human-readable, not JSON).
 #[allow(dead_code)]
 fn display_value(value: &Value, buf: &mut String) {
@@ -314,7 +337,7 @@ fn display_value(value: &Value, buf: &mut String) {
         Value::Float(f) => buf.push_str(&f.to_string()),
         Value::String(s) => {
             buf.push('"');
-            buf.push_str(s);
+            push_escaped(buf, s);
             buf.push('"');
         }
         Value::List(items) => {
@@ -333,7 +356,7 @@ fn display_value(value: &Value, buf: &mut String) {
                 if i > 0 {
                     buf.push_str(", ");
                 }
-                buf.push_str(k);
+                push_escaped(buf, k);
                 buf.push(':');
                 display_value(v, buf);
             }
@@ -399,7 +422,7 @@ pub fn render_line_console(
         out.push_str(ANSI_RESET);
     }
     out.push(' ');
-    out.push_str(&redacted_message);
+    push_escaped(&mut out, &redacted_message);
 
     // Append user fields as k=v pairs (skip standard keys).
     let standard: &[&str] = &[
@@ -416,7 +439,7 @@ pub fn render_line_console(
             continue;
         }
         out.push_str("  ");
-        out.push_str(key);
+        push_escaped(&mut out, key);
         out.push('=');
         display_value(value, &mut out);
     }
@@ -932,6 +955,35 @@ mod tests {
         );
         assert!(line.contains("token [REDACTED]"));
         assert!(!line.contains("secret=abc"));
+    }
+
+    #[test]
+    fn console_escapes_control_chars_in_message_and_values() {
+        // A newline in the message would forge a second log line; an ANSI escape
+        // in a field value would drive the operator's terminal. Both must be
+        // neutralized in console output.
+        let fields = vec![(
+            "note".to_owned(),
+            Value::String("val\x1b[2Jwiped".to_owned()),
+        )];
+        let line = render_line_console(
+            fields,
+            "l",
+            "info",
+            "svc",
+            "line1\nlevel=CRITICAL forged",
+            false,
+            "TS",
+            None,
+            None,
+            None,
+            None,
+        );
+        // No raw newline or ESC survives into the rendered line.
+        assert!(!line.contains('\n'));
+        assert!(!line.contains('\x1b'));
+        assert!(line.contains("line1\\nlevel=CRITICAL forged"));
+        assert!(line.contains("note=\"val\\x1b[2Jwiped\""));
     }
 
     #[test]

@@ -210,29 +210,61 @@ impl RotatingFileSink {
             drop(file);
         }
 
-        if self.backup_count > 0 {
-            // Delete the oldest backup if it exists.
-            let oldest = backup_path(&self.path, self.backup_count);
-            if oldest.exists() {
-                fs::remove_file(&oldest).map_err(|err| SinkError::new(err.to_string()))?;
+        // Perform the rename shuffle, but ALWAYS reopen an active handle
+        // afterwards — even if a step failed partway (disk full, permission
+        // change, a backup held open on Windows). Leaving `self.file` as `None`
+        // would make the next write/flush unusable; historically that path
+        // panicked and killed the worker thread, hanging every logging caller.
+        let shuffle = self.shuffle_backups();
+        match open_append(&self.path) {
+            Ok(file) => {
+                // Track the reopened file's real length: 0 after a successful
+                // rotation (fresh active file), or the surviving size if the
+                // active rename failed, so the threshold check stays meaningful.
+                self.bytes_written = file
+                    .get_ref()
+                    .metadata()
+                    .map(|meta| meta.len() as usize)
+                    .unwrap_or(0);
+                self.file = Some(file);
+                shuffle
             }
-            // Shift .i → .(i+1) for i in (backup_count-1 .. 1).
-            for i in (1..self.backup_count).rev() {
-                let from = backup_path(&self.path, i);
-                let to = backup_path(&self.path, i + 1);
-                if from.exists() {
-                    fs::rename(&from, &to).map_err(|err| SinkError::new(err.to_string()))?;
-                }
-            }
-            // Active → .1.
-            let first = backup_path(&self.path, 1);
-            fs::rename(&self.path, &first).map_err(|err| SinkError::new(err.to_string()))?;
+            // Reopen failed too: surface the original shuffle error if any,
+            // otherwise the reopen error. `self.file` stays `None`; write/flush
+            // recover by retrying the open rather than panicking.
+            Err(reopen) => Err(shuffle.err().unwrap_or(reopen)),
         }
+    }
 
-        // Open a fresh active file.
-        self.file = Some(open_append(&self.path)?);
-        self.bytes_written = 0;
-        Ok(())
+    /// Delete the oldest backup and shift `.i → .(i+1)`, then `active → .1`.
+    fn shuffle_backups(&self) -> Result<(), SinkError> {
+        if self.backup_count == 0 {
+            return Ok(());
+        }
+        let oldest = backup_path(&self.path, self.backup_count);
+        if oldest.exists() {
+            fs::remove_file(&oldest).map_err(|err| SinkError::new(err.to_string()))?;
+        }
+        for i in (1..self.backup_count).rev() {
+            let from = backup_path(&self.path, i);
+            let to = backup_path(&self.path, i + 1);
+            if from.exists() {
+                fs::rename(&from, &to).map_err(|err| SinkError::new(err.to_string()))?;
+            }
+        }
+        let first = backup_path(&self.path, 1);
+        fs::rename(&self.path, &first).map_err(|err| SinkError::new(err.to_string()))
+    }
+
+    /// Return the active file, reopening it if a prior rotation left it closed.
+    /// Never panics: a reopen failure is reported as a countable sink error.
+    fn active_file(&mut self) -> Result<&mut BufWriter<File>, SinkError> {
+        if self.file.is_none() {
+            self.file = Some(open_append(&self.path)?);
+        }
+        self.file
+            .as_mut()
+            .ok_or_else(|| SinkError::new("rotating file sink has no active file"))
     }
 }
 
@@ -248,9 +280,7 @@ impl StringSink for RotatingFileSink {
         {
             self.rotate()?;
         }
-        self.file
-            .as_mut()
-            .expect("rotating file sink always owns an active file")
+        self.active_file()?
             .write_all(bytes)
             .map_err(|err| SinkError::new(err.to_string()))?;
         self.bytes_written += bytes.len();
@@ -258,18 +288,28 @@ impl StringSink for RotatingFileSink {
     }
 
     fn flush(&mut self) -> Result<(), SinkError> {
-        self.file
-            .as_mut()
-            .expect("rotating file sink always owns an active file")
-            .flush()
-            .map_err(|err| SinkError::new(err.to_string()))
+        // No active handle (e.g. a prior rotation could not reopen) → nothing
+        // buffered to flush; the next write retries the open. Never panic.
+        match self.file.as_mut() {
+            Some(file) => file.flush().map_err(|err| SinkError::new(err.to_string())),
+            None => Ok(()),
+        }
     }
 }
 
 fn open_append(path: &Path) -> Result<BufWriter<File>, SinkError> {
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    // Log files routinely carry sensitive data (that is why redaction exists),
+    // so create them owner-only (0600) rather than inheriting the umask default
+    // (commonly world-readable 0644). Only applies to files this call creates;
+    // an existing file keeps its permissions.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
         .open(path)
         .map_err(|err| SinkError::new(err.to_string()))?;
     Ok(BufWriter::new(file))
@@ -963,6 +1003,71 @@ mod tests {
             !active.contains("0123456789"),
             "rotated content moved to .1"
         );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn rotating_file_recovers_when_active_handle_is_missing() {
+        // Reproduces the post-failed-rotation state directly: `rotate()` took
+        // the handle and could not reopen it. write()/flush() previously
+        // panicked here (`.expect()`), killing the worker thread and hanging
+        // every logging caller; they must now recover instead.
+        let path = temp_log_path("rotate-missing-handle");
+        let mut sink = RotatingFileSink::new(&path, 0, 0).unwrap();
+        sink.write("before".to_owned()).unwrap();
+        sink.file = None; // emulate a rotation that could not reopen the file
+        sink.flush().unwrap(); // must not panic
+        sink.write("after".to_owned()).unwrap(); // must reopen and succeed
+        sink.flush().unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("before"));
+        assert!(contents.contains("after"));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn rotating_file_stays_usable_after_failed_rotation() {
+        // A rotation whose backup shuffle fails (here: the .1 slot is occupied
+        // by a directory, so remove_file/rename errors) must surface a sink
+        // error yet leave the sink writable — not panic, not lose its handle.
+        let path = temp_log_path("rotate-failed");
+        let mut sink = RotatingFileSink::new(&path, 10, 1).unwrap();
+        sink.write("0123456789".to_owned()).unwrap(); // 10 bytes on disk
+        sink.flush().unwrap();
+
+        let first = backup_path(&path, 1);
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::write(first.join("blocker"), b"x").unwrap();
+
+        // Crosses the threshold → rotate() runs and its shuffle fails.
+        let rotate_failed = sink.write("0123456789".to_owned());
+        assert!(
+            rotate_failed.is_err(),
+            "failed rotation surfaces as a sink error, not a panic"
+        );
+
+        // Clear the blocker; the sink recovers on the next write.
+        std::fs::remove_dir_all(&first).unwrap();
+        let recovered = sink.write("tail".to_owned());
+        assert!(
+            recovered.is_ok(),
+            "sink remains usable after a failed rotation"
+        );
+        sink.flush().unwrap();
+        cleanup(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rotating_file_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = temp_log_path("rotate-perms");
+        let mut sink = RotatingFileSink::new(&path, 0, 0).unwrap();
+        sink.write("secret".to_owned()).unwrap();
+        sink.flush().unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "log files are created owner-only");
         cleanup(&path);
     }
 
