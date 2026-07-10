@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Native metric hooks.** `enable_native(metric_processor=...)` invokes a
+  structlog-style processor (e.g. `MetricProcessor`) for every kept record on
+  the caller's thread before rendering, with the pre-`EventRenamer` event-dict
+  shape (`{"event": message, **fields}`). Records dropped by level filtering,
+  sampling, or rate limiting never reach it; hook errors never break logging.
 - **Native level-gated sampling.** `enable_native(sample_max_level=...)`
   restricts sampling to records at or below the given level; more severe
   records always pass — the native analog of wrapping `SamplingProcessor` in

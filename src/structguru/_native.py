@@ -146,6 +146,7 @@ _sensitive_patterns: list[str] | None = None
 _redaction_config: Any = None  # compiled RedactionConfig, None when no patterns configured
 _filter: Any = None  # NativeFilter, None when no sampling/rate-limit configured
 _exception_config: dict[str, Any] | None = None  # structured-exception knobs, None = string
+_metric_processor: Any = None  # structlog-style processor invoked per kept record
 _hooks_registered = False
 _drop_count = 0
 
@@ -190,6 +191,22 @@ def should_render(method: str, message: str) -> bool:
     if _filter is None:
         return True
     return bool(_filter.allow(message, method))
+
+
+def notify_metrics(method: str, message: str, fields: dict[str, Any]) -> None:
+    """Invoke the configured metric processor for a kept record.
+
+    Called on the caller's thread (never the writer thread) with a
+    pre-``EventRenamer``-shaped event dict, matching what ``MetricProcessor``
+    sees on the standard path. No-op when no processor is configured; hook
+    errors are swallowed — metrics must never break logging.
+    """
+    if _metric_processor is None:
+        return
+    try:
+        _metric_processor(None, method, {"event": message, **fields})
+    except Exception:  # noqa: BLE001 - hooks must never break logging
+        pass
 
 
 def build_exception_field(exc_info: Any) -> str | dict[str, Any] | None:
@@ -260,6 +277,7 @@ def enable_native(
     sample_max_level: str | None = None,
     rate_limit_max: int | None = None,
     rate_limit_period: float = 60.0,
+    metric_processor: Any = None,
     structured_exceptions: bool = False,
     exception_include_locals: bool = False,
     exception_max_frames: int = 20,
@@ -289,6 +307,12 @@ def enable_native(
     always pass) — the native analog of wrapping ``SamplingProcessor`` in
     ``ConditionalProcessor(max_level=...)``.
 
+    ``metric_processor`` is a structlog-style processor (e.g.
+    :class:`structguru.metrics.MetricProcessor`) invoked for every *kept* record
+    with ``(None, method, {"event": message, **fields})`` before rendering.
+    Records dropped by level filtering, sampling, or rate limiting never reach
+    it. Exceptions raised by the processor are swallowed.
+
     ``structured_exceptions=True`` renders the ``exception`` field as the
     structured dict produced by
     :class:`structguru.exceptions.ExceptionDictProcessor` (with the
@@ -302,7 +326,7 @@ def enable_native(
     """
     global _enabled, _writer, _service, _maxsize, _target, _overflow
     global _level_threshold, _otel, _sensitive_keys, _sensitive_patterns
-    global _redaction_config, _filter, _exception_config
+    global _redaction_config, _filter, _exception_config, _metric_processor
     if _RUST is None:
         msg = "native extension is not available"
         raise RuntimeError(msg)
@@ -321,6 +345,9 @@ def enable_native(
     if sample_max_level is not None and sample_max_level.lower() not in _LEVEL_NUM:
         msg = f"sample_max_level must be a known level name, got {sample_max_level!r}"
         raise ValueError(msg)
+    if metric_processor is not None and not callable(metric_processor):
+        msg = f"metric_processor must be callable, got {type(metric_processor)!r}"
+        raise TypeError(msg)
 
     # Validate regex patterns against Rust's engine before enabling. If any fail
     # (backreferences, look-around, ...), warn once and refuse to enable native
@@ -381,6 +408,7 @@ def enable_native(
         _redaction_config = new_config
         _filter = new_filter
         _exception_config = new_exception_config
+        _metric_processor = metric_processor
         _writer = _RUST._NativeStringWriter(maxsize, target=target)
         _enabled = True
     _register_lifecycle_hooks()
@@ -427,7 +455,7 @@ def _after_in_child() -> None:
 
 def disable_native() -> None:
     """Turn native mode off and stop the background writer."""
-    global _enabled, _writer, _redaction_config, _filter, _exception_config
+    global _enabled, _writer, _redaction_config, _filter, _exception_config, _metric_processor
     with _state_lock:
         _enabled = False
         if _writer is not None:
@@ -436,6 +464,7 @@ def disable_native() -> None:
         _redaction_config = None
         _filter = None
         _exception_config = None
+        _metric_processor = None
 
 
 def render_and_enqueue(

@@ -323,3 +323,71 @@ def test_invalid_sample_max_level_raises() -> None:
     with pytest.raises(ValueError, match="sample_max_level"):
         _native.enable_native(target="memory", sample_rate=0.5, sample_max_level="bogus")
 
+
+# -- metric hooks --------------------------------------------------------------
+
+
+def test_metric_processor_invoked_per_kept_record() -> None:
+    from structguru.metrics import MetricProcessor
+
+    seen: list[dict[str, Any]] = []
+    values: list[float] = []
+    metrics = MetricProcessor()
+    metrics.counter("user.login", seen.append)
+    metrics.histogram("db.query", "duration_ms", lambda v, _ed: values.append(v))
+
+    _native.enable_native(service="svc", target="memory", metric_processor=metrics)
+    try:
+        structguru.logger.info("user.login ok", user="alice")
+        structguru.logger.info("db.query done", duration_ms=12.5)
+        structguru.logger.info("unrelated")
+    finally:
+        _native.disable_native()
+
+    assert len(seen) == 1
+    assert seen[0]["event"] == "user.login ok"
+    assert seen[0]["user"] == "alice"
+    assert values == [12.5]
+
+
+def test_metric_processor_not_invoked_for_dropped_records() -> None:
+    calls: list[str] = []
+
+    def hook(_logger: Any, method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+        calls.append(method)
+        return event_dict
+
+    _native.enable_native(
+        service="svc",
+        target="memory",
+        level="INFO",
+        sample_rate=0.0,
+        sample_max_level="INFO",
+        metric_processor=hook,
+    )
+    try:
+        structguru.logger.debug("below level threshold")
+        structguru.logger.info("sampled out")
+        structguru.logger.warning("kept")
+    finally:
+        _native.disable_native()
+
+    assert calls == ["warning"]
+
+
+def test_metric_processor_errors_are_swallowed() -> None:
+    def hook(_logger: Any, _method: str, _event_dict: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError("metrics backend down")
+
+    _native.enable_native(service="svc", target="memory", metric_processor=hook)
+    try:
+        structguru.logger.info("still logged")
+        record = _drain_last()
+        assert record["message"] == "still logged"
+    finally:
+        _native.disable_native()
+
+
+def test_non_callable_metric_processor_raises() -> None:
+    with pytest.raises(TypeError, match="metric_processor"):
+        _native.enable_native(target="memory", metric_processor="not-a-callable")
