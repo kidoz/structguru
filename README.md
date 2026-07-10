@@ -283,7 +283,7 @@ Public API:
 
 | Symbol | Purpose |
 |--------|---------|
-| `enable_native(*, service="app", maxsize=0, target="stdout", overflow="block", level="INFO", otel=False, sensitive_keys=None, sensitive_patterns=None, sample_rate=1.0, rate_limit_max=None, rate_limit_period=60.0, structured_exceptions=False, exception_include_locals=False, exception_max_frames=20, exception_max_local_repr=200)` | Turn native mode on. |
+| `enable_native(*, service="app", maxsize=0, target="stdout", overflow="block", level="INFO", otel=False, sensitive_keys=None, sensitive_patterns=None, sample_rate=1.0, sample_max_level=None, rate_limit_max=None, rate_limit_period=60.0, structured_exceptions=False, exception_include_locals=False, exception_max_frames=20, exception_max_local_repr=200)` | Turn native mode on. |
 | `disable_native()` | Turn it off and stop the background writer. |
 | `set_native_level(level)` | Adjust the level threshold at runtime. |
 | `native_metrics()` | Writer counters (enqueued/written/dropped/depth/...) plus filter counters (`sampled`/`rate_limited`) when active. |
@@ -293,7 +293,7 @@ Behavior notes:
 
 - **Overflow**: `maxsize=0` is unbounded; a positive `maxsize` uses `overflow="block"` (backpressure, no loss — the default) or `overflow="drop"` (drop-newest + counted, rate-limited warning).
 - **Redaction, level filtering, exceptions, and OpenTelemetry** injection are supported natively; `sensitive_keys` overrides the default redaction keys. `sensitive_patterns` adds regex value-pattern redaction (applied to every string value); Rust's `regex` engine does not support backreferences or look-around, so an unsupported pattern emits a `UserWarning` and falls back to the standard path.
-- **Sampling & rate limiting** (`sample_rate`, `rate_limit_max`, `rate_limit_period`) are applied as native pre-render filters — dropped records cost zero rendering. `sampled` and `rate_limited` counters are distinct from the transport `dropped` counter.
+- **Sampling & rate limiting** (`sample_rate`, `rate_limit_max`, `rate_limit_period`) are applied as native pre-render filters — dropped records cost zero rendering. `sampled` and `rate_limited` counters are distinct from the transport `dropped` counter. `sample_max_level` restricts sampling to records at or below that level (more severe records always pass) — the native analog of `ConditionalProcessor(SamplingProcessor(...), max_level=...)`.
 - **Fork/shutdown safe** — the writer is flushed on exit and respawned in forked children (gunicorn/celery prefork).
 - **Structured exceptions** (`structured_exceptions=True`) render the `exception` field as the dict produced by `ExceptionDictProcessor` (type/message/module/frames, optional locals with redaction + repr truncation via the `exception_*` knobs) instead of the formatted traceback string. Extraction stays in Python (frame walking, `repr`); the native renderer serializes the dict.
 - **`stack_info` is supported natively**: the stack is captured in Python and rendered in the same position as `StackInfoRenderer` (`stack` between `service` and `message`). Unlike the standard path, the stack ends at the *user's* calling frame (structguru-internal frames are skipped, the way structlog skips its own).

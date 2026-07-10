@@ -289,3 +289,37 @@ def test_env_var_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
         _native.disable_native()
         monkeypatch.delenv("STRUCTGURU_NATIVE", raising=False)
         monkeypatch.delenv("STRUCTGURU_NATIVE_RATE_LIMIT", raising=False)
+
+
+# -- level-gated sampling (ConditionalProcessor analog) -----------------------
+
+
+def test_sample_max_level_gates_sampling() -> None:
+    _native.enable_native(
+        service="svc",
+        target="memory",
+        level="DEBUG",
+        sample_rate=0.0,
+        sample_max_level="INFO",
+    )
+    try:
+        structguru.logger.debug("sampled out")
+        structguru.logger.info("sampled out too")
+        structguru.logger.warning("always kept")
+        structguru.logger.error("always kept too")
+        _native.flush_native()
+        lines = _native.drain_messages()
+        assert len(lines) == 2
+        assert json.loads(lines[0])["level"] == "WARN"
+        assert json.loads(lines[1])["level"] == "ERROR"
+        metrics = _native.native_metrics()
+        assert metrics is not None
+        assert metrics["sampled"] == 2
+    finally:
+        _native.disable_native()
+
+
+def test_invalid_sample_max_level_raises() -> None:
+    with pytest.raises(ValueError, match="sample_max_level"):
+        _native.enable_native(target="memory", sample_rate=0.5, sample_max_level="bogus")
+

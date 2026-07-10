@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Native level-gated sampling.** `enable_native(sample_max_level=...)`
+  restricts sampling to records at or below the given level; more severe
+  records always pass — the native analog of wrapping `SamplingProcessor` in
+  `ConditionalProcessor(max_level=...)`.
 - **Native structured exceptions.** `enable_native(structured_exceptions=True)`
   renders the `exception` field as the structured dict produced by
   `ExceptionDictProcessor` (type/message/module/frames, chained cause, optional

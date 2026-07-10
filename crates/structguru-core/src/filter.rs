@@ -24,22 +24,47 @@ pub trait RecordFilter: Send + Sync {
     fn allow(&self, key: &str, level: &str) -> Decision;
 }
 
+/// Numeric level for a method name (mirrors `_LEVEL_NUM` in `_native.py`).
+fn method_level_num(method: &str) -> u8 {
+    match method {
+        "trace" => 5,
+        "debug" => 10,
+        "info" | "success" => 20,
+        "warning" | "warn" => 30,
+        "error" | "exception" => 40,
+        "critical" | "fatal" => 50,
+        _ => 20,
+    }
+}
+
 /// Probabilistic sampler: keeps a record with probability `rate`.
+///
+/// With `max_level_num` set, only records at or below that level are sampled;
+/// more severe records always pass — the native analog of wrapping
+/// `SamplingProcessor` in `ConditionalProcessor(max_level=...)`.
 pub struct Sampler {
     rate: f64,
+    max_level_num: Option<u8>,
 }
 
 impl Sampler {
     /// `rate` is the fraction of records to keep (`0.0`–`1.0`); `1.0` keeps all.
-    pub fn new(rate: f64) -> Self {
+    /// `max_level` is the method name of the highest level that is sampled.
+    pub fn new(rate: f64, max_level: Option<&str>) -> Self {
         Self {
             rate: rate.clamp(0.0, 1.0),
+            max_level_num: max_level.map(method_level_num),
         }
     }
 }
 
 impl RecordFilter for Sampler {
-    fn allow(&self, _key: &str, _level: &str) -> Decision {
+    fn allow(&self, _key: &str, level: &str) -> Decision {
+        if let Some(max) = self.max_level_num
+            && method_level_num(level) > max
+        {
+            return Decision::Keep;
+        }
         if self.rate >= 1.0 {
             return Decision::Keep;
         }
@@ -161,16 +186,17 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    /// Build from config. `sample_rate < 1.0` adds a sampler stage;
-    /// `rate_limit_max` adds a rate limiter stage.
+    /// Build from config. `sample_rate < 1.0` adds a sampler stage (level-gated
+    /// when `sample_max_level` is set); `rate_limit_max` adds a rate limiter stage.
     pub fn new(
         sample_rate: f64,
+        sample_max_level: Option<&str>,
         rate_limit_max: Option<usize>,
         rate_limit_period: Duration,
     ) -> Self {
         let mut stages = Vec::new();
         if sample_rate < 1.0 {
-            stages.push(Stage::Sampler(Sampler::new(sample_rate)));
+            stages.push(Stage::Sampler(Sampler::new(sample_rate, sample_max_level)));
         }
         if let Some(max_count) = rate_limit_max {
             stages.push(Stage::RateLimiter(RateLimiter::new(
@@ -228,7 +254,7 @@ mod tests {
 
     #[test]
     fn sampler_rate_zero_drops_all() {
-        let s = Sampler::new(0.0);
+        let s = Sampler::new(0.0, None);
         for _ in 0..100 {
             assert_eq!(s.allow("k", "info"), Decision::Drop);
         }
@@ -236,7 +262,7 @@ mod tests {
 
     #[test]
     fn sampler_rate_one_keeps_all() {
-        let s = Sampler::new(1.0);
+        let s = Sampler::new(1.0, None);
         for _ in 0..100 {
             assert_eq!(s.allow("k", "info"), Decision::Keep);
         }
@@ -245,7 +271,7 @@ mod tests {
     #[test]
     fn sampler_rate_half_is_statistically_bounded() {
         // Mirror the Python test/test_sampling.py statistical bound.
-        let s = Sampler::new(0.5);
+        let s = Sampler::new(0.5, None);
         let mut kept = 0;
         for _ in 0..1000 {
             if s.allow("k", "info") == Decision::Keep {
@@ -253,6 +279,28 @@ mod tests {
             }
         }
         assert!(kept > 300 && kept < 700, "kept={kept}");
+    }
+
+    #[test]
+    fn sampler_max_level_gates_sampling_to_low_levels() {
+        // rate=0 would drop everything, but only records <= INFO are sampled.
+        let s = Sampler::new(0.0, Some("info"));
+        assert_eq!(s.allow("k", "debug"), Decision::Drop);
+        assert_eq!(s.allow("k", "info"), Decision::Drop);
+        assert_eq!(s.allow("k", "success"), Decision::Drop);
+        assert_eq!(s.allow("k", "warning"), Decision::Keep);
+        assert_eq!(s.allow("k", "error"), Decision::Keep);
+        assert_eq!(s.allow("k", "critical"), Decision::Keep);
+    }
+
+    #[test]
+    fn pipeline_level_gated_sampler_counts_only_gated_drops() {
+        let p = Pipeline::new(0.0, Some("debug"), None, Duration::from_secs(60));
+        assert!(!p.allow("k", "debug"));
+        assert!(p.allow("k", "info"));
+        assert!(p.allow("k", "error"));
+        let stats = p.stats();
+        assert_eq!(stats.sampled, 1);
     }
 
     #[test]
@@ -289,7 +337,7 @@ mod tests {
 
     #[test]
     fn pipeline_with_no_filters_keeps_all() {
-        let p = Pipeline::new(1.0, None, Duration::from_secs(60));
+        let p = Pipeline::new(1.0, None, None, Duration::from_secs(60));
         assert!(p.is_empty());
         for _ in 0..10 {
             assert!(p.allow("k", "info"));
@@ -301,7 +349,7 @@ mod tests {
 
     #[test]
     fn pipeline_sampler_only_counts_sampled() {
-        let p = Pipeline::new(0.0, None, Duration::from_secs(60));
+        let p = Pipeline::new(0.0, None, None, Duration::from_secs(60));
         for _ in 0..5 {
             assert!(!p.allow("k", "info"));
         }
@@ -312,7 +360,7 @@ mod tests {
 
     #[test]
     fn pipeline_rate_limiter_only_counts_rate_limited() {
-        let p = Pipeline::new(1.0, Some(2), Duration::from_secs(60));
+        let p = Pipeline::new(1.0, None, Some(2), Duration::from_secs(60));
         assert!(p.allow("k", "info"));
         assert!(p.allow("k", "info"));
         assert!(!p.allow("k", "info"));
@@ -324,7 +372,7 @@ mod tests {
     #[test]
     fn pipeline_sampler_short_circuits_before_rate_limiter() {
         // rate=0 drops everything; the rate limiter never runs, so its counter stays 0.
-        let p = Pipeline::new(0.0, Some(2), Duration::from_secs(60));
+        let p = Pipeline::new(0.0, None, Some(2), Duration::from_secs(60));
         for _ in 0..10 {
             assert!(!p.allow("k", "info"));
         }
@@ -336,7 +384,7 @@ mod tests {
     #[test]
     fn pipeline_sampler_then_rate_limiter_both_count() {
         // rate=1 so the sampler always keeps; the rate limiter governs drops.
-        let p = Pipeline::new(1.0, Some(1), Duration::from_secs(60));
+        let p = Pipeline::new(1.0, None, Some(1), Duration::from_secs(60));
         assert!(p.allow("alpha", "info"));
         assert!(!p.allow("alpha", "info"));
         assert!(p.allow("beta", "info"));

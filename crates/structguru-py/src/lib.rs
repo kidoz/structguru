@@ -319,9 +319,10 @@ struct NativeFilter {
 #[pymethods]
 impl NativeFilter {
     #[new]
-    #[pyo3(signature = (sample_rate=1.0, rate_limit_max=None, rate_limit_period=60.0))]
+    #[pyo3(signature = (sample_rate=1.0, sample_max_level=None, rate_limit_max=None, rate_limit_period=60.0))]
     fn new(
         sample_rate: f64,
+        sample_max_level: Option<&str>,
         rate_limit_max: Option<usize>,
         rate_limit_period: f64,
     ) -> PyResult<Self> {
@@ -344,7 +345,7 @@ impl NativeFilter {
         }
         let period = Duration::from_secs_f64(rate_limit_period);
         Ok(Self {
-            pipeline: Pipeline::new(sample_rate, rate_limit_max, period),
+            pipeline: Pipeline::new(sample_rate, sample_max_level, rate_limit_max, period),
         })
     }
 

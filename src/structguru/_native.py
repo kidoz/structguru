@@ -90,6 +90,7 @@ class _RustModule(Protocol):
     def NativeFilter(
         self,
         sample_rate: float = ...,
+        sample_max_level: str | None = ...,
         rate_limit_max: int | None = ...,
         rate_limit_period: float = ...,
     ) -> Any: ...
@@ -256,6 +257,7 @@ def enable_native(
     sensitive_keys: list[str] | None = None,
     sensitive_patterns: list[str] | None = None,
     sample_rate: float = 1.0,
+    sample_max_level: str | None = None,
     rate_limit_max: int | None = None,
     rate_limit_period: float = 60.0,
     structured_exceptions: bool = False,
@@ -282,7 +284,10 @@ def enable_native(
     ``sample_rate`` (0.0–1.0) and ``rate_limit_max``/``rate_limit_period`` add
     pre-render filters: dropped records cost zero rendering. ``sampled`` and
     ``rate_limited`` counters are reported separately from the writer's transport
-    ``dropped`` counter (see :func:`native_metrics`).
+    ``dropped`` counter (see :func:`native_metrics`). ``sample_max_level``
+    restricts sampling to records at or below that level (more severe records
+    always pass) — the native analog of wrapping ``SamplingProcessor`` in
+    ``ConditionalProcessor(max_level=...)``.
 
     ``structured_exceptions=True`` renders the ``exception`` field as the
     structured dict produced by
@@ -312,6 +317,9 @@ def enable_native(
         raise ValueError(msg)
     if not math.isfinite(rate_limit_period) or rate_limit_period <= 0:
         msg = f"rate_limit_period must be > 0, got {rate_limit_period}"
+        raise ValueError(msg)
+    if sample_max_level is not None and sample_max_level.lower() not in _LEVEL_NUM:
+        msg = f"sample_max_level must be a known level name, got {sample_max_level!r}"
         raise ValueError(msg)
 
     # Validate regex patterns against Rust's engine before enabling. If any fail
@@ -352,6 +360,7 @@ def enable_native(
     if sample_rate < 1.0 or rate_limit_max is not None:
         new_filter = _RUST.NativeFilter(
             sample_rate=sample_rate,
+            sample_max_level=sample_max_level.lower() if sample_max_level else None,
             rate_limit_max=rate_limit_max,
             rate_limit_period=rate_limit_period,
         )
