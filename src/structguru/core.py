@@ -313,10 +313,13 @@ class Logger:
             exc_info = kwargs.get("exc_info", self._opt_exc_info)
             name = self.name if self.name is not None else _caller_module_name()
             fields = {
-                **get_contextvars(),
                 **self._bound,
                 **{k: v for k, v in kwargs.items() if k not in ("exc_info", "stack_info")},
             }
+            # Contextvars append after (and never override) event fields,
+            # matching structlog's merge_contextvars setdefault semantics.
+            for key, value in get_contextvars().items():
+                fields.setdefault(key, value)
             if _native.otel_enabled():
                 add_otel_context(None, method, fields)
             if exc_info:
