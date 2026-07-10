@@ -4,25 +4,6 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
-
-### Added
-
-- **Opt-in backtracking redaction patterns.**
-  `configure(allow_backtracking_patterns=True)` routes `sensitive_patterns`
-  that the linear-time engine rejects (look-around, backreferences) through a
-  bounded backtracking engine (`fancy-regex`), so they work as written.
-  Patterns the linear engine accepts still use it. Evaluation is capped by a
-  backtrack limit; a string whose evaluation exceeds it is redacted entirely
-  (fail-closed) rather than emitted unchecked. The default remains the
-  linear-time engine with its no-ReDoS guarantee, and the `ValueError` for
-  rejected patterns now mentions the opt-in.
-
-### Changed
-
-- Rust dependencies updated (`rand` 0.9 → 0.10); Python dev/test lockfile
-  refreshed, and the requests integration adapted to typed `requests` 2.34.
-
 ## [1.0.0] - 2026-07-11
 
 ### Changed (breaking)
@@ -50,6 +31,15 @@ All notable changes to this project are documented here. The format is based on
 
 - `structguru._contextvars` — a lightweight `contextvars.ContextVar[dict]`-backed
   replacement for `structlog.contextvars`, used by `core.py` and all integrations.
+- **Opt-in backtracking redaction patterns.**
+  `configure(allow_backtracking_patterns=True)` routes `sensitive_patterns`
+  that the linear-time engine rejects (look-around, backreferences) through a
+  bounded backtracking engine (`fancy-regex`), so they work as written.
+  Patterns the linear engine accepts still use it. Evaluation is capped by a
+  backtrack limit; a string whose evaluation exceeds it is redacted entirely
+  (fail-closed) rather than emitted unchecked. The default remains the
+  linear-time engine with its no-ReDoS guarantee, and the `ValueError` for
+  rejected patterns now mentions the opt-in.
 
 ### Notes
 
