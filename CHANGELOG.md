@@ -29,6 +29,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **Redaction marker never leaks into native output.** The internal
+  `_structguru_redacted` marker key is stripped by the native renderer,
+  matching `strip_redaction_marker` on the standard path.
 - **Native key order now matches structlog exactly.** User fields colliding
   with standard keys (`level`, `severity`, `logger`, `timestamp`) are
   overridden *in place* (previously dropped and re-appended), and contextvars

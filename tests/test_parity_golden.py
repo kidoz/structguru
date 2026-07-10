@@ -170,6 +170,8 @@ REDACTION_SCENARIOS = [
     pytest.param({"ctx": {"token": "t", "path": "/x"}}, id="nested-key"),
     pytest.param({"creds": [{"secret": "s"}, "plain"]}, id="key-inside-list"),
     pytest.param({"authorization": "Bearer abc", "ssn": "123-45-6789"}, id="more-defaults"),
+    # strip_redaction_marker: the internal marker key never reaches the output.
+    pytest.param({"_structguru_redacted": True, "user": "alice"}, id="marker-stripped"),
 ]
 
 

@@ -10,6 +10,12 @@ use regex::Regex;
 
 const REDACTED: &str = "[REDACTED]";
 
+/// Internal marker set by `RedactingProcessor`, mirrored from
+/// `structguru.redaction.REDACTED_MARKER_KEY`. `strip_redaction_marker`
+/// removes it before rendering on the standard path; drop it here too so a
+/// user field of the same name never reaches the output.
+const REDACTED_MARKER_KEY: &str = "_structguru_redacted";
+
 /// Default sensitive keys, mirroring `structguru.redaction.DEFAULT_SENSITIVE_KEYS`.
 pub const DEFAULT_SENSITIVE_KEYS: &[&str] = &[
     "password",
@@ -131,6 +137,9 @@ pub fn render_line(
         unreachable!("root is constructed as a map");
     };
 
+    // strip_redaction_marker semantics: the marker key never reaches the renderer.
+    entries.retain(|(key, _)| key != REDACTED_MARKER_KEY);
+
     let canonical = normalize_level(level);
     let severity = syslog_severity(&canonical);
 
@@ -173,6 +182,18 @@ mod tests {
             line,
             r#"{"request_id":"req-1","logger":"svc.mod","level":"WARN","severity":4,"timestamp":"TS","service":"checkout","message":"hello"}"#,
         );
+    }
+
+    #[test]
+    fn redaction_marker_key_is_stripped() {
+        let fields = vec![
+            ("_structguru_redacted".to_owned(), Value::Bool(true)),
+            ("keep".to_owned(), Value::Int(1)),
+        ];
+        let line = render_line(fields, "l", "info", "svc", "m", "TS", None, None, None).unwrap();
+
+        assert!(!line.contains("_structguru_redacted"));
+        assert!(line.contains(r#""keep":1"#));
     }
 
     #[test]
