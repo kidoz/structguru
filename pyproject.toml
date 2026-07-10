@@ -4,8 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "structguru"
-version = "0.3.0"
-description = "A loguru-style ergonomic API for structlog"
+version = "1.0.0"
+description = "A loguru-style ergonomic logging library with a Rust accelerator"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
@@ -13,7 +13,7 @@ authors = [
     { name = "Aleksandr Pavlov", email = "ckidoz@gmail.com" },
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -25,10 +25,7 @@ classifiers = [
     "Topic :: System :: Logging",
     "Typing :: Typed",
 ]
-dependencies = [
-    "structlog>=24.1.0",
-    "orjson>=3.9.0",
-]
+dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/kidoz/structguru"
@@ -62,6 +59,10 @@ test = [
     "pytest-cov>=7.0.0",
     "pytest-httpserver>=1.0.0",
     "responses>=0.25.0",
+    # structlog + orjson are kept as test-only deps for the golden parity suite
+    # (which compares native output against the standard structlog/orjson path).
+    "structlog>=24.1.0",
+    "orjson>=3.9.0",
 ]
 lint = [
     "mypy>=1.8",

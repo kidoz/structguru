@@ -16,9 +16,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
-import structlog
-from structlog.contextvars import bind_contextvars, clear_contextvars
-
+from structguru._contextvars import bind_contextvars, clear_contextvars
+from structguru.core import Logger
 from structguru.integrations._util import coerce_request_id
 
 
@@ -42,7 +41,7 @@ def setup_flask_logging(
     logger_name:
         Name for the structlog logger used by the hooks.
     """
-    log = structlog.get_logger(logger_name)
+    log = Logger(name=logger_name)
 
     @app.before_request  # type: ignore[untyped-decorator]
     def _bind_request_context() -> None:

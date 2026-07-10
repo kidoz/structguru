@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.0] - 2026-07-10
+
+### Changed (breaking)
+
+- **structlog and orjson are no longer dependencies.** The native Rust renderer
+  is the only rendering path. The wheel ships with zero runtime dependencies
+  (only optional integration extras). `configure_structlog()` is now a
+  compatibility shim that wires the native renderer to the configured stream.
+- **Native mode is always-on** (no `enable_native()` call needed). It auto-enables
+  at import time. Set `STRUCTGURU_LEGACY=1` to opt out.
+- **`configure_queued_logging()` removed.** Use `enable_native()` (already the
+  default) for off-thread I/O.
+- **`InterceptHandler` removed** (`integrations/stdlib.py`). Foreign stdlib
+  records go through stdlib's own logging; native mode does not intercept them.
+- **`build_shared_processors`/`build_formatter_processors`/`orjson_serializer`
+  removed** from `config.py` (structlog processor chains no longer needed).
+- **`_StructlogMsgFixer`/`_install_exc_info_record_factory` removed** (structlog
+  `ProcessorFormatter` artifacts, no longer relevant).
+- **Integrations rewritten** to use structguru's own `Logger` and local
+  `_contextvars` module instead of `structlog.get_logger`/`structlog.contextvars`.
+- **`SamplingProcessor`/`RateLimitingProcessor`**: `structlog.DropEvent` replaced
+  with a local `structguru.sampling.DropEvent` sentinel.
+
+### Added
+
+- `structguru._contextvars` — a lightweight `contextvars.ContextVar[dict]`-backed
+  replacement for `structlog.contextvars`, used by `core.py` and all integrations.
+
+### Notes
+
+- structlog and orjson remain as **test-only** dependencies (`[dependency-groups].test`)
+  for the golden parity suite, which compares native output against the standard
+  structlog/orjson path. Production code has no dependency on either.
+
 ## [Unreleased]
 
 ### Added

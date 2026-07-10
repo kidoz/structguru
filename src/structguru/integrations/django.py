@@ -22,14 +22,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
-import structlog
-from structlog.contextvars import bind_contextvars, clear_contextvars
-
-from structguru.config import (
-    build_formatter_processors,
-    build_shared_processors,
-    orjson_serializer,
-)
+from structguru._contextvars import bind_contextvars, clear_contextvars
+from structguru.core import Logger
 from structguru.integrations._util import coerce_request_id
 
 
@@ -39,39 +33,41 @@ def build_logging_config(
     level: str = "INFO",
     json_logs: bool = True,
 ) -> dict[str, Any]:
-    """Generate a Django ``LOGGING`` dict wired to structlog's ``ProcessorFormatter``.
+    """Generate a minimal Django ``LOGGING`` dict using the stdlib logging module.
+
+    The structguru integration binds request context via context variables
+    independent of the logging backend, so this config keeps a simple,
+    structlog-free stdlib setup.
 
     Parameters
     ----------
     service:
-        Application name added to every log record.
+        Application name added to every log record (as a logging filter).
     level:
         Root log level.
     json_logs:
-        ``True`` for JSON, ``False`` for colored console.
+        ``True`` for a JSON-style line format, ``False`` for a plain
+        human-readable console format.
     """
-    shared = build_shared_processors(service)
-
-    renderer: structlog.types.Processor = (
-        structlog.processors.JSONRenderer(serializer=orjson_serializer)
-        if json_logs
-        else structlog.dev.ConsoleRenderer(event_key="message")
-    )
-
+    formatter = "json" if json_logs else "console"
     return {
         "version": 1,
         "disable_existing_loggers": False,
         "formatters": {
-            "structlog": {
-                "()": structlog.stdlib.ProcessorFormatter,
-                "processors": build_formatter_processors(renderer, json_mode=json_logs),
-                "foreign_pre_chain": shared,
+            "json": {
+                "format": (
+                    f'{{"service": "{service}", "level": "%(levelname)s", '
+                    f'"name": "%(name)s", "message": "%(message)s"}}'
+                ),
+            },
+            "console": {
+                "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
             },
         },
         "handlers": {
             "console": {
                 "class": "logging.StreamHandler",
-                "formatter": "structlog",
+                "formatter": formatter,
             },
         },
         "root": {
@@ -91,7 +87,7 @@ class StructguruMiddleware:
 
     def __init__(self, get_response: Any) -> None:
         self.get_response = get_response
-        self.log = structlog.get_logger("structguru.django")
+        self.log = Logger(name="structguru.django")
 
     def __call__(self, request: Any) -> Any:
         clear_contextvars()

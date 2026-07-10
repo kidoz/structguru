@@ -5,8 +5,8 @@ from __future__ import annotations
 import io
 
 import pytest
-from structlog.contextvars import get_contextvars
 
+from structguru._contextvars import get_contextvars
 from structguru.config import configure_structlog
 from structguru.integrations.flask import setup_flask_logging
 

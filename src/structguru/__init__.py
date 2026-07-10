@@ -13,12 +13,11 @@ from structguru.exceptions import ExceptionDictProcessor
 from structguru.metrics import MetricProcessor
 from structguru.otel import add_otel_context
 from structguru.processors import add_syslog_severity, normalize_level
-from structguru.queued import configure_queued_logging
 from structguru.redaction import DEFAULT_SENSITIVE_KEYS, RedactingProcessor
 from structguru.routing import ConditionalProcessor
 from structguru.sampling import RateLimitingProcessor, SamplingProcessor
 
-__version__ = "0.3.0"
+__version__ = "1.0.0"
 
 __all__ = [
     "ConditionalProcessor",
@@ -31,7 +30,6 @@ __all__ = [
     "SamplingProcessor",
     "add_otel_context",
     "add_syslog_severity",
-    "configure_queued_logging",
     "configure_structlog",
     "disable_native",
     "enable_native",

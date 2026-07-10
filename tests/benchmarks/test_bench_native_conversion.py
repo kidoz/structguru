@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
+import orjson
+
 import structguru._rust as rust
 
-from structguru.config import orjson_serializer
+
+def orjson_serializer(obj: object) -> str:
+    return orjson.dumps(obj).decode()
 
 
 def _realistic_record() -> dict[str, Any]:

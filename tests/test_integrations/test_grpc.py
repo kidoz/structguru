@@ -5,8 +5,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from structlog.contextvars import bind_contextvars, clear_contextvars, get_contextvars
 
+from structguru._contextvars import bind_contextvars, clear_contextvars, get_contextvars
 from structguru.integrations.grpc import StructguruInterceptor
 
 

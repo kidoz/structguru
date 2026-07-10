@@ -19,9 +19,8 @@ import functools
 from collections.abc import Iterator
 from typing import Any
 
-import structlog
-from structlog.contextvars import bind_contextvars, clear_contextvars
-
+from structguru._contextvars import bind_contextvars, clear_contextvars
+from structguru.core import Logger
 from structguru.integrations._util import coerce_request_id
 
 
@@ -43,7 +42,7 @@ class StructguruInterceptor:
         logger_name: str = "structguru.grpc",
     ) -> None:
         self.request_id_key = request_id_key
-        self.log = structlog.get_logger(logger_name)
+        self.log = Logger(name=logger_name)
 
     def intercept_service(
         self,

@@ -8,9 +8,11 @@ only for ERROR+, sampling only for DEBUG).
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
-import structlog
+# Processor protocol: (logger, method_name, event_dict) -> event_dict
+Processor = Callable[[Any, str, dict[str, Any]], dict[str, Any]]
 
 
 class ConditionalProcessor:
@@ -37,7 +39,7 @@ class ConditionalProcessor:
 
     def __init__(
         self,
-        processor: structlog.types.Processor,
+        processor: Processor,
         *,
         min_level: str = "DEBUG",
         max_level: str = "CRITICAL",

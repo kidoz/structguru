@@ -47,16 +47,15 @@ def test_structguru_legacy_env_disables_native(
         _native.disable_native()
 
 
-def test_configure_structlog_disables_native() -> None:
-    """Calling configure_structlog opts into the standard path (native off)."""
-    _native.enable_native(service="svc", target="memory", level="DEBUG")
-    assert _native.is_native_enabled()
+def test_configure_structlog_enables_native_with_stream() -> None:
+    """configure_structlog wires native to the stream (v1.0 behavior)."""
+    _native.disable_native()
 
     buf = io.StringIO()
     configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
     try:
-        assert not _native.is_native_enabled(), (
-            "configure_structlog should disable native so output lands on the stream"
+        assert _native.is_native_enabled(), (
+            "configure_structlog should enable native with stream_sink"
         )
     finally:
         _native.disable_native()

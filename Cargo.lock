@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "structguru-core"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "rand",
  "regex",
@@ -286,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "structguru-py"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "pyo3",
  "regex",

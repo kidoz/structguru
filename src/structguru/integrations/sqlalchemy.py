@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-import structlog
+from structguru.core import Logger
 
 
 def setup_query_logging(
@@ -40,7 +40,7 @@ def setup_query_logging(
     """
     from sqlalchemy import event
 
-    log = structlog.get_logger(logger_name)
+    log = Logger(name=logger_name)
     _START_KEY = "structguru_query_start"
 
     @event.listens_for(engine, "before_cursor_execute")

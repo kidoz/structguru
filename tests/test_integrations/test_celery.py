@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from structlog.contextvars import bind_contextvars, clear_contextvars, get_contextvars
+from structguru._contextvars import bind_contextvars, clear_contextvars, get_contextvars
 
 
 class TestSetupCeleryLogging:

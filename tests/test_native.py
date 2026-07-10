@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import orjson
 import pytest
 import structguru._rust as rust
 
 from structguru import _native
-from structguru.config import orjson_serializer
+
+
+def orjson_serializer(obj: object) -> str:
+    return orjson.dumps(obj).decode()
 
 
 def test_native_module_exports_core_version() -> None:

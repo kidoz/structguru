@@ -1,11 +1,8 @@
-"""Structlog configuration for structured JSON logging.
+"""Logging configuration for structguru.
 
-Configures structlog to produce JSON logs with standardized fields:
-- ``timestamp``: ISO 8601 / RFC 3339 in UTC (``Z`` suffix).
-- ``service``: application name.
-- ``level``: one of ``CRITICAL``, ``ERROR``, ``WARN``, ``INFO``, ``DEBUG``.
-- ``severity``: RFC 5424 syslog severity code (``2``–``7``).
-- ``message``: the log message as a string.
+Since v1.0, structguru uses the native Rust renderer as its only logging path.
+These functions are compatibility shims that configure the native renderer to
+match the pre-1.0 observable contract (output lands on the configured stream).
 """
 
 from __future__ import annotations
@@ -14,26 +11,9 @@ import logging
 import os
 import sys
 from collections.abc import Sequence
-from logging.handlers import RotatingFileHandler
 from typing import Any
 
-import orjson
-import structlog
-from structlog.contextvars import merge_contextvars
-
-from structguru._native import disable_native as _disable_native
-from structguru.processors import (
-    add_service,
-    add_syslog_severity,
-    ensure_event_is_str,
-    normalize_level,
-)
-from structguru.redaction import RedactingProcessor, strip_redaction_marker
-
-
-def orjson_serializer(obj: object, **_kw: object) -> str:
-    """Serialize *obj* to a JSON string using orjson."""
-    return orjson.dumps(obj).decode()
+from structguru._native import enable_native as _enable_native
 
 
 def _to_logging_level(level_name: str) -> int:
@@ -53,118 +33,6 @@ def _to_logging_level(level_name: str) -> int:
     return result
 
 
-class _StructlogMsgFixer(logging.Handler):
-    """Normalize ``record.msg`` from a structlog event dict to a plain string.
-
-    ``wrap_for_formatter`` stores the whole event dict as ``record.msg``.
-    ``ProcessorFormatter`` renders on a **shallow copy** of the record, so
-    the original ``record.msg`` stays a ``dict``.  Any handler that runs
-    *after* ``ProcessorFormatter`` (notably Sentry's ``EventHandler`` in the
-    ``finally`` block of ``callHandlers``) would see the raw dict and call
-    ``str(dict)`` — producing an ugly repr.
-
-    This handler is added to the root logger **after** the stream handler.
-    By the time it runs, ``ProcessorFormatter`` has already finished with
-    its copy, so mutating ``record.msg`` here is safe.  Sentry then sees a
-    clean string for events, breadcrumbs, and structured logs alike.
-    """
-
-    def emit(self, record: logging.LogRecord) -> None:
-        if isinstance(record.msg, dict):
-            record.msg = record.msg.get("message") or record.msg.get("event") or str(record.msg)
-
-
-def _install_exc_info_record_factory() -> None:
-    """Patch the ``LogRecord`` factory to propagate ``exc_info`` from structlog.
-
-    ``wrap_for_formatter`` passes the event dict as ``record.msg`` but does
-    **not** set ``record.exc_info``.  Sentry's ``LoggingIntegration`` reads
-    ``record.exc_info`` before ``ProcessorFormatter`` runs, so it would miss
-    structured exception data.
-
-    This factory extracts ``exc_info`` from the event dict and passes it to
-    the original factory so the ``LogRecord`` is created with ``exc_info``
-    intact.
-    """
-    original = logging.getLogRecordFactory()
-    if getattr(original, "_structlog_exc_info_patched", False):
-        return
-
-    def factory(
-        name: str,
-        level: int,
-        fn: str,
-        lno: int,
-        msg: Any,
-        args: Any,
-        exc_info: Any,
-        func: str | None = None,
-        sinfo: str | None = None,
-    ) -> logging.LogRecord:
-        if exc_info is None and isinstance(msg, dict):
-            ei = msg.get("exc_info")
-            if ei is True:
-                exc_info = sys.exc_info()
-            elif isinstance(ei, BaseException):
-                exc_info = (type(ei), ei, ei.__traceback__)
-            elif isinstance(ei, tuple):
-                exc_info = ei
-        return original(name, level, fn, lno, msg, args, exc_info, func, sinfo)
-
-    factory._structlog_exc_info_patched = True  # type: ignore[attr-defined]
-    logging.setLogRecordFactory(factory)
-
-
-def _stream_isatty(stream: Any) -> bool:
-    """Check if *stream* is connected to a terminal."""
-    try:
-        result: bool = stream.isatty()
-        return result
-    except (AttributeError, ValueError):
-        return False
-
-
-def build_shared_processors(
-    service: str,
-    *,
-    redact: bool = True,
-) -> list[structlog.types.Processor]:
-    """Build the shared processor chain used by both structlog and stdlib records."""
-    processors: list[structlog.types.Processor] = [
-        merge_contextvars,
-        structlog.stdlib.add_logger_name,
-        structlog.stdlib.add_log_level,
-        normalize_level,  # type: ignore[list-item]
-        add_syslog_severity,  # type: ignore[list-item]
-        structlog.stdlib.PositionalArgumentsFormatter(),
-        structlog.processors.TimeStamper(fmt="iso", utc=True, key="timestamp"),
-        add_service(service),  # type: ignore[list-item]
-        structlog.processors.StackInfoRenderer(),
-        structlog.processors.UnicodeDecoder(),
-        ensure_event_is_str,  # type: ignore[list-item]
-    ]
-    if redact:
-        processors.append(RedactingProcessor())  # type: ignore[arg-type]
-    processors.append(strip_redaction_marker)  # type: ignore[arg-type]
-    processors.append(structlog.processors.EventRenamer("message"))
-    return processors
-
-
-def build_formatter_processors(
-    renderer: structlog.types.Processor,
-    *,
-    json_mode: bool = True,
-) -> list[structlog.types.Processor]:
-    """Build the ``ProcessorFormatter`` processor chain (final rendering stage)."""
-    processors: list[structlog.types.Processor] = [
-        structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-    ]
-    if json_mode:
-        processors.append(structlog.processors.format_exc_info)
-    processors.append(renderer)
-    return processors
-
-
 def configure_structlog(
     *,
     service: str = "app",
@@ -173,12 +41,12 @@ def configure_structlog(
     stream: Any = None,
     clear_handlers: bool = True,
 ) -> None:
-    """Configure structlog with ``ProcessorFormatter`` for stdlib integration.
+    """Configure the native logger.
 
-    Uses :class:`structlog.stdlib.ProcessorFormatter` so that ``exc_info``
-    is preserved on :class:`logging.LogRecord` objects.  This allows Sentry's
-    ``LoggingIntegration`` (and any other stdlib-based consumer) to capture
-    structured exception data *before* the traceback is rendered to text.
+    Since v1.0, this is a compatibility shim that wires the native Rust renderer
+    to the given *stream* (via a callable sink), preserving the pre-1.0 contract
+    that ``logger`` output lands on the configured stream. The native renderer
+    handles all JSON/console formatting, redaction, and level filtering.
 
     Parameters
     ----------
@@ -189,67 +57,23 @@ def configure_structlog(
     json_logs:
         ``True`` for JSON output, ``False`` for colored console output.
     stream:
-        Output stream.  Defaults to ``sys.stdout``.
+        Output stream.  Defaults to ``sys.stdout``. Wired as a callable sink.
     clear_handlers:
-        If ``True`` (default), remove all existing root logger handlers before
-        adding the structlog handler.  Set to ``False`` when embedding in an
-        application that manages its own logging pipeline.
+        Kept for backward compatibility; the native path does not use root
+        logger handlers.
     """
     if stream is None:
         stream = sys.stdout
 
-    # configure_structlog explicitly sets up the standard structlog path.
-    # Disable native mode so logger calls route through this pipeline (not the
-    # native Rust writer). Users wanting native mode can call enable_native()
-    # after configure_structlog(). This preserves the observable contract that
-    # logger output lands on the configured stream.
-    _disable_native()
-
-    _install_exc_info_record_factory()
-
-    shared_processors = build_shared_processors(service)
-
-    structlog.configure(
-        processors=[
-            *shared_processors,
-            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
-        ],
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        wrapper_class=structlog.make_filtering_bound_logger(
-            _to_logging_level(level),
-        ),
-        cache_logger_on_first_use=True,
+    # Wire the stream as a synchronous sink so logger output lands on it
+    # immediately (preserving the pre-1.0 contract that output is available
+    # right after the logger call, no flush needed).
+    _enable_native(
+        service=service,
+        level=level,
+        json=json_logs,
+        stream_sink=stream,
     )
-
-    renderer: structlog.types.Processor = (
-        structlog.processors.JSONRenderer(serializer=orjson_serializer)
-        if json_logs
-        else structlog.dev.ConsoleRenderer(
-            colors=_stream_isatty(stream),
-            event_key="message",
-        )
-    )
-
-    formatter = structlog.stdlib.ProcessorFormatter(
-        processors=build_formatter_processors(renderer, json_mode=json_logs),
-        foreign_pre_chain=shared_processors,
-    )
-
-    root = logging.getLogger()
-    if clear_handlers:
-        for h in root.handlers[:]:
-            try:
-                h.close()
-            except Exception:  # noqa: BLE001
-                pass
-            root.removeHandler(h)
-    root.setLevel(_to_logging_level(level))
-
-    handler = logging.StreamHandler(stream)
-    handler.setFormatter(formatter)
-    root.addHandler(handler)
-
-    root.addHandler(_StructlogMsgFixer())
 
 
 def setup_structlog(
@@ -275,26 +99,20 @@ def setup_structlog(
     level = os.environ.get("LOG_LEVEL", "INFO")
     json_logs = os.environ.get("JSON_LOGS", "1") != "0"
 
-    configure_structlog(service=service, level=level, json_logs=json_logs)
-
-    for name in suppress_loggers:
-        logging.getLogger(name).setLevel(logging.WARNING)
+    kwargs: dict[str, Any] = {
+        "service": service,
+        "level": level,
+        "json": json_logs,
+    }
 
     log_path = os.environ.get("LOG_PATH")
     if log_path:
-        file_handler = RotatingFileHandler(
-            log_path,
-            maxBytes=50 * 1024 * 1024,
-            backupCount=5,
-            encoding="utf-8",
-        )
-        json_renderer = structlog.processors.JSONRenderer(serializer=orjson_serializer)
-        file_formatter = structlog.stdlib.ProcessorFormatter(
-            processors=build_formatter_processors(json_renderer),
-            foreign_pre_chain=build_shared_processors(service),
-        )
-        file_handler.setFormatter(file_formatter)
-        logging.getLogger().addHandler(file_handler)
+        kwargs["file_path"] = log_path
+
+    _enable_native(**kwargs)
+
+    for name in suppress_loggers:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
     def _log_exception(
         exc_type: type[BaseException],

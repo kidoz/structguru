@@ -1,13 +1,13 @@
 # structguru
 
-A [loguru](https://github.com/Delgan/loguru)-style ergonomic API for [structlog](https://www.structlog.org/).
+A [loguru](https://github.com/Delgan/loguru)-style ergonomic logging library with a Rust accelerator.
 
-Combines structlog's powerful structured logging, performance, and processor chain with loguru's ease of use — brace formatting, `bind`, `contextualize`, `opt`, and sink management.
+Combines a loguru-style API — brace formatting, `bind`, `contextualize`, `opt`, sink management — with a native Rust renderer for maximum performance. Since v1.0, the Rust extension is the default (and only) rendering path; structlog and orjson are no longer dependencies.
 
 ## Features
 
 - **Loguru-style API** — `logger.info("User {id} logged in", id=123)`
-- **Structured JSON output** in production (via `orjson` for speed)
+- **Structured JSON output** in production (rendered natively in Rust for speed)
 - **Pretty colored console** output in development
 - **Context management** — `bind()` for persistent context, `contextualize()` for request-scoped context
 - **Sentry-compatible** — preserves `exc_info` on `LogRecord` for Sentry's logging integration
@@ -388,8 +388,7 @@ sentry = SentryProcessor(event_level=logging.ERROR, tag_keys=frozenset({"service
 ## Requirements
 
 - Python 3.11+
-- structlog >= 24.1.0
-- orjson >= 3.9.0
+- The compiled Rust extension (shipped as abi3 wheels for Linux/macOS/Windows)
 
 ## Documentation & Examples
 

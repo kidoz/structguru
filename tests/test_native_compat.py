@@ -6,10 +6,10 @@ import json
 from typing import Any
 
 import pytest
-from structlog.contextvars import bind_contextvars, clear_contextvars
 
 import structguru
 from structguru import _native
+from structguru._contextvars import bind_contextvars, clear_contextvars
 
 pytestmark = pytest.mark.skipif(
     not _native.native_available(),

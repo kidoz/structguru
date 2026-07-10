@@ -1431,12 +1431,8 @@ wheels = [
 
 [[package]]
 name = "structguru"
-version = "0.3.0"
+version = "1.0.0"
 source = { editable = "." }
-dependencies = [
-    { name = "orjson" },
-    { name = "structlog" },
-]
 
 [package.optional-dependencies]
 all = [
@@ -1491,6 +1487,7 @@ dev = [
     { name = "mkdocs-material" },
     { name = "mkdocstrings", extra = ["python"] },
     { name = "mypy" },
+    { name = "orjson" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-benchmark" },
@@ -1498,6 +1495,7 @@ dev = [
     { name = "pytest-httpserver" },
     { name = "responses" },
     { name = "ruff" },
+    { name = "structlog" },
 ]
 docs = [
     { name = "mkdocs" },
@@ -1509,11 +1507,13 @@ lint = [
     { name = "ruff" },
 ]
 test = [
+    { name = "orjson" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "pytest-httpserver" },
     { name = "responses" },
+    { name = "structlog" },
 ]
 
 [package.metadata]
@@ -1524,12 +1524,10 @@ requires-dist = [
     { name = "grpcio", marker = "extra == 'grpc'", specifier = ">=1.50" },
     { name = "httpx", marker = "extra == 'httpx'", specifier = ">=0.20" },
     { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.0" },
-    { name = "orjson", specifier = ">=3.9.0" },
     { name = "requests", marker = "extra == 'requests'", specifier = ">=2.0" },
     { name = "sentry-sdk", marker = "extra == 'sentry'", specifier = ">=1.0" },
     { name = "sqlalchemy", marker = "extra == 'sqlalchemy'", specifier = ">=2.0" },
     { name = "structguru", extras = ["otel", "celery", "flask", "django", "sqlalchemy", "grpc", "sentry", "httpx", "requests"], marker = "extra == 'all'" },
-    { name = "structlog", specifier = ">=24.1.0" },
 ]
 provides-extras = ["otel", "celery", "flask", "django", "sqlalchemy", "grpc", "sentry", "httpx", "requests", "all"]
 
@@ -1544,6 +1542,7 @@ dev = [
     { name = "mkdocs-material", specifier = ">=9.7.6" },
     { name = "mkdocstrings", extras = ["python"], specifier = ">=1.0.4" },
     { name = "mypy", specifier = ">=1.8" },
+    { name = "orjson", specifier = ">=3.9.0" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.23" },
     { name = "pytest-benchmark", specifier = ">=5.2.3" },
@@ -1551,6 +1550,7 @@ dev = [
     { name = "pytest-httpserver", specifier = ">=1.0.0" },
     { name = "responses", specifier = ">=0.25.0" },
     { name = "ruff", specifier = ">=0.4" },
+    { name = "structlog", specifier = ">=24.1.0" },
 ]
 docs = [
     { name = "mkdocs", specifier = ">=1.6.1" },
@@ -1562,11 +1562,13 @@ lint = [
     { name = "ruff", specifier = ">=0.4" },
 ]
 test = [
+    { name = "orjson", specifier = ">=3.9.0" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.23" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
     { name = "pytest-httpserver", specifier = ">=1.0.0" },
     { name = "responses", specifier = ">=0.25.0" },
+    { name = "structlog", specifier = ">=24.1.0" },
 ]
 
 [[package]]

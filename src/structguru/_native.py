@@ -199,6 +199,11 @@ _colors = False
 _callable_sinks: list[tuple[Callable[[str], None], int]] | None = None
 _dispatch_queue: queue.Queue[str] | None = None
 _dispatch_thread: threading.Thread | None = None
+# Synchronous stream sink: when set (by configure_structlog), rendered lines are
+# written to this stream synchronously on the caller's thread IN ADDITION to the
+# Rust writer. This preserves the pre-1.0 contract that logger output is available
+# on the configured stream immediately after the call (no flush needed).
+_stream_sink: Any = None
 _dispatch_stop = threading.Event()
 _hooks_registered = False
 _drop_count = 0
@@ -372,6 +377,7 @@ def enable_native(
     file_backup_count: int = 5,
     also_stdout: bool = False,
     callable_sinks: list[Callable[[str], None]] | None = None,
+    stream_sink: Any = None,
 ) -> None:
     """Route the common log path through the native renderer + writer.
 
@@ -436,7 +442,7 @@ def enable_native(
     global _enabled, _writer, _service, _maxsize, _target, _overflow
     global _level_threshold, _otel, _sensitive_keys, _sensitive_patterns
     global _redaction_config, _filter, _exception_config, _metric_processor, _sentry_processor
-    global _console, _colors, _callable_sinks, _dispatch_queue, _dispatch_thread
+    global _console, _colors, _callable_sinks, _dispatch_queue, _dispatch_thread, _stream_sink
     if _RUST is None:
         msg = "native extension is not available"
         raise RuntimeError(msg)
@@ -553,6 +559,7 @@ def enable_native(
             [(fn, _LEVEL_NUM["debug"]) for fn in callable_sinks] if callable_sinks else None
         )
         _dispatch_queue = queue.Queue() if _callable_sinks else None
+        _stream_sink = stream_sink
         _enabled = True
 
     # Start the dispatch thread outside the state lock.
@@ -657,7 +664,7 @@ def _dispatch_loop() -> None:
 def disable_native() -> None:
     """Turn native mode off and stop the background writer."""
     global _enabled, _writer, _redaction_config, _filter, _exception_config, _metric_processor
-    global _sentry_processor, _callable_sinks, _dispatch_queue, _console, _colors
+    global _sentry_processor, _callable_sinks, _dispatch_queue, _stream_sink, _console, _colors
     _stop_dispatch_thread()
     with _state_lock:
         _enabled = False
@@ -673,6 +680,7 @@ def disable_native() -> None:
         _colors = False
         _callable_sinks = None
         _dispatch_queue = None
+        _stream_sink = None
 
 
 def render_and_enqueue(
@@ -734,6 +742,12 @@ def render_and_enqueue(
             fields, logger, level, _service, message, None, _sensitive_keys, None, stack
         )
     line = rendered + "\n"
+    # Synchronous stream sink (used by configure_structlog for backward compat).
+    if _stream_sink is not None:
+        try:
+            _stream_sink.write(line)
+        except Exception:  # noqa: BLE001 - stream errors must never break logging
+            pass
     if _overflow == "block":
         enqueued = _writer.enqueue_blocking(line)
     else:

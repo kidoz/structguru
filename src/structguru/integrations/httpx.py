@@ -9,9 +9,9 @@ from __future__ import annotations
 import time
 from typing import Any
 
-import structlog
+from structguru.core import Logger
 
-_logger = structlog.get_logger("structguru.httpx")
+_logger = Logger(name="structguru.httpx")
 
 
 def log_request(request: Any) -> None:

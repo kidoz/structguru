@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from structlog.contextvars import bind_contextvars, clear_contextvars
+from structguru._contextvars import bind_contextvars, clear_contextvars
 
 _HEADER_KEY = "structguru_context"
 _setup_done = False
@@ -42,7 +42,8 @@ def setup_celery_logging(
     _setup_done = True
 
     from celery.signals import before_task_publish, task_postrun, task_prerun
-    from structlog.contextvars import get_contextvars
+
+    from structguru._contextvars import get_contextvars
 
     if propagate_context:
 

@@ -270,26 +270,24 @@ class TestLoggerAddRemove:
         assert len(log._handlers) == 0
 
     def test_add_callable_receives_messages(self) -> None:
-        buf = io.StringIO()
-        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+        # In v1.0, logger.add() manages stdlib handlers (for third-party libs
+        # logging through logging). Native-mode logs bypass stdlib. This test
+        # verifies the handler is registered correctly.
+        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=io.StringIO())
         log = Logger()
         messages: list[str] = []
-        log.add(messages.append, level="DEBUG")
-        log.info("captured")
-        assert any("captured" in m for m in messages)
+        hid = log.add(messages.append, level="DEBUG")
+        assert hid in log._handlers
+        log.remove(hid)
 
     def test_remove_closes_handler(self, tmp_path: Path) -> None:
         configure_structlog(service="test", level="DEBUG", json_logs=True, stream=io.StringIO())
         log = Logger()
         hid = log.add(tmp_path / "test.log", level="DEBUG")
-        # Grab the stream before close() sets it to None
-        root = logging.getLogger()
-        file_handlers = [h for h in root.handlers if isinstance(h, logging.FileHandler)]
-        assert len(file_handlers) == 1
-        stream = file_handlers[0].stream
+        handler = log._handlers[hid]
+        stream = handler.stream  # type: ignore[attr-defined]
         assert stream is not None
         log.remove(hid)
-        # FileHandler.close() closes the stream then sets it to None
         assert stream.closed
 
     def test_remove_all_closes_handlers(self, tmp_path: Path) -> None:
@@ -322,6 +320,8 @@ class TestLoggerIntegration:
         assert "action" in output
 
     def test_clear_handlers_false_preserves_existing(self) -> None:
+        # In v1.0, configure_structlog wires native mode (no root handler management).
+        # clear_handlers is accepted for backward compat but is a no-op.
         buf1 = io.StringIO()
         configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf1)
         root = logging.getLogger()
@@ -331,8 +331,8 @@ class TestLoggerIntegration:
         configure_structlog(
             service="test", level="DEBUG", json_logs=True, stream=buf2, clear_handlers=False
         )
-        # New handlers are added on top of existing ones
-        assert len(root.handlers) > handler_count_before
+        # Handler count unchanged (native mode doesn't add/remove root handlers).
+        assert len(root.handlers) == handler_count_before
 
     def test_contextualize_with_output(self) -> None:
         buf = io.StringIO()

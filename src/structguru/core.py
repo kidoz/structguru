@@ -26,10 +26,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypeAlias
 
-import structlog
-from structlog.contextvars import bound_contextvars, get_contextvars
-
 from structguru import _native
+from structguru._contextvars import bound_contextvars, get_contextvars
 from structguru.config import _to_logging_level
 from structguru.otel import add_otel_context
 
@@ -189,16 +187,6 @@ class Logger:
     _handlers: dict[HandlerId, logging.Handler] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    # -- structlog bridge ---------------------------------------------------
-
-    def _get_structlog_logger(self) -> Any:
-        """Return a structlog logger, applying any bound context."""
-        name = self.name if self.name is not None else _caller_module_name()
-        log = structlog.get_logger(name)
-        if self._bound:
-            log = log.bind(**self._bound)
-        return log
-
     # -- context helpers ----------------------------------------------------
 
     def bind(self, **kwargs: Any) -> Logger:
@@ -286,12 +274,15 @@ class Logger:
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> None:
-        """Internal dispatch."""
+        """Internal dispatch — native Rust path (the only path since v1.0)."""
+        # If native mode is off (e.g. after disable_native), log calls are no-ops.
+        if not _native.is_native_enabled():
+            return
+
         stack_info = bool(kwargs.get("stack_info") or self._opt_stack_info)
-        use_native = _native.is_native_enabled()
 
         # Cheap disabled path: level-filter before any formatting.
-        if use_native and _native.is_below_level(method):
+        if _native.is_native_enabled() and _native.is_below_level(method):
             return
 
         formatted_msg, consumed_keys = _safe_format(message, args, kwargs)
@@ -304,41 +295,31 @@ class Logger:
         # Pre-render filter (sampling/rate-limit): decide before building fields.
         # Keys on the formatted message, matching the post-EventRenamer behaviour
         # of the standard-path RateLimitingProcessor.
-        if use_native and not _native.should_render(method, formatted_msg):
+        if _native.is_native_enabled() and not _native.should_render(method, formatted_msg):
             return
 
-        if use_native:
-            exc_info = kwargs.get("exc_info", self._opt_exc_info)
-            name = self.name if self.name is not None else _caller_module_name()
-            fields = {
-                **self._bound,
-                **{k: v for k, v in kwargs.items() if k not in ("exc_info", "stack_info")},
-            }
-            # Contextvars append after (and never override) event fields,
-            # matching structlog's merge_contextvars setdefault semantics.
-            for key, value in get_contextvars().items():
-                fields.setdefault(key, value)
-            if _native.otel_enabled():
-                add_otel_context(None, method, fields)
-            if exc_info:
-                exception = _native.build_exception_field(exc_info)
-                if exception is not None:
-                    fields["exception"] = exception
-            # Stack capture is Python-owned (frame walking); rendering places
-            # "stack" between "service" and "message" like StackInfoRenderer.
-            stack = _native.format_stack() if stack_info else None
-            _native.notify_metrics(method, formatted_msg, fields)
-            _native.notify_sentry(method, formatted_msg, fields, exc_info=exc_info)
-            _native.render_and_enqueue(fields, name, method, formatted_msg, stack=stack)
-            return
-
-        structlog_logger = self._get_structlog_logger()
-        if self._opt_exc_info is not None:
-            kwargs.setdefault("exc_info", self._opt_exc_info)
-        if self._opt_stack_info:
-            kwargs.setdefault("stack_info", True)
-
-        getattr(structlog_logger, method)(formatted_msg, **kwargs)
+        exc_info = kwargs.get("exc_info", self._opt_exc_info)
+        name = self.name if self.name is not None else _caller_module_name()
+        fields = {
+            **self._bound,
+            **{k: v for k, v in kwargs.items() if k not in ("exc_info", "stack_info")},
+        }
+        # Contextvars append after (and never override) event fields,
+        # matching structlog's merge_contextvars setdefault semantics.
+        for key, value in get_contextvars().items():
+            fields.setdefault(key, value)
+        if _native.otel_enabled():
+            add_otel_context(None, method, fields)
+        if exc_info:
+            exception = _native.build_exception_field(exc_info)
+            if exception is not None:
+                fields["exception"] = exception
+        # Stack capture is Python-owned (frame walking); rendering places
+        # "stack" between "service" and "message" like StackInfoRenderer.
+        stack = _native.format_stack() if stack_info else None
+        _native.notify_metrics(method, formatted_msg, fields)
+        _native.notify_sentry(method, formatted_msg, fields, exc_info=exc_info)
+        _native.render_and_enqueue(fields, name, method, formatted_msg, stack=stack)
 
     # -- sink (handler) management ------------------------------------------
 

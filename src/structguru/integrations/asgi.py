@@ -11,9 +11,8 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, TypeAlias
 
-import structlog
-from structlog.contextvars import bind_contextvars, clear_contextvars
-
+from structguru._contextvars import bind_contextvars, clear_contextvars
+from structguru.core import Logger
 from structguru.integrations._util import coerce_request_id
 
 Scope: TypeAlias = dict[str, Any]
@@ -93,7 +92,7 @@ class StructguruMiddleware:
             **extra_context,
         )
 
-        log = structlog.get_logger(self.logger_name)
+        log = Logger(name=self.logger_name)
         start_time = time.perf_counter()
         is_websocket = scope["type"] == "websocket"
         status_code: int | None = None if is_websocket else 500

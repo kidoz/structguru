@@ -10,9 +10,10 @@ import time
 from typing import Any
 
 import requests
-import structlog
 
-_logger = structlog.get_logger("structguru.requests")
+from structguru.core import Logger
+
+_logger = Logger(name="structguru.requests")
 
 
 class StructguruRequestsSession(requests.Session):  # type: ignore[misc]

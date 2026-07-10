@@ -13,7 +13,9 @@ import warnings
 from collections import defaultdict, deque
 from typing import Any
 
-import structlog
+
+class DropEvent(Exception):
+    """Raised by processors to short-circuit the chain (sentinel, like structlog's)."""
 
 
 class SamplingProcessor:
@@ -38,7 +40,7 @@ class SamplingProcessor:
         event_dict: dict[str, Any],
     ) -> dict[str, Any]:
         if self._rate < 1.0 and random.random() > self._rate:  # noqa: S311
-            raise structlog.DropEvent
+            raise DropEvent
         return event_dict
 
 
@@ -116,7 +118,7 @@ class RateLimitingProcessor:
                 ts.popleft()
 
             if len(ts) >= self._max_count:
-                raise structlog.DropEvent
+                raise DropEvent
 
             ts.append(now)
 

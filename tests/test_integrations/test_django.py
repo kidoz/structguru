@@ -14,7 +14,7 @@ class TestBuildLoggingConfig:
     def test_returns_valid_dict(self) -> None:
         config = build_logging_config(service="myapp", level="DEBUG", json_logs=True)
         assert config["version"] == 1
-        assert "structlog" in config["formatters"]
+        assert "json" in config["formatters"]
         assert "console" in config["handlers"]
         assert config["root"]["level"] == "DEBUG"
 

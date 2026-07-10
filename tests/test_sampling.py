@@ -6,9 +6,8 @@ import time
 import warnings
 
 import pytest
-import structlog
 
-from structguru.sampling import RateLimitingProcessor, SamplingProcessor
+from structguru.sampling import DropEvent, RateLimitingProcessor, SamplingProcessor
 
 
 class TestSamplingProcessor:
@@ -20,7 +19,7 @@ class TestSamplingProcessor:
 
     def test_rate_0_drops_all(self) -> None:
         proc = SamplingProcessor(rate=0.0)
-        with pytest.raises(structlog.DropEvent):
+        with pytest.raises(DropEvent):
             proc(None, "info", {"event": "test"})
 
     def test_rate_between_0_and_1(self) -> None:
@@ -31,7 +30,7 @@ class TestSamplingProcessor:
             try:
                 proc(None, "info", {"event": "test"})
                 kept += 1
-            except structlog.DropEvent:
+            except DropEvent:
                 pass
         # With 1000 samples at 50%, we expect ~500 ± a wide margin
         assert 300 < kept < 700
@@ -65,20 +64,20 @@ class TestRateLimitingProcessor:
         proc = RateLimitingProcessor(max_count=3, period_seconds=60.0)
         for _ in range(3):
             proc(None, "info", {"event": "test"})
-        with pytest.raises(structlog.DropEvent):
+        with pytest.raises(DropEvent):
             proc(None, "info", {"event": "test"})
 
     def test_different_keys_independent(self) -> None:
         proc = RateLimitingProcessor(max_count=1, period_seconds=60.0)
         proc(None, "info", {"event": "alpha"})
         proc(None, "info", {"event": "beta"})
-        with pytest.raises(structlog.DropEvent):
+        with pytest.raises(DropEvent):
             proc(None, "info", {"event": "alpha"})
 
     def test_window_expiry(self) -> None:
         proc = RateLimitingProcessor(max_count=1, period_seconds=0.05)
         proc(None, "info", {"event": "test"})
-        with pytest.raises(structlog.DropEvent):
+        with pytest.raises(DropEvent):
             proc(None, "info", {"event": "test"})
         time.sleep(0.06)
         proc(None, "info", {"event": "test"})  # should not raise
@@ -91,7 +90,7 @@ class TestRateLimitingProcessor:
             proc(None, "info", {"message": "hello"})
             proc(None, "info", {"message": "world"})
             # Second miss on same key must NOT emit another warning.
-            with pytest.raises(structlog.DropEvent):
+            with pytest.raises(DropEvent):
                 proc(None, "info", {"message": "hello"})
 
         fallback_warnings = [w for w in caught if "falling back" in str(w.message)]
@@ -102,7 +101,7 @@ class TestRateLimitingProcessor:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             proc(None, "info", {"unrelated": "x"})
-            with pytest.raises(structlog.DropEvent):
+            with pytest.raises(DropEvent):
                 proc(None, "info", {"unrelated": "y"})
 
     def test_stale_keys_cleaned_up(self) -> None:
