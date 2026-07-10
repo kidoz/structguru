@@ -11,7 +11,8 @@ import structlog
 from loguru import logger as loguru_logger
 from structlog.stdlib import ProcessorFormatter
 
-from structguru import _native, configure_structlog, logger
+from structguru import _native, logger
+from structguru.config import configure_structlog
 
 
 def _setup_structlog_raw(stream: Any) -> Any:

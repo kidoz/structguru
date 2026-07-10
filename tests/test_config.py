@@ -44,14 +44,14 @@ class TestConfigureStructlog:
     def test_emits_deprecation_warning(self) -> None:
         with patch("structguru.config._configure"):
             with pytest.warns(DeprecationWarning, match="removed in v2.0"):
-                configure_structlog()
+                configure_structlog(stream=io.StringIO())
 
     def test_delegates_to_configure(self) -> None:
         buf = io.StringIO()
-        with patch("structguru.config._configure") as configure:
+        with patch("structguru.config._configure") as mock_configure:
             configure_structlog(service="svc", level="DEBUG", json_logs=False, stream=buf)
 
-        configure.assert_called_once_with(
+        mock_configure.assert_called_once_with(
             service="svc",
             level="DEBUG",
             json=False,

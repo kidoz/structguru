@@ -1,8 +1,7 @@
-"""Tests for the native-mode default flip (Phase 4b).
+"""Tests for the native-mode default (v1.0).
 
-Native mode is now the default (auto-enabled at import). ``configure_structlog``
-opts back into the standard structlog path (disabling native). ``STRUCTGURU_LEGACY=1``
-opts out of auto-enable entirely.
+Native mode is the default (auto-enabled at import). ``configure()`` wires the
+native renderer to a stream. ``STRUCTGURU_LEGACY=1`` opts out of auto-enable.
 """
 
 from __future__ import annotations
@@ -10,10 +9,10 @@ from __future__ import annotations
 import io
 
 import pytest
+from conftest import configure
 
 import structguru
 from structguru import _native
-from structguru.config import configure_structlog
 
 pytestmark = pytest.mark.skipif(
     not _native.native_available(),
@@ -22,9 +21,9 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_native_auto_enabled_at_import() -> None:
-    """Native mode is on by default (no configure_structlog call needed)."""
+    """Native mode is on by default (no configure call needed)."""
     # _maybe_configure_from_env() ran at import time; native should be on unless
-    # a prior test called disable_native or configure_structlog. Re-trigger.
+    # a prior test called disable_native or configure. Re-trigger.
     _native.disable_native()
     _native._maybe_configure_from_env()
     try:
@@ -52,17 +51,15 @@ def test_configure_structlog_enables_native_with_stream() -> None:
     _native.disable_native()
 
     buf = io.StringIO()
-    configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+    configure(service="test", level="DEBUG", json=True, stream=buf)
     try:
-        assert _native.is_native_enabled(), (
-            "configure_structlog should enable native with stream_sink"
-        )
+        assert _native.is_native_enabled(), "configure should enable native with stream_sink"
     finally:
         _native.disable_native()
 
 
-def test_native_logs_without_configure_structlog() -> None:
-    """Without configure_structlog, logger calls route through native natively."""
+def test_native_logs_without_configure() -> None:
+    """Without configure, logger calls route through native natively."""
     _native.configure(service="svc", target="memory", level="DEBUG")
     try:
         structguru.logger.info("native default {x}", x=1)

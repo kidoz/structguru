@@ -6,7 +6,7 @@ import io
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from structguru.config import configure_structlog
+from conftest import configure
 
 
 class TestSetupQueryLogging:
@@ -102,7 +102,7 @@ class TestSetupQueryLogging:
 
     def test_logs_slow_queries(self) -> None:
         buf = io.StringIO()
-        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+        configure(service="test", level="DEBUG", json=True, stream=buf)
 
         listeners: dict[str, Any] = {}
 

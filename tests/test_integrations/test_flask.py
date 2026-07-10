@@ -5,9 +5,9 @@ from __future__ import annotations
 import io
 
 import pytest
+from conftest import configure
 
 from structguru._contextvars import get_contextvars
-from structguru.config import configure_structlog
 from structguru.integrations.flask import setup_flask_logging
 
 flask = pytest.importorskip("flask")
@@ -36,7 +36,7 @@ def _build_app(**kwargs: object) -> flask.Flask:
 class TestSetupFlaskLogging:
     def test_generates_request_id_and_binds_context(self) -> None:
         buf = io.StringIO()
-        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+        configure(service="test", level="DEBUG", json=True, stream=buf)
 
         app = _build_app()
         client = app.test_client()
@@ -60,7 +60,7 @@ class TestSetupFlaskLogging:
 
     def test_reuses_inbound_request_id_header(self) -> None:
         buf = io.StringIO()
-        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+        configure(service="test", level="DEBUG", json=True, stream=buf)
 
         app = _build_app()
         response = app.test_client().get("/ping", headers={"X-Request-ID": "caller-123"})
@@ -73,7 +73,7 @@ class TestSetupFlaskLogging:
         assert "caller-123" in buf.getvalue()
 
     def test_rejects_malformed_inbound_id(self) -> None:
-        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=io.StringIO())
+        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
 
         app = _build_app()
         response = app.test_client().get(
@@ -87,7 +87,7 @@ class TestSetupFlaskLogging:
         assert "\x00" not in issued
 
     def test_rejects_oversized_inbound_id(self) -> None:
-        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=io.StringIO())
+        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
 
         app = _build_app()
         oversized = "a" * 129
@@ -96,7 +96,7 @@ class TestSetupFlaskLogging:
         assert response.headers["X-Request-ID"] != oversized
 
     def test_honors_custom_request_id_header(self) -> None:
-        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=io.StringIO())
+        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
 
         app = _build_app(request_id_header="X-Trace-Id")
         response = app.test_client().get("/ping", headers={"X-Trace-Id": "trace-xyz"})
@@ -106,7 +106,7 @@ class TestSetupFlaskLogging:
 
     def test_log_request_false_skips_completion_log(self) -> None:
         buf = io.StringIO()
-        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+        configure(service="test", level="DEBUG", json=True, stream=buf)
 
         app = _build_app(log_request=False)
         response = app.test_client().get("/ping")
@@ -117,7 +117,7 @@ class TestSetupFlaskLogging:
         assert "Request completed" not in buf.getvalue()
 
     def test_teardown_clears_contextvars(self) -> None:
-        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=io.StringIO())
+        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
 
         app = _build_app()
         client = app.test_client()
@@ -128,7 +128,7 @@ class TestSetupFlaskLogging:
         assert get_contextvars() == {}
 
     def test_teardown_clears_context_after_exception(self) -> None:
-        configure_structlog(service="test", level="DEBUG", json_logs=True, stream=io.StringIO())
+        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
 
         app = _build_app()
         # Let the test client surface the RuntimeError so the teardown_request

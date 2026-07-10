@@ -4,9 +4,9 @@ import io
 import json
 
 import httpx
+from conftest import configure
 from pytest_httpserver import HTTPServer
 
-from structguru.config import configure_structlog
 from structguru.integrations.httpx import StructguruHTTPXLoggingHooks
 
 
@@ -18,7 +18,7 @@ def _records(buf: io.StringIO) -> list[dict]:
 
 def test_httpx_logging_hooks_success(httpserver: HTTPServer) -> None:
     buf = io.StringIO()
-    configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+    configure(service="test", level="DEBUG", json=True, stream=buf)
     httpserver.expect_request("/test").respond_with_data("OK", status=200)
 
     client = httpx.Client(event_hooks=StructguruHTTPXLoggingHooks.get_hooks())
@@ -37,7 +37,7 @@ def test_httpx_logging_hooks_success(httpserver: HTTPServer) -> None:
 
 def test_httpx_logging_hooks_error(httpserver: HTTPServer) -> None:
     buf = io.StringIO()
-    configure_structlog(service="test", level="DEBUG", json_logs=True, stream=buf)
+    configure(service="test", level="DEBUG", json=True, stream=buf)
     httpserver.expect_request("/error").respond_with_data("Error", status=500)
 
     client = httpx.Client(event_hooks=StructguruHTTPXLoggingHooks.get_hooks())

@@ -29,10 +29,10 @@ import uuid
 from typing import Any
 
 import pytest
+from conftest import configure
 
 import structguru
 from structguru import _native
-from structguru.config import configure_structlog
 
 pytestmark = pytest.mark.skipif(
     not _native.native_available(),
@@ -54,7 +54,7 @@ def _standard_line(
     kwargs: dict[str, Any],
 ) -> str:
     buf = io.StringIO()
-    configure_structlog(service="svc", level="DEBUG", json_logs=True, stream=buf)
+    configure(service="svc", level="DEBUG", json=True, stream=buf)
     log = structguru.logger.bind(**bound) if bound else structguru.logger
     getattr(log, method)(msg, *args, **kwargs)
     return buf.getvalue().strip().splitlines()[-1]
@@ -202,7 +202,7 @@ def test_parity_contextualize() -> None:
             return capture()
 
     buf = io.StringIO()
-    configure_structlog(service="svc", level="DEBUG", json_logs=True, stream=buf)
+    configure(service="svc", level="DEBUG", json=True, stream=buf)
 
     def std() -> str:
         structguru.logger.info("ctx", extra=1)
@@ -237,7 +237,7 @@ def _exception_pair(**log_kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         exc = err
 
     buf = io.StringIO()
-    configure_structlog(service="svc", level="DEBUG", json_logs=True, stream=buf)
+    configure(service="svc", level="DEBUG", json=True, stream=buf)
     structguru.logger.error("failed", exc_info=exc, **log_kwargs)
     standard = json.loads(buf.getvalue().strip().splitlines()[-1])
 
@@ -269,7 +269,7 @@ def test_parity_exception_with_chained_cause() -> None:
         exc = err
 
     buf = io.StringIO()
-    configure_structlog(service="svc", level="DEBUG", json_logs=True, stream=buf)
+    configure(service="svc", level="DEBUG", json=True, stream=buf)
     structguru.logger.error("failed", exc_info=exc)
     standard = json.loads(buf.getvalue().strip().splitlines()[-1])
 

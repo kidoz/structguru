@@ -16,10 +16,10 @@ import uuid
 from typing import Any
 
 import pytest
+from conftest import configure
 
 import structguru
 from structguru import _native
-from structguru.config import configure_structlog
 
 pytestmark = pytest.mark.skipif(
     not _native.native_available(),
@@ -29,7 +29,7 @@ pytestmark = pytest.mark.skipif(
 
 def _standard_json(bound: dict[str, Any], method: str, msg: str, **kwargs: Any) -> dict[str, Any]:
     buf = io.StringIO()
-    configure_structlog(service="svc", level="DEBUG", json_logs=True, stream=buf)
+    configure(service="svc", level="DEBUG", json=True, stream=buf)
     log = structguru.logger.bind(**bound)
     getattr(log, method)(msg, **kwargs)
     line = buf.getvalue().strip().splitlines()[-1]
@@ -131,7 +131,7 @@ def test_native_exception_matches_structlog() -> None:
         _native.disable_native()
 
     buf = io.StringIO()
-    configure_structlog(service="svc", level="DEBUG", json_logs=True, stream=buf)
+    configure(service="svc", level="DEBUG", json=True, stream=buf)
     structguru.logger.error("failed", code=1, exc_info=exc)
     standard = json.loads(buf.getvalue().strip().splitlines()[-1])
 

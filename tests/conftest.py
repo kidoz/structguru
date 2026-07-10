@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import logging
 import sys
+from typing import Any
 
 import pytest
+
+from structguru import _native
 
 
 @pytest.fixture(autouse=True)
@@ -23,3 +26,24 @@ def _reset_logging() -> None:  # type: ignore[misc]
     root.setLevel(original_level)
     logging.setLogRecordFactory(original_factory)
     sys.excepthook = original_excepthook
+    _native.disable_native()
+
+
+def configure(
+    *,
+    service: str = "app",
+    level: str = "DEBUG",
+    json: bool = True,
+    stream: Any = None,
+) -> None:
+    """Configure native logging with a stream sink (test helper).
+
+    Replaces configure_structlog in tests: wires the native renderer to *stream*
+    so logger output is available synchronously.
+    """
+    _native.configure(
+        service=service,
+        level=level,
+        json=json,
+        stream_sink=stream,
+    )
