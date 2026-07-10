@@ -1,6 +1,7 @@
-"""structguru — a loguru-style ergonomic API for structlog."""
+"""structguru — ergonomic structured logging with a native Rust runtime."""
 
 from structguru._native import (
+    configure,
     disable_native,
     enable_native,
     native_available,
@@ -30,6 +31,7 @@ __all__ = [
     "SamplingProcessor",
     "add_otel_context",
     "add_syslog_severity",
+    "configure",
     "configure_structlog",
     "disable_native",
     "enable_native",

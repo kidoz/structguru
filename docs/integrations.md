@@ -7,9 +7,9 @@ This guide provides in-depth information on how to use `structguru` with various
 Most integrations assume you have configured `structlog` first. It's recommended to do this once at your application's entry point:
 
 ```python
-from structguru import configure_structlog
+from structguru import configure
 
-configure_structlog(service="myapp", level="INFO", json_logs=True)
+configure(service="myapp", level="INFO", json=True)
 ```
 
 ## HTTPX

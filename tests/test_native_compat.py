@@ -22,12 +22,19 @@ def _last(record_lines: list[str]) -> dict[str, Any]:
 
 
 def test_public_native_api_is_exported() -> None:
-    for name in ("enable_native", "disable_native", "set_native_level", "native_metrics"):
+    for name in (
+        "configure",
+        "enable_native",
+        "disable_native",
+        "set_native_level",
+        "native_metrics",
+    ):
         assert hasattr(structguru, name), name
+    assert structguru.enable_native is structguru.configure
 
 
-def test_public_enable_and_runtime_level_change() -> None:
-    structguru.enable_native(service="svc", target="memory", level="INFO")
+def test_public_configure_and_runtime_level_change() -> None:
+    structguru.configure(service="svc", target="memory", level="INFO")
     try:
         assert structguru.native_metrics() is not None
         structguru.set_native_level("ERROR")

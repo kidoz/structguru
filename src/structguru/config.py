@@ -13,7 +13,7 @@ import sys
 from collections.abc import Sequence
 from typing import Any
 
-from structguru._native import enable_native as _enable_native
+from structguru._native import configure as _configure
 
 
 def _to_logging_level(level_name: str) -> int:
@@ -43,6 +43,10 @@ def configure_structlog(
 ) -> None:
     """Configure the native logger.
 
+    .. deprecated:: 1.0
+        Use :func:`structguru.configure` instead. This compatibility wrapper
+        will be removed in v2.0.
+
     Since v1.0, this is a compatibility shim that wires the native Rust renderer
     to the given *stream* (via a callable sink), preserving the pre-1.0 contract
     that ``logger`` output lands on the configured stream. The native renderer
@@ -62,13 +66,22 @@ def configure_structlog(
         Kept for backward compatibility; the native path does not use root
         logger handlers.
     """
+    import warnings
+
+    warnings.warn(
+        "configure_structlog() is deprecated; use configure() instead. "
+        "It will be removed in v2.0.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     if stream is None:
         stream = sys.stdout
 
     # Wire the stream as a synchronous sink so logger output lands on it
     # immediately (preserving the pre-1.0 contract that output is available
     # right after the logger call, no flush needed).
-    _enable_native(
+    _configure(
         service=service,
         level=level,
         json=json_logs,
@@ -109,7 +122,7 @@ def setup_structlog(
     if log_path:
         kwargs["file_path"] = log_path
 
-    _enable_native(**kwargs)
+    _configure(**kwargs)
 
     for name in suppress_loggers:
         logging.getLogger(name).setLevel(logging.WARNING)

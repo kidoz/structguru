@@ -112,6 +112,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **`configure()` is now the primary logging configuration API.**
+  `enable_native()` remains as a backward-compatible alias, and
+  `configure_structlog()` delegates to `configure()`. `configure_structlog()`
+  now emits `DeprecationWarning` and will be removed in v2.0.
 - **`configure_queued_logging()` is deprecated.** It emits a `DeprecationWarning`
   and will be removed in 1.0. Native mode (`enable_native()`) already offloads
   log I/O to a background thread, making the `QueueHandler`/`QueueListener`

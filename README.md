@@ -54,10 +54,10 @@ Available extras: `otel`, `celery`, `flask`, `django`, `sqlalchemy`, `grpc`, `se
 ## Quick start
 
 ```python
-from structguru import logger, configure_structlog
+from structguru import configure, logger
 
 # Configure once at startup
-configure_structlog(service="myapp", level="DEBUG", json_logs=True)
+configure(service="myapp", level="DEBUG", json=True)
 
 # Use anywhere
 logger.info("Hello {name}", name="world")
@@ -161,11 +161,11 @@ setup_structlog(
 
 ```python
 # JSON (production)
-configure_structlog(service="myapp", json_logs=True)
+configure(service="myapp", json=True)
 # → {"timestamp": "...", "service": "myapp", "level": "INFO", "message": "..."}
 
 # Console (development) — colored, human-readable
-configure_structlog(service="myapp", json_logs=False)
+configure(service="myapp", json=False)
 # → 2025-01-15 12:00:00 [info     ] Hello world
 ```
 
@@ -268,31 +268,33 @@ structguru.logger.info("order {id} accepted", id=987)
 # → JSON line written to stdout by a background writer thread
 ```
 
-To opt back into the standard structlog path (pre-v0.4 behavior), either call
-`configure_structlog(...)` (which sets up the structlog pipeline and disables
-native) or set the `STRUCTGURU_LEGACY=1` environment variable. You can also
-fine-tune the native path explicitly:
+No configuration is required for the default JSON-to-stdout behavior. Call
+`configure(...)` to customize the renderer, filtering, or sinks.
+`configure_structlog(...)` remains as a deprecated compatibility wrapper for
+its simpler service/level/format/stream interface and will be removed in v2.0.
 
 ```python
 import structguru
 
-structguru.enable_native(service="myapp", level="INFO", file_path="/var/log/app.log")  # reconfigure
+structguru.configure(service="myapp", level="INFO", file_path="/var/log/app.log")
 structguru.logger.bind(request_id="abc").info("order {id} accepted", id=987)
 # → JSON line written to stdout by a background writer thread
 ```
 
-Or enable it from the environment (12-factor):
+The default import-time configuration also honors environment variables:
 
 ```bash
-STRUCTGURU_NATIVE=1 LOG_LEVEL=INFO python -m myapp
+LOG_LEVEL=INFO STRUCTGURU_SERVICE=myapp python -m myapp
 ```
 
 Public API:
 
 | Symbol | Purpose |
 |--------|---------|
-| `enable_native(*, service="app", maxsize=0, target="stdout", overflow="block", level="INFO", otel=False, sensitive_keys=None, sensitive_patterns=None, pattern_replacement="[REDACTED]", sample_rate=1.0, sample_max_level=None, rate_limit_max=None, rate_limit_period=60.0, metric_processor=None, structured_exceptions=False, exception_include_locals=False, exception_max_frames=20, exception_max_local_repr=200, json=True, colors=None, file_path=None, file_max_bytes=52428800, file_backup_count=5, also_stdout=False, callable_sinks=None)` | Turn native mode on. |
-| `disable_native()` | Turn it off and stop the background writer. |
+| `configure(*, service="app", maxsize=0, target="stdout", overflow="block", level="INFO", otel=False, sensitive_keys=None, sensitive_patterns=None, pattern_replacement="[REDACTED]", sample_rate=1.0, sample_max_level=None, rate_limit_max=None, rate_limit_period=60.0, metric_processor=None, sentry_processor=None, structured_exceptions=False, exception_include_locals=False, exception_max_frames=20, exception_max_local_repr=200, json=True, colors=None, file_path=None, file_max_bytes=52428800, file_backup_count=5, also_stdout=False, callable_sinks=None, stream_sink=None)` | Configure or reconfigure logging. |
+| `enable_native(...)` | Backward-compatible alias for `configure(...)`. |
+| `configure_structlog(...)` | Deprecated compatibility wrapper; use `configure()`. Removed in v2.0. |
+| `disable_native()` | Stop the writer; logging is disabled until `configure()` is called. |
 | `set_native_level(level)` | Adjust the level threshold at runtime. |
 | `native_metrics()` | Writer counters (enqueued/written/dropped/depth/...) plus filter counters (`sampled`/`rate_limited`) when active. |
 | `native_available()` | Whether the compiled extension is importable. |
@@ -300,7 +302,7 @@ Public API:
 Behavior notes:
 
 - **Overflow**: `maxsize=0` is unbounded; a positive `maxsize` uses `overflow="block"` (backpressure, no loss — the default) or `overflow="drop"` (drop-newest + counted, rate-limited warning).
-- **Redaction, level filtering, exceptions, and OpenTelemetry** injection are supported natively; `sensitive_keys` overrides the default redaction keys. `sensitive_patterns` adds regex value-pattern redaction (applied to every string value). Rust's `regex` engine guarantees linear-time matching (no ReDoS) and therefore rejects backreferences and look-around: an unsupported pattern raises `ValueError` at `enable_native()` time. Rewrite look-around with a capture group instead: `pattern_replacement` supports group expansion (`$1`, `${name}`; `$$` for a literal `$`), so `(?<=password=)\S+` becomes pattern `(password=)\S+` with `pattern_replacement="$1[REDACTED]"` — same output, linear-time engine.
+- **Redaction, level filtering, exceptions, and OpenTelemetry** injection are supported natively; `sensitive_keys` overrides the default redaction keys. `sensitive_patterns` adds regex value-pattern redaction (applied to every string value). Rust's `regex` engine guarantees linear-time matching (no ReDoS) and therefore rejects backreferences and look-around: an unsupported pattern raises `ValueError` at `configure()` time. Rewrite look-around with a capture group instead: `pattern_replacement` supports group expansion (`$1`, `${name}`; `$$` for a literal `$`), so `(?<=password=)\S+` becomes pattern `(password=)\S+` with `pattern_replacement="$1[REDACTED]"` — same output, linear-time engine.
 - **Sampling & rate limiting** (`sample_rate`, `rate_limit_max`, `rate_limit_period`) are applied as native pre-render filters — dropped records cost zero rendering. `sampled` and `rate_limited` counters are distinct from the transport `dropped` counter. `sample_max_level` restricts sampling to records at or below that level (more severe records always pass) — the native analog of `ConditionalProcessor(SamplingProcessor(...), max_level=...)`.
 - **Metric hooks** (`metric_processor=...`) invoke a structlog-style processor (e.g. `MetricProcessor`) for every *kept* record on the caller's thread, with `(None, method, {"event": message, **fields})`. Dropped records (level/sampling/rate-limit) never reach it; hook errors are swallowed.
 - **Fork/shutdown safe** — the writer is flushed on exit and respawned in forked children (gunicorn/celery prefork).
@@ -309,7 +311,7 @@ Behavior notes:
 - **Console mode** (`json=False`): renders colored, human-readable lines instead of JSON — structguru's own stable dev format (`<timestamp> [<LEVEL>] <message>  k=v`), with ANSI colors by default on a TTY. Override with `colors=True/False`.
 - **File sinks** (`file_path=...`): write to a rotating file natively. Defaults mirror `RotatingFileHandler` (50 MB, 5 backups); configure via `file_max_bytes`/`file_backup_count`. Set `also_stdout=True` to mirror output to both file and stdout (e.g. container + persistent log).
 - **Callable sinks** (`callable_sinks=[fn, ...]`): invoke `Callable[[str], None]` with each rendered line. They run on a dedicated daemon thread (never the Rust writer, which must not touch the GIL), so a blocking callable cannot deadlock the logging path. Callable errors are swallowed.
-- **Sentry integration** (`sentry_processor=SentryProcessor(...)`): pass the processor via `enable_native` instead of the structlog processor chain. It runs per kept record on the caller's thread with the same `require_redaction` guard; the hook injects `REDACTED_MARKER_KEY` when redaction is configured so the guard recognizes native Rust redaction.
+- **Sentry integration** (`sentry_processor=SentryProcessor(...)`): pass the processor via `configure()` instead of a processor chain. It runs per kept record on the caller's thread with the same `require_redaction` guard; the hook injects `REDACTED_MARKER_KEY` when redaction is configured so the guard recognizes native Rust redaction.
 - **Scope**: the native renderer covers JSON and console rendering, file/stdout/callable sinks, and all processors (redaction/sampling/rate-limit/metrics/exceptions/stack_info). `logger.add()`/`logger.remove()` manage stdlib handlers for third-party consumers; native-mode logs bypass stdlib.
 
 ## Framework integrations

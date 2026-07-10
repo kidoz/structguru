@@ -53,10 +53,10 @@ Available extras: `otel`, `celery`, `flask`, `django`, `sqlalchemy`, `grpc`, `se
 ## Quick start
 
 ```python
-from structguru import logger, configure_structlog
+from structguru import configure, logger
 
 # Configure once at startup
-configure_structlog(service="myapp", level="DEBUG", json_logs=True)
+configure(service="myapp", level="DEBUG", json=True)
 
 # Use anywhere
 logger.info("Hello {name}", name="world")
@@ -160,11 +160,11 @@ setup_structlog(
 
 ```python
 # JSON (production)
-configure_structlog(service="myapp", json_logs=True)
+configure(service="myapp", json=True)
 # → {"timestamp": "...", "service": "myapp", "level": "INFO", "message": "..."}
 
 # Console (development) — colored, human-readable
-configure_structlog(service="myapp", json_logs=False)
+configure(service="myapp", json=False)
 # → 2025-01-15 12:00:00 [info     ] Hello world
 ```
 

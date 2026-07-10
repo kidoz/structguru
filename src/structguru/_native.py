@@ -1,10 +1,9 @@
-"""Import-time safe access to the optional native extension.
+"""Native extension access and logging runtime configuration.
 
-Also owns the experimental native render/enqueue fast path used by
-:class:`structguru.core.Logger` when native mode is enabled.  The path is
-opt-in via :func:`enable_native` and covers the common non-exception case:
-brace-formatted message + structured fields are redacted and rendered to JSON
-in Rust, then handed to a background writer thread (off-thread I/O).
+Also owns the native render/enqueue path used by :class:`structguru.core.Logger`.
+Use :func:`configure` to customize rendering, filtering, and sinks. Structured
+fields are redacted and rendered in Rust, then handed to a background writer
+thread for off-thread I/O.
 """
 
 from __future__ import annotations
@@ -349,7 +348,7 @@ def format_exception(exc_info: Any) -> str:
     return "".join(traceback.format_exception(type(exc_value), exc_value, tb)).rstrip("\n")
 
 
-def enable_native(
+def configure(
     *,
     service: str = "app",
     maxsize: int = 0,
@@ -379,7 +378,7 @@ def enable_native(
     callable_sinks: list[Callable[[str], None]] | None = None,
     stream_sink: Any = None,
 ) -> None:
-    """Route the common log path through the native renderer + writer.
+    """Configure the native renderer and background writer.
 
     ``target`` selects the background writer's sink: ``"stdout"`` (default,
     12-factor) or ``"memory"`` (records lines for inspection/tests).
@@ -566,6 +565,10 @@ def enable_native(
     if _callable_sinks:
         _start_dispatch_thread()
     _register_lifecycle_hooks()
+
+
+# Backward-compatible alias retained for pre-1.0 callers.
+enable_native = configure
 
 
 def _register_lifecycle_hooks() -> None:
@@ -807,11 +810,11 @@ def native_metrics() -> dict[str, Any] | None:
 
 
 def _maybe_enable_from_env() -> None:
-    """Auto-enable native mode at import time (the default since v0.4.0).
+    """Auto-configure native mode at import time (the default since v1.0).
 
-    Set ``STRUCTGURU_LEGACY=1`` to opt out and use the standard structlog path
-    (the pre-0.4 default). ``STRUCTGURU_NATIVE`` is now a no-op (deprecated) —
-    native is on by default.
+    Set ``STRUCTGURU_LEGACY=1`` to skip import-time configuration. Logging then
+    remains disabled until :func:`configure` is called. ``STRUCTGURU_NATIVE`` is
+    a no-op retained for compatibility because native logging is the only path.
 
     Honors ``LOG_LEVEL``, ``STRUCTGURU_SERVICE``, ``STRUCTGURU_NATIVE_TARGET``,
     ``STRUCTGURU_NATIVE_SAMPLE_RATE`` (float 0.0–1.0), and
@@ -838,7 +841,7 @@ def _maybe_enable_from_env() -> None:
             kwargs["rate_limit_max"] = int(max_str)
             if period_str:
                 kwargs["rate_limit_period"] = float(period_str)
-        enable_native(**kwargs)
+        configure(**kwargs)
     except Exception:  # pragma: no cover - defensive: never fail import on env config
         pass
 
