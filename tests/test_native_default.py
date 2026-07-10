@@ -23,10 +23,10 @@ pytestmark = pytest.mark.skipif(
 
 def test_native_auto_enabled_at_import() -> None:
     """Native mode is on by default (no configure_structlog call needed)."""
-    # _maybe_enable_from_env() ran at import time; native should be on unless
+    # _maybe_configure_from_env() ran at import time; native should be on unless
     # a prior test called disable_native or configure_structlog. Re-trigger.
     _native.disable_native()
-    _native._maybe_enable_from_env()
+    _native._maybe_configure_from_env()
     try:
         assert _native.is_native_enabled()
     finally:
@@ -39,7 +39,7 @@ def test_structguru_legacy_env_disables_native(
     """STRUCTGURU_LEGACY=1 opts out of native auto-enable."""
     monkeypatch.setenv("STRUCTGURU_LEGACY", "1")
     _native.disable_native()
-    _native._maybe_enable_from_env()
+    _native._maybe_configure_from_env()
     try:
         assert not _native.is_native_enabled()
     finally:
@@ -63,7 +63,7 @@ def test_configure_structlog_enables_native_with_stream() -> None:
 
 def test_native_logs_without_configure_structlog() -> None:
     """Without configure_structlog, logger calls route through native natively."""
-    _native.enable_native(service="svc", target="memory", level="DEBUG")
+    _native.configure(service="svc", target="memory", level="DEBUG")
     try:
         structguru.logger.info("native default {x}", x=1)
         _native.flush_native()

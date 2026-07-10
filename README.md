@@ -292,7 +292,6 @@ Public API:
 | Symbol | Purpose |
 |--------|---------|
 | `configure(*, service="app", maxsize=0, target="stdout", overflow="block", level="INFO", otel=False, sensitive_keys=None, sensitive_patterns=None, pattern_replacement="[REDACTED]", sample_rate=1.0, sample_max_level=None, rate_limit_max=None, rate_limit_period=60.0, metric_processor=None, sentry_processor=None, structured_exceptions=False, exception_include_locals=False, exception_max_frames=20, exception_max_local_repr=200, json=True, colors=None, file_path=None, file_max_bytes=52428800, file_backup_count=5, also_stdout=False, callable_sinks=None, stream_sink=None)` | Configure or reconfigure logging. |
-| `enable_native(...)` | Backward-compatible alias for `configure(...)`. |
 | `configure_structlog(...)` | Deprecated compatibility wrapper; use `configure()`. Removed in v2.0. |
 | `disable_native()` | Stop the writer; logging is disabled until `configure()` is called. |
 | `set_native_level(level)` | Adjust the level threshold at runtime. |

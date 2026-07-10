@@ -1,6 +1,6 @@
 """Native-path Sentry hook tests.
 
-Verifies the ``enable_native(sentry_processor=...)`` hook: a structlog-style
+Verifies the ``configure(sentry_processor=...)`` hook: a structlog-style
 processor invoked per kept record on the caller's thread, mirroring
 ``metric_processor`` but passing raw ``exc_info`` for exception capture.
 """
@@ -33,7 +33,7 @@ def test_sentry_hook_invoked_per_kept_record() -> None:
         calls.append((_logger, method, event_dict))
         return event_dict
 
-    _native.enable_native(service="svc", target="memory", level="DEBUG", sentry_processor=hook)
+    _native.configure(service="svc", target="memory", level="DEBUG", sentry_processor=hook)
     try:
         structguru.logger.info("first", request_id="r1")
         structguru.logger.error("second", code=500)
@@ -58,7 +58,7 @@ def test_sentry_hook_receives_raw_exc_info() -> None:
         captured.append(event_dict.get("exc_info"))
         return event_dict
 
-    _native.enable_native(service="svc", target="memory", level="DEBUG", sentry_processor=hook)
+    _native.configure(service="svc", target="memory", level="DEBUG", sentry_processor=hook)
     try:
         structguru.logger.error("failed", exc_info=err)
         _drain_all()
@@ -76,7 +76,7 @@ def test_sentry_hook_not_invoked_for_dropped_records() -> None:
         calls.append(event_dict)
         return event_dict
 
-    _native.enable_native(
+    _native.configure(
         service="svc",
         target="memory",
         level="DEBUG",
@@ -99,7 +99,7 @@ def test_sentry_hook_not_invoked_for_level_filtered() -> None:
         calls.append(event_dict)
         return event_dict
 
-    _native.enable_native(
+    _native.configure(
         service="svc",
         target="memory",
         level="WARNING",  # INFO is below threshold
@@ -120,7 +120,7 @@ def test_sentry_hook_errors_are_swallowed() -> None:
     def bad_hook(_logger: Any, method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("sentry hook boom")
 
-    _native.enable_native(service="svc", target="memory", level="DEBUG", sentry_processor=bad_hook)
+    _native.configure(service="svc", target="memory", level="DEBUG", sentry_processor=bad_hook)
     try:
         # Must not raise — the record is still rendered and enqueued.
         structguru.logger.info("survives")
@@ -147,9 +147,7 @@ def test_sentry_hook_with_real_sentry_processor() -> None:
     err = RuntimeError("production failure")
     processor = SentryProcessor(event_level=40, require_redaction=False)
 
-    _native.enable_native(
-        service="svc", target="memory", level="DEBUG", sentry_processor=processor
-    )
+    _native.configure(service="svc", target="memory", level="DEBUG", sentry_processor=processor)
     try:
         with patch.object(sentry_mod, "_sentry_sdk", mock_sentry):
             structguru.logger.error("something broke", exc_info=err)
@@ -162,7 +160,7 @@ def test_sentry_hook_with_real_sentry_processor() -> None:
 
 def test_non_callable_sentry_processor_raises() -> None:
     with pytest.raises(TypeError, match="sentry_processor"):
-        _native.enable_native(sentry_processor="not callable")  # type: ignore[arg-type]
+        _native.configure(sentry_processor="not callable")  # type: ignore[arg-type]
     assert not _native.is_native_enabled()
 
 
@@ -177,7 +175,7 @@ def test_sentry_hook_injects_redaction_marker_when_redaction_configured() -> Non
         captured.append(event_dict)
         return event_dict
 
-    _native.enable_native(
+    _native.configure(
         service="svc",
         target="memory",
         level="DEBUG",

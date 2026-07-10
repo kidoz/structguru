@@ -18,7 +18,7 @@ pytestmark = pytest.mark.skipif(
 
 def test_close_drains_buffered_records() -> None:
     """flush() must drain queued records to the sink before they are read."""
-    _native.enable_native(service="svc", target="memory")
+    _native.configure(service="svc", target="memory")
     try:
         structguru.logger.info("last message")
         _native.flush_native()
@@ -28,7 +28,7 @@ def test_close_drains_buffered_records() -> None:
 
 
 def test_metrics_track_enqueue_and_write() -> None:
-    _native.enable_native(service="svc", target="memory")
+    _native.configure(service="svc", target="memory")
     try:
         for _ in range(5):
             structguru.logger.info("m")
@@ -44,7 +44,7 @@ def test_metrics_track_enqueue_and_write() -> None:
 
 def test_block_overflow_never_drops_under_backpressure() -> None:
     """A small bounded queue in block mode must apply backpressure, not drop."""
-    _native.enable_native(service="svc", target="memory", maxsize=4, overflow="block")
+    _native.configure(service="svc", target="memory", maxsize=4, overflow="block")
     try:
         for _ in range(200):
             structguru.logger.info("m")
@@ -72,7 +72,7 @@ def test_native_writer_survives_fork() -> None:
     child tried to use or join it, this test would hang (caught by the select
     timeout). The registered ``after_in_child`` hook must swap in a fresh writer.
     """
-    _native.enable_native(service="svc", target="memory")
+    _native.configure(service="svc", target="memory")
     try:
         structguru.logger.info("parent log")
         read_fd, write_fd = os.pipe()

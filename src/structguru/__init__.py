@@ -3,7 +3,6 @@
 from structguru._native import (
     configure,
     disable_native,
-    enable_native,
     native_available,
     native_metrics,
     set_native_level,
@@ -34,7 +33,6 @@ __all__ = [
     "configure",
     "configure_structlog",
     "disable_native",
-    "enable_native",
     "logger",
     "native_available",
     "native_metrics",

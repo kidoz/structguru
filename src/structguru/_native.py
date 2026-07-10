@@ -567,10 +567,6 @@ def configure(
     _register_lifecycle_hooks()
 
 
-# Backward-compatible alias retained for pre-1.0 callers.
-enable_native = configure
-
-
 def _register_lifecycle_hooks() -> None:
     """Register atexit + fork handlers exactly once."""
     global _hooks_registered
@@ -809,7 +805,7 @@ def native_metrics() -> dict[str, Any] | None:
     return metrics
 
 
-def _maybe_enable_from_env() -> None:
+def _maybe_configure_from_env() -> None:
     """Auto-configure native mode at import time (the default since v1.0).
 
     Set ``STRUCTGURU_LEGACY=1`` to skip import-time configuration. Logging then
@@ -846,4 +842,4 @@ def _maybe_enable_from_env() -> None:
         pass
 
 
-_maybe_enable_from_env()
+_maybe_configure_from_env()

@@ -31,7 +31,7 @@ def test_file_sink_writes_records_to_file() -> None:
         path = f.name
     os.unlink(path)  # let the sink create it
     try:
-        _native.enable_native(service="svc", target="memory", level="DEBUG", file_path=path)
+        _native.configure(service="svc", target="memory", level="DEBUG", file_path=path)
         try:
             structguru.logger.info("file sink test", request_id="r1")
             _native.flush_native()
@@ -53,7 +53,7 @@ def test_file_sink_rotates_at_max_bytes() -> None:
     os.unlink(path)
     try:
         # Tiny max_bytes so rotation triggers quickly; backup_count=3.
-        _native.enable_native(
+        _native.configure(
             service="svc",
             target="memory",
             level="DEBUG",
@@ -94,7 +94,7 @@ def test_file_sink_and_stdout_both_receive() -> None:
         path = f.name
     os.unlink(path)
     try:
-        _native.enable_native(
+        _native.configure(
             service="svc",
             target="memory",
             level="DEBUG",
@@ -125,9 +125,7 @@ def test_callable_sink_receives_rendered_lines() -> None:
         with lock:
             received.append(line)
 
-    _native.enable_native(
-        service="svc", target="memory", level="DEBUG", callable_sinks=[collector]
-    )
+    _native.configure(service="svc", target="memory", level="DEBUG", callable_sinks=[collector])
     try:
         for i in range(5):
             structguru.logger.info("callable {n}", n=i)
@@ -152,7 +150,7 @@ def test_callable_sink_errors_are_swallowed() -> None:
         with lock:
             good.append(line)
 
-    _native.enable_native(
+    _native.configure(
         service="svc",
         target="memory",
         level="DEBUG",
@@ -176,9 +174,7 @@ def test_callable_sink_stopped_on_disable() -> None:
         with lock:
             received.append(line)
 
-    _native.enable_native(
-        service="svc", target="memory", level="DEBUG", callable_sinks=[collector]
-    )
+    _native.configure(service="svc", target="memory", level="DEBUG", callable_sinks=[collector])
     structguru.logger.info("before disable")
     _native.flush_native()
     time.sleep(0.2)
@@ -193,7 +189,7 @@ def test_callable_sink_stopped_on_disable() -> None:
 
 def test_non_callable_sink_raises() -> None:
     with pytest.raises(TypeError, match="callable_sinks"):
-        _native.enable_native(callable_sinks=["not callable"])  # type: ignore[list-item]
+        _native.configure(callable_sinks=["not callable"])  # type: ignore[list-item]
     assert not _native.is_native_enabled()
 
 
@@ -206,7 +202,7 @@ def _drain_last_line() -> str:
 
 
 def test_console_renderer_human_readable_no_colors() -> None:
-    _native.enable_native(service="svc", target="memory", level="DEBUG", json=False, colors=False)
+    _native.configure(service="svc", target="memory", level="DEBUG", json=False, colors=False)
     try:
         structguru.logger.info("hello {name}", name="world", count=3)
         line = _drain_last_line()
@@ -221,7 +217,7 @@ def test_console_renderer_human_readable_no_colors() -> None:
 
 
 def test_console_renderer_applies_colors() -> None:
-    _native.enable_native(service="svc", target="memory", level="DEBUG", json=False, colors=True)
+    _native.configure(service="svc", target="memory", level="DEBUG", json=False, colors=True)
     try:
         structguru.logger.error("boom")
         line = _drain_last_line()
@@ -234,7 +230,7 @@ def test_console_renderer_applies_colors() -> None:
 
 
 def test_console_renderer_redacts_sensitive_keys() -> None:
-    _native.enable_native(service="svc", target="memory", level="DEBUG", json=False, colors=False)
+    _native.configure(service="svc", target="memory", level="DEBUG", json=False, colors=False)
     try:
         structguru.logger.info("login", password="hunter2", user="alice")
         line = _drain_last_line()
@@ -247,7 +243,7 @@ def test_console_renderer_redacts_sensitive_keys() -> None:
 
 
 def test_console_renderer_warn_level_uses_yellow() -> None:
-    _native.enable_native(service="svc", target="memory", level="DEBUG", json=False, colors=True)
+    _native.configure(service="svc", target="memory", level="DEBUG", json=False, colors=True)
     try:
         structguru.logger.warning("careful")
         line = _drain_last_line()

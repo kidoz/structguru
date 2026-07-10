@@ -67,7 +67,7 @@ def _native_line(
     bound: dict[str, Any],
     kwargs: dict[str, Any],
 ) -> str:
-    _native.enable_native(service="svc", target="memory", level="DEBUG")
+    _native.configure(service="svc", target="memory", level="DEBUG")
     try:
         log = structguru.logger.bind(**bound) if bound else structguru.logger
         getattr(log, method)(msg, *args, **kwargs)
@@ -210,7 +210,7 @@ def test_parity_contextualize() -> None:
 
     standard = run(std)
 
-    _native.enable_native(service="svc", target="memory", level="DEBUG")
+    _native.configure(service="svc", target="memory", level="DEBUG")
     try:
 
         def nat() -> str:
@@ -241,7 +241,7 @@ def _exception_pair(**log_kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     structguru.logger.error("failed", exc_info=exc, **log_kwargs)
     standard = json.loads(buf.getvalue().strip().splitlines()[-1])
 
-    _native.enable_native(service="svc", target="memory", level="DEBUG")
+    _native.configure(service="svc", target="memory", level="DEBUG")
     try:
         structguru.logger.error("failed", exc_info=exc, **log_kwargs)
         _native.flush_native()
@@ -273,7 +273,7 @@ def test_parity_exception_with_chained_cause() -> None:
     structguru.logger.error("failed", exc_info=exc)
     standard = json.loads(buf.getvalue().strip().splitlines()[-1])
 
-    _native.enable_native(service="svc", target="memory", level="DEBUG")
+    _native.configure(service="svc", target="memory", level="DEBUG")
     try:
         structguru.logger.error("failed", exc_info=exc)
         _native.flush_native()
@@ -289,7 +289,7 @@ def test_parity_exception_with_chained_cause() -> None:
 
 
 def _native_structured_exception(exc: BaseException, **enable_kwargs: Any) -> dict[str, Any]:
-    _native.enable_native(
+    _native.configure(
         service="svc",
         target="memory",
         level="DEBUG",
@@ -427,7 +427,7 @@ def test_parity_structured_exception_custom_sensitive_keys() -> None:
 
 
 def test_parity_stack_info_handled_natively() -> None:
-    _native.enable_native(service="svc", target="memory", level="DEBUG")
+    _native.configure(service="svc", target="memory", level="DEBUG")
     try:
         structguru.logger.info("where am I", stack_info=True)
         _native.flush_native()
@@ -448,7 +448,7 @@ def test_parity_stack_info_handled_natively() -> None:
 
 
 def test_parity_stack_info_via_opt() -> None:
-    _native.enable_native(service="svc", target="memory", level="DEBUG")
+    _native.configure(service="svc", target="memory", level="DEBUG")
     try:
         structguru.logger.opt(stack_info=True).warning("careful")
         _native.flush_native()

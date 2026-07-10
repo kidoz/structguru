@@ -137,7 +137,7 @@ fn render_line(
 
 /// Compiled redaction patterns held across calls to avoid per-record recompilation.
 ///
-/// Built once at `enable_native()` time and passed to `render_line_with_config`
+/// Built once at `configure()` time and passed to `render_line_with_config`
 /// on the hot path. If a pattern fails to compile, construction raises
 /// `ValueError` so the Python bridge can fall back to the standard path.
 #[pyclass(name = "RedactionConfig")]

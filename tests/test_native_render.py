@@ -37,7 +37,7 @@ def _standard_json(bound: dict[str, Any], method: str, msg: str, **kwargs: Any) 
 
 
 def _native_json(bound: dict[str, Any], method: str, msg: str, **kwargs: Any) -> dict[str, Any]:
-    _native.enable_native(service="svc", target="memory", level="DEBUG")
+    _native.configure(service="svc", target="memory", level="DEBUG")
     try:
         log = structguru.logger.bind(**bound)
         getattr(log, method)(msg, **kwargs)
@@ -122,7 +122,7 @@ def test_native_exception_matches_structlog() -> None:
     except ValueError as err:
         exc = err
 
-    _native.enable_native(service="svc", target="memory", level="DEBUG")
+    _native.configure(service="svc", target="memory", level="DEBUG")
     try:
         structguru.logger.error("failed", code=1, exc_info=exc)
         _native.flush_native()
@@ -141,7 +141,7 @@ def test_native_exception_matches_structlog() -> None:
 
 
 def test_native_level_filtering_drops_below_threshold() -> None:
-    _native.enable_native(service="svc", target="memory", level="WARNING")
+    _native.configure(service="svc", target="memory", level="WARNING")
     try:
         structguru.logger.info("dropped")
         structguru.logger.warning("kept")
@@ -164,7 +164,7 @@ def test_native_reserved_key_collision_matches_structlog() -> None:
 
 
 def test_native_custom_sensitive_keys() -> None:
-    _native.enable_native(service="svc", target="memory", sensitive_keys=["secret_sauce"])
+    _native.configure(service="svc", target="memory", sensitive_keys=["secret_sauce"])
     try:
         structguru.logger.info("m", secret_sauce="x", ssn="123")
         _native.flush_native()

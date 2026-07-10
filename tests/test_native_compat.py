@@ -24,13 +24,12 @@ def _last(record_lines: list[str]) -> dict[str, Any]:
 def test_public_native_api_is_exported() -> None:
     for name in (
         "configure",
-        "enable_native",
         "disable_native",
         "set_native_level",
         "native_metrics",
     ):
         assert hasattr(structguru, name), name
-    assert structguru.enable_native is structguru.configure
+    assert not hasattr(structguru, "enable_native")
 
 
 def test_public_configure_and_runtime_level_change() -> None:
@@ -49,7 +48,7 @@ def test_public_configure_and_runtime_level_change() -> None:
 
 
 def test_native_honors_bind_and_contextualize() -> None:
-    structguru.enable_native(service="svc", target="memory", level="DEBUG")
+    structguru.configure(service="svc", target="memory", level="DEBUG")
     try:
         with structguru.logger.contextualize(request_id="r1"):
             structguru.logger.bind(user="alice").info("hi")
@@ -64,7 +63,7 @@ def test_native_honors_bind_and_contextualize() -> None:
 def test_native_picks_up_integration_contextvars() -> None:
     """Integrations (asgi/flask/django/celery/grpc) bind via contextvars — the
     native path must snapshot them, so all of them work under native mode."""
-    structguru.enable_native(service="svc", target="memory", level="DEBUG")
+    structguru.configure(service="svc", target="memory", level="DEBUG")
     clear_contextvars()
     try:
         bind_contextvars(request_id="req-9", method="GET")
@@ -84,7 +83,7 @@ def test_env_var_auto_enable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
     _native.disable_native()
     try:
-        _native._maybe_enable_from_env()
+        _native._maybe_configure_from_env()
         assert _native.is_native_enabled()
     finally:
         _native.disable_native()

@@ -160,7 +160,7 @@ _needs_native = pytest.mark.skipif(
 @_needs_native
 def test_bench_structguru_native_simple(benchmark: Any) -> None:
     """Benchmark structguru simple info log on the native path (stdout sink)."""
-    _native.enable_native(service="app", target="stdout")
+    _native.configure(service="app", target="stdout")
     try:
 
         @benchmark
@@ -174,7 +174,7 @@ def test_bench_structguru_native_simple(benchmark: Any) -> None:
 @_needs_native
 def test_bench_structguru_native_formatting(benchmark: Any) -> None:
     """Benchmark structguru brace formatting on the native path."""
-    _native.enable_native(service="app", target="stdout")
+    _native.configure(service="app", target="stdout")
     try:
 
         @benchmark
@@ -188,7 +188,7 @@ def test_bench_structguru_native_formatting(benchmark: Any) -> None:
 @_needs_native
 def test_bench_structguru_native_bind(benchmark: Any) -> None:
     """Benchmark structguru context binding on the native path."""
-    _native.enable_native(service="app", target="stdout")
+    _native.configure(service="app", target="stdout")
     bound_logger = logger.bind(request_id="12345", user_id=42)
     try:
 

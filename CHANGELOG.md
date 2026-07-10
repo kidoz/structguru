@@ -12,9 +12,9 @@ All notable changes to this project are documented here. The format is based on
   is the only rendering path. The wheel ships with zero runtime dependencies
   (only optional integration extras). `configure_structlog()` is now a
   compatibility shim that wires the native renderer to the configured stream.
-- **Native mode is always-on** (no `enable_native()` call needed). It auto-enables
+- **Native mode is always-on** (no `configure()` call needed). It auto-enables
   at import time. Set `STRUCTGURU_LEGACY=1` to opt out.
-- **`configure_queued_logging()` removed.** Use `enable_native()` (already the
+- **`configure_queued_logging()` removed.** Use `configure()` (already the
   default) for off-thread I/O.
 - **`InterceptHandler` removed** (`integrations/stdlib.py`). Foreign stdlib
   records go through stdlib's own logging; native mode does not intercept them.
@@ -50,41 +50,41 @@ All notable changes to this project are documented here. The format is based on
   raise `TypeError`, matching the orjson rejection contract. The `Value::Raw`
   reverse path uses `json.loads` (stdlib) instead of `orjson.loads`.
 - **Native mode is now the default.** The Rust renderer is auto-enabled at import
-  time (no `enable_native()` call needed). `configure_structlog()` opts back into
+  time (no `configure()` call needed). `configure_structlog()` opts back into
   the standard structlog path (disabling native, so output lands on the configured
   stream). Set `STRUCTGURU_LEGACY=1` to opt out of auto-enable entirely. The
   `STRUCTGURU_NATIVE` env var is now a no-op (deprecated).
-- **Native Sentry integration.** `enable_native(sentry_processor=...)` invokes a
+- **Native Sentry integration.** `configure(sentry_processor=...)` invokes a
   structlog-style processor (e.g. `SentryProcessor`) for every kept record on
   the caller's thread, mirroring the `metric_processor` hook. The raw `exc_info`
   is passed so `_resolve_exception` works; when redaction is configured
   (`sensitive_keys`/`sensitive_patterns`), the hook injects
   `REDACTED_MARKER_KEY` so the processor's `require_redaction` guard recognizes
   that native Rust redaction already ran. `SentryProcessor` itself is unchanged.
-- **Native rotating-file sink.** `enable_native(file_path=...)` writes rendered
+- **Native rotating-file sink.** `configure(file_path=...)` writes rendered
   lines to a rotating file natively (append mode, size-based rotation). Defaults
   mirror `logging.handlers.RotatingFileHandler` (50 MB, 5 backups); configure via
   `file_max_bytes`/`file_backup_count`. Set `also_stdout=True` to mirror output
   to both file and stdout.
-- **Native callable sinks.** `enable_native(callable_sinks=[fn, ...])` invokes
+- **Native callable sinks.** `configure(callable_sinks=[fn, ...])` invokes
   `Callable[[str], None]` with each rendered line. They run on a dedicated
   daemon thread (never the Rust writer, which must not touch the GIL), so a
   blocking callable cannot deadlock the logging path. Callable errors are
   swallowed.
-- **Native console renderer.** `enable_native(json=False)` renders colored,
+- **Native console renderer.** `configure(json=False)` renders colored,
   human-readable lines instead of JSON — structguru's own stable dev format
   (`<timestamp> [<LEVEL>] <message>  k=v`), with ANSI colors by default on a
   TTY. Override with `colors=True/False`. Not a `ConsoleRenderer` clone.
-- **Native metric hooks.** `enable_native(metric_processor=...)` invokes a
+- **Native metric hooks.** `configure(metric_processor=...)` invokes a
   structlog-style processor (e.g. `MetricProcessor`) for every kept record on
   the caller's thread before rendering, with the pre-`EventRenamer` event-dict
   shape (`{"event": message, **fields}`). Records dropped by level filtering,
   sampling, or rate limiting never reach it; hook errors never break logging.
-- **Native level-gated sampling.** `enable_native(sample_max_level=...)`
+- **Native level-gated sampling.** `configure(sample_max_level=...)`
   restricts sampling to records at or below the given level; more severe
   records always pass — the native analog of wrapping `SamplingProcessor` in
   `ConditionalProcessor(max_level=...)`.
-- **Native structured exceptions.** `enable_native(structured_exceptions=True)`
+- **Native structured exceptions.** `configure(structured_exceptions=True)`
   renders the `exception` field as the structured dict produced by
   `ExceptionDictProcessor` (type/message/module/frames, chained cause, optional
   locals with redaction and repr truncation) instead of the formatted traceback
@@ -104,7 +104,7 @@ All notable changes to this project are documented here. The format is based on
   serialization format for the full-Rust migration.
 
 - **Group-preserving pattern replacement.**
-  `enable_native(pattern_replacement=...)` sets the substitution text for
+  `configure(pattern_replacement=...)` sets the substitution text for
   `sensitive_patterns` matches and supports capture-group expansion (`$1`,
   `${name}`; `$$` for a literal `$`). This covers the main look-behind use case
   on the linear-time engine: `(?<=password=)\S+` becomes pattern
@@ -112,17 +112,16 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
-- **`configure()` is now the primary logging configuration API.**
-  `enable_native()` remains as a backward-compatible alias, and
-  `configure_structlog()` delegates to `configure()`. `configure_structlog()`
-  now emits `DeprecationWarning` and will be removed in v2.0.
+- **`configure()` is the logging configuration API.** It replaces the
+  unreleased native-configuration name. `configure_structlog()` delegates to
+  `configure()`, emits `DeprecationWarning`, and will be removed in v2.0.
 - **`configure_queued_logging()` is deprecated.** It emits a `DeprecationWarning`
-  and will be removed in 1.0. Native mode (`enable_native()`) already offloads
+  and will be removed in 1.0. Native mode (`configure()`) already offloads
   log I/O to a background thread, making the `QueueHandler`/`QueueListener`
-  wrapper redundant. Use `enable_native(file_path=...)` or
-  `enable_native(callable_sinks=[...])` for off-thread output.
+  wrapper redundant. Use `configure(file_path=...)` or
+  `configure(callable_sinks=[...])` for off-thread output.
 - **Unsupported `sensitive_patterns` now raise `ValueError` at
-  `enable_native()`** instead of emitting a `UserWarning` and silently leaving
+  `configure()`** instead of emitting a `UserWarning` and silently leaving
   native mode disabled. Rust's `regex` engine guarantees linear-time matching
   (no ReDoS on the hot path) and therefore rejects backreferences and
   look-around; redaction that silently differs from the configuration is worse
@@ -140,14 +139,14 @@ All notable changes to this project are documented here. The format is based on
   are appended after event fields with setdefault semantics (previously
   prepended), matching `merge_contextvars`.
 
-- **Native value-pattern redaction.** `enable_native(sensitive_patterns=[...])`
+- **Native value-pattern redaction.** `configure(sensitive_patterns=[...])`
   applies compiled regex patterns to every string value (in addition to
   key-based redaction), mirroring `RedactingProcessor(patterns=...)` on the
   native fast path. Patterns are compiled once at enable time into a reusable
   `RedactionConfig`; Rust's `regex` engine does not support backreferences or
   look-around, so an unsupported pattern emits a `UserWarning` and falls back to
   the standard structlog path.
-- **Native sampling & rate limiting.** `enable_native(sample_rate=...)`,
+- **Native sampling & rate limiting.** `configure(sample_rate=...)`,
   `rate_limit_max=...`, and `rate_limit_period=...` add pre-render filters
   (implemented in Rust) so dropped records cost zero rendering. Drop counters
   `sampled` and `rate_limited` are reported via `native_metrics()`, distinct
@@ -161,7 +160,7 @@ All notable changes to this project are documented here. The format is based on
 
 - **Optional Rust accelerator (native mode).** An opt-in, off-thread native
   render path for the common JSON logging path, shipped as a compiled extension
-  in binary wheels. Public API: `enable_native()`, `disable_native()`,
+  in binary wheels. Public API: `configure()`, `disable_native()`,
   `set_native_level()`, `native_metrics()`, `native_available()`, plus a
   `STRUCTGURU_NATIVE=1` environment toggle. See the README "Native mode" section.
   - Native rendering with byte-parity to the structlog JSON output (including
@@ -184,7 +183,7 @@ All notable changes to this project are documented here. The format is based on
   `abi3-py311`.
 - Build backend switched to **maturin**; structguru now ships as binary wheels.
   The Rust extension is an **optional accelerator** — the library works without
-  it via the standard structlog path, so `enable_native()` is required to use it.
+  it via the standard structlog path, so `configure()` is required to use it.
 - Native mode applies **level filtering** to `logger` calls (native mode
   previously would have emitted below-threshold records); the standard path is
   unchanged.
