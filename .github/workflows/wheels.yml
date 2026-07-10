@@ -45,9 +45,11 @@ jobs:
           manylinux: ${{ matrix.platform.manylinux }}
           args: --release --out dist
       - name: Audit abi3 wheels
-        if: matrix.platform.os != 'windows'
+        shell: bash
         run: |
           pip install abi3audit
+          # shell: bash ensures dist/*.whl expands consistently on every runner
+          # (Windows defaults to PowerShell, where the glob behaves differently).
           abi3audit --strict --report dist/*.whl
       - uses: actions/upload-artifact@v4
         with:
