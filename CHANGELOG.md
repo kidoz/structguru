@@ -6,6 +6,37 @@ All notable changes to this project are documented here. The format is based on
 
 ## [1.0.0] - 2026-07-11
 
+### Security
+
+- **Rotating file sink no longer panics on a failed rotation.** A rotation I/O
+  error (disk full, permission change, a backup locked on Windows) previously
+  left the sink without an active file handle, so the next write/flush panicked
+  and killed the background writer thread — hanging every logging caller (block
+  mode) or leaking memory (unbounded queue). Rotation now always restores a
+  usable handle and write/flush recover instead of panicking.
+- **Log files are created owner-only (`0600`) on Unix** instead of inheriting
+  the umask default (commonly world-readable `0644`).
+- **`rate_limit_period` values too large for a `Duration`** (e.g. `1e300`, also
+  reachable via `STRUCTGURU_NATIVE_RATE_LIMIT` at import) now raise `ValueError`
+  instead of an uncatchable native panic.
+- **Cyclic enum `.value` chains** are caught by the recursion-depth guard and
+  raise cleanly instead of overflowing the native stack into a process abort.
+- **Console renderer escapes control characters** in the message, field keys,
+  and string values, so a request-controlled value can no longer inject newline
+  forged log lines or ANSI terminal-escape sequences. (The JSON renderer already
+  escaped these.)
+- **httpx and requests integrations strip credentials and query strings from
+  logged URLs.** Userinfo (`https://user:pass@host`) and query parameters
+  (`?api_key=...`) are removed before logging; a bare `?` marks that parameters
+  were present.
+- **Django `build_logging_config` JSON formatter escapes via `json.dumps`**
+  instead of f-string interpolation, closing a log-injection/field-forgery hole
+  when a message contained quotes or newlines.
+- **Release and CI workflows pin all GitHub Actions by commit SHA**, add a
+  least-privilege `permissions: contents: read` block to CI, enforce the
+  lockfile with `uv sync --locked`, pin `abi3audit`, and scope the publish-job
+  artifact download to this workflow's own wheels/sdist.
+
 ### Changed (breaking)
 
 - **structlog and orjson are no longer dependencies.** The native Rust renderer

@@ -6,7 +6,7 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
 install: ## Install dev dependencies and all integration extras
-	uv sync --all-extras
+	uv sync --locked --all-extras
 
 test: ## Run tests
 	uv run python -m pytest --ignore=tests/benchmarks
