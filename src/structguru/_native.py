@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import atexit
 import importlib
+import math
 import os
 import sys
 import threading
@@ -83,6 +84,13 @@ class _RustModule(Protocol):
 
     def RedactionConfig(self, patterns: list[str]) -> Any: ...
 
+    def NativeFilter(
+        self,
+        sample_rate: float = ...,
+        rate_limit_max: int | None = ...,
+        rate_limit_period: float = ...,
+    ) -> Any: ...
+
     def _NativeStringWriter(self, maxsize: int, target: str = ...) -> _NativeWriter: ...
 
 
@@ -132,6 +140,7 @@ _otel = False
 _sensitive_keys: list[str] | None = None
 _sensitive_patterns: list[str] | None = None
 _redaction_config: Any = None  # compiled RedactionConfig, None when no patterns configured
+_filter: Any = None  # NativeFilter, None when no sampling/rate-limit configured
 _hooks_registered = False
 _drop_count = 0
 
@@ -167,6 +176,17 @@ def sensitive_patterns() -> list[str] | None:
     return _sensitive_patterns
 
 
+def should_render(method: str, message: str) -> bool:
+    """True when the pre-render filter (sampling/rate-limit) keeps the record.
+
+    Returns ``True`` immediately when no filter is configured, so the default
+    native path pays no extra cost. Mirrors the shape of :func:`is_below_level`.
+    """
+    if _filter is None:
+        return True
+    return bool(_filter.allow(message, method))
+
+
 def format_exception(exc_info: Any) -> str:
     """Format ``exc_info`` to a traceback string matching structlog's output.
 
@@ -195,6 +215,9 @@ def enable_native(
     otel: bool = False,
     sensitive_keys: list[str] | None = None,
     sensitive_patterns: list[str] | None = None,
+    sample_rate: float = 1.0,
+    rate_limit_max: int | None = None,
+    rate_limit_period: float = 60.0,
 ) -> None:
     """Route the common log path through the native renderer + writer.
 
@@ -212,18 +235,32 @@ def enable_native(
     ``UserWarning`` is emitted and native mode is **not** enabled — callers fall
     back to the standard structlog path with ``RedactingProcessor(patterns=...)``.
 
+    ``sample_rate`` (0.0–1.0) and ``rate_limit_max``/``rate_limit_period`` add
+    pre-render filters: dropped records cost zero rendering. ``sampled`` and
+    ``rate_limited`` counters are reported separately from the writer's transport
+    ``dropped`` counter (see :func:`native_metrics`).
+
     Registers shutdown (``atexit``) and fork (``os.register_at_fork``) handlers so
     buffered records are flushed on exit and the background writer is respawned in
     forked children (gunicorn/celery prefork) instead of deadlocking.
     """
     global _enabled, _writer, _service, _maxsize, _target, _overflow
     global _level_threshold, _otel, _sensitive_keys, _sensitive_patterns
-    global _redaction_config
+    global _redaction_config, _filter
     if _RUST is None:
         msg = "native extension is not available"
         raise RuntimeError(msg)
     if overflow not in ("block", "drop"):
         msg = f"overflow must be 'block' or 'drop', not {overflow!r}"
+        raise ValueError(msg)
+    if not math.isfinite(sample_rate) or not 0.0 <= sample_rate <= 1.0:
+        msg = f"sample_rate must be between 0.0 and 1.0, got {sample_rate}"
+        raise ValueError(msg)
+    if rate_limit_max is not None and rate_limit_max < 1:
+        msg = f"rate_limit_max must be >= 1, got {rate_limit_max}"
+        raise ValueError(msg)
+    if not math.isfinite(rate_limit_period) or rate_limit_period <= 0:
+        msg = f"rate_limit_period must be > 0, got {rate_limit_period}"
         raise ValueError(msg)
 
     # Validate regex patterns against Rust's engine before enabling. If any fail
@@ -245,6 +282,16 @@ def enable_native(
         new_config = None
         new_patterns = None
 
+    new_filter: Any = None
+    if sample_rate < 1.0 or rate_limit_max is not None:
+        new_filter = _RUST.NativeFilter(
+            sample_rate=sample_rate,
+            rate_limit_max=rate_limit_max,
+            rate_limit_period=rate_limit_period,
+        )
+        if new_filter.is_empty():
+            new_filter = None
+
     with _state_lock:
         if _writer is not None:
             _writer.close()
@@ -257,6 +304,7 @@ def enable_native(
         _sensitive_keys = list(sensitive_keys) if sensitive_keys is not None else None
         _sensitive_patterns = new_patterns
         _redaction_config = new_config
+        _filter = new_filter
         _writer = _RUST._NativeStringWriter(maxsize, target=target)
         _enabled = True
     _register_lifecycle_hooks()
@@ -303,13 +351,14 @@ def _after_in_child() -> None:
 
 def disable_native() -> None:
     """Turn native mode off and stop the background writer."""
-    global _enabled, _writer, _redaction_config
+    global _enabled, _writer, _redaction_config, _filter
     with _state_lock:
         _enabled = False
         if _writer is not None:
             _writer.close()
             _writer = None
         _redaction_config = None
+        _filter = None
 
 
 def render_and_enqueue(
@@ -373,14 +422,26 @@ def drain_messages() -> list[str]:
 
 
 def native_metrics() -> dict[str, Any] | None:
-    """Return writer metrics (enqueued/dropped/written/depth/...)."""
-    return _writer.metrics() if _writer is not None else None
+    """Return writer + filter metrics.
+
+    Writer counters: ``enqueued``, ``dropped`` (queue-full), ``written``, ``depth``,
+    etc. When a pre-render filter is active, ``sampled`` and ``rate_limited`` are
+    added — these are distinct from the transport ``dropped`` counter.
+    """
+    if _writer is None:
+        return None
+    metrics = dict(_writer.metrics())
+    if _filter is not None:
+        metrics.update(_filter.stats())
+    return metrics
 
 
 def _maybe_enable_from_env() -> None:
     """Auto-enable native mode when ``STRUCTGURU_NATIVE`` is set (12-factor switch).
 
-    Honors ``LOG_LEVEL``, ``STRUCTGURU_SERVICE``, and ``STRUCTGURU_NATIVE_TARGET``.
+    Honors ``LOG_LEVEL``, ``STRUCTGURU_SERVICE``, ``STRUCTGURU_NATIVE_TARGET``,
+    ``STRUCTGURU_NATIVE_SAMPLE_RATE`` (float 0.0–1.0), and
+    ``STRUCTGURU_NATIVE_RATE_LIMIT`` (``"MAX/PERIOD"`` seconds, e.g. ``"100/60"``).
     Never breaks import: a missing extension or bad config is silently ignored.
     """
     if os.environ.get("STRUCTGURU_NATIVE", "").strip().lower() not in ("1", "true", "yes", "on"):
@@ -388,11 +449,21 @@ def _maybe_enable_from_env() -> None:
     if _RUST is None:
         return
     try:
-        enable_native(
-            service=os.environ.get("STRUCTGURU_SERVICE", "app"),
-            level=os.environ.get("LOG_LEVEL", "INFO"),
-            target=os.environ.get("STRUCTGURU_NATIVE_TARGET", "stdout"),
-        )
+        kwargs: dict[str, Any] = {
+            "service": os.environ.get("STRUCTGURU_SERVICE", "app"),
+            "level": os.environ.get("LOG_LEVEL", "INFO"),
+            "target": os.environ.get("STRUCTGURU_NATIVE_TARGET", "stdout"),
+        }
+        sample_rate_str = os.environ.get("STRUCTGURU_NATIVE_SAMPLE_RATE")
+        if sample_rate_str:
+            kwargs["sample_rate"] = float(sample_rate_str)
+        rate_limit_str = os.environ.get("STRUCTGURU_NATIVE_RATE_LIMIT")
+        if rate_limit_str:
+            max_str, _, period_str = rate_limit_str.partition("/")
+            kwargs["rate_limit_max"] = int(max_str)
+            if period_str:
+                kwargs["rate_limit_period"] = float(period_str)
+        enable_native(**kwargs)
     except Exception:  # pragma: no cover - defensive: never fail import on env config
         pass
 

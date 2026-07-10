@@ -6,7 +6,8 @@ use pyo3::types::{
     PyTupleMethods,
 };
 use regex::Regex;
-use structguru_core::{StringWriter, Value};
+use std::time::Duration;
+use structguru_core::{Pipeline, StringWriter, Value};
 
 const MAX_VALUE_DEPTH: usize = 64;
 type ContainerStack = Vec<usize>;
@@ -301,6 +302,72 @@ impl NativeStringWriter {
     }
 }
 
+/// Composed pre-render filter (sampling + rate limiting) in native Rust.
+///
+/// Returns `True` when the record should be rendered. Dropped records never
+/// reach `render_line`, so they cost zero rendering. Drop counters are kept
+/// distinct from the writer's transport `dropped` counter.
+#[pyclass(name = "NativeFilter")]
+struct NativeFilter {
+    pipeline: Pipeline,
+}
+
+#[pymethods]
+impl NativeFilter {
+    #[new]
+    #[pyo3(signature = (sample_rate=1.0, rate_limit_max=None, rate_limit_period=60.0))]
+    fn new(
+        sample_rate: f64,
+        rate_limit_max: Option<usize>,
+        rate_limit_period: f64,
+    ) -> PyResult<Self> {
+        if !sample_rate.is_finite() || !(0.0..=1.0).contains(&sample_rate) {
+            return Err(PyValueError::new_err(format!(
+                "sample_rate must be between 0.0 and 1.0, got {sample_rate}"
+            )));
+        }
+        if let Some(max_count) = rate_limit_max
+            && max_count < 1
+        {
+            return Err(PyValueError::new_err(format!(
+                "rate_limit_max must be >= 1, got {max_count}"
+            )));
+        }
+        if rate_limit_period <= 0.0 || !rate_limit_period.is_finite() {
+            return Err(PyValueError::new_err(format!(
+                "rate_limit_period must be > 0, got {rate_limit_period}"
+            )));
+        }
+        let period = Duration::from_secs_f64(rate_limit_period);
+        Ok(Self {
+            pipeline: Pipeline::new(sample_rate, rate_limit_max, period),
+        })
+    }
+
+    /// Returns `True` when the record should be kept (rendered).
+    ///
+    /// `key` is the rate-limit grouping key (usually the formatted message);
+    /// `level` is the canonical method name.
+    #[pyo3(signature = (key, level))]
+    fn allow(&self, key: &str, level: &str) -> bool {
+        self.pipeline.allow(key, level)
+    }
+
+    /// Whether any filter stage is configured.
+    fn is_empty(&self) -> bool {
+        self.pipeline.is_empty()
+    }
+
+    /// Snapshot of pre-render drop counters (`sampled`, `rate_limited`).
+    fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let stats = self.pipeline.stats();
+        let result = PyDict::new(py);
+        result.set_item("sampled", stats.sampled)?;
+        result.set_item("rate_limited", stats.rate_limited)?;
+        Ok(result)
+    }
+}
+
 fn convert_py_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     let mut containers = ContainerStack::with_capacity(8);
     convert_py_value_inner(obj, 1, &mut containers)
@@ -440,6 +507,7 @@ fn rust_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(render_line, module)?)?;
     module.add_function(wrap_pyfunction!(render_line_with_config, module)?)?;
     module.add_class::<NativeStringWriter>()?;
+    module.add_class::<NativeFilter>()?;
     module.add_class::<RedactionConfig>()?;
     Ok(())
 }

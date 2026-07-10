@@ -283,18 +283,19 @@ Public API:
 
 | Symbol | Purpose |
 |--------|---------|
-| `enable_native(*, service="app", maxsize=0, target="stdout", overflow="block", level="INFO", otel=False, sensitive_keys=None, sensitive_patterns=None)` | Turn native mode on. |
+| `enable_native(*, service="app", maxsize=0, target="stdout", overflow="block", level="INFO", otel=False, sensitive_keys=None, sensitive_patterns=None, sample_rate=1.0, rate_limit_max=None, rate_limit_period=60.0)` | Turn native mode on. |
 | `disable_native()` | Turn it off and stop the background writer. |
 | `set_native_level(level)` | Adjust the level threshold at runtime. |
-| `native_metrics()` | Writer counters (enqueued/written/dropped/depth/...). |
+| `native_metrics()` | Writer counters (enqueued/written/dropped/depth/...) plus filter counters (`sampled`/`rate_limited`) when active. |
 | `native_available()` | Whether the compiled extension is importable. |
 
 Behavior notes:
 
 - **Overflow**: `maxsize=0` is unbounded; a positive `maxsize` uses `overflow="block"` (backpressure, no loss — the default) or `overflow="drop"` (drop-newest + counted, rate-limited warning).
 - **Redaction, level filtering, exceptions, and OpenTelemetry** injection are supported natively; `sensitive_keys` overrides the default redaction keys. `sensitive_patterns` adds regex value-pattern redaction (applied to every string value); Rust's `regex` engine does not support backreferences or look-around, so an unsupported pattern emits a `UserWarning` and falls back to the standard path.
+- **Sampling & rate limiting** (`sample_rate`, `rate_limit_max`, `rate_limit_period`) are applied as native pre-render filters — dropped records cost zero rendering. `sampled` and `rate_limited` counters are distinct from the transport `dropped` counter.
 - **Fork/shutdown safe** — the writer is flushed on exit and respawned in forked children (gunicorn/celery prefork).
-- **Scope (v1)**: native mode renders **JSON to stdout/file**. `stack_info`, console output (`json_logs=False`), custom `logger.add()` sinks, and advanced processors (sampling/rate-limiting/routing/metrics) continue to use the standard structlog path.
+- **Scope (v1)**: native mode renders **JSON to stdout/file**. `stack_info`, console output (`json_logs=False`), custom `logger.add()` sinks, and advanced processors (routing/metrics) continue to use the standard structlog path.
 
 ## Framework integrations
 

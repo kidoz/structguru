@@ -15,6 +15,13 @@ All notable changes to this project are documented here. The format is based on
   `RedactionConfig`; Rust's `regex` engine does not support backreferences or
   look-around, so an unsupported pattern emits a `UserWarning` and falls back to
   the standard structlog path.
+- **Native sampling & rate limiting.** `enable_native(sample_rate=...)`,
+  `rate_limit_max=...`, and `rate_limit_period=...` add pre-render filters
+  (implemented in Rust) so dropped records cost zero rendering. Drop counters
+  `sampled` and `rate_limited` are reported via `native_metrics()`, distinct
+  from the writer's transport `dropped` counter. New env vars:
+  `STRUCTGURU_NATIVE_SAMPLE_RATE` (float) and
+  `STRUCTGURU_NATIVE_RATE_LIMIT` (`"MAX/PERIOD"` seconds).
 
 ## [0.3.0] - 2026-07-09
 

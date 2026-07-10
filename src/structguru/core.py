@@ -303,6 +303,12 @@ class Logger:
         for key in consumed_keys:
             kwargs.pop(key, None)
 
+        # Pre-render filter (sampling/rate-limit): decide before building fields.
+        # Keys on the formatted message, matching the post-EventRenamer behaviour
+        # of the standard-path RateLimitingProcessor.
+        if use_native and not _native.should_render(method, formatted_msg):
+            return
+
         if use_native:
             exc_info = kwargs.get("exc_info", self._opt_exc_info)
             name = self.name if self.name is not None else _caller_module_name()

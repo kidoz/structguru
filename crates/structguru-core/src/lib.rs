@@ -4,11 +4,13 @@
 //! normal Rust unit tests and benchmarks before crossing the Python boundary.
 
 mod clock;
+mod filter;
 mod render;
 mod value;
 mod worker;
 
 pub use clock::now_iso8601;
+pub use filter::{Decision, FilterStats, Pipeline, RateLimiter, RecordFilter, Sampler};
 pub use render::{DEFAULT_SENSITIVE_KEYS, render_line};
 pub use value::{Value, ValueStats};
 pub use worker::{

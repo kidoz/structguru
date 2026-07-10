@@ -1,0 +1,291 @@
+"""Native-path parity tests for value-pattern redaction and sampling/rate-limit filters.
+
+Mirrors the cases in ``test_redaction.py`` and ``test_sampling.py`` but exercises
+the Rust native fast path via ``enable_native(target="memory")`` + ``drain_messages()``.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+import warnings
+from typing import Any
+
+import pytest
+
+import structguru
+from structguru import _native
+
+pytestmark = pytest.mark.skipif(
+    not _native.native_available(),
+    reason="native extension not built",
+)
+
+
+def _drain_last() -> dict[str, Any]:
+    """Flush the writer and return the last rendered record as a dict."""
+    _native.flush_native()
+    return json.loads(_native.drain_messages()[-1])
+
+
+# -- value-pattern redaction -------------------------------------------------
+
+
+def test_pattern_redacts_matching_substring_in_string_value() -> None:
+    email = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+    _native.enable_native(
+        service="svc", target="memory", level="DEBUG", sensitive_patterns=[email]
+    )
+    try:
+        structguru.logger.info("msg", body="Contact user@example.com for details")
+        record = _drain_last()
+        assert record["body"] == "Contact [REDACTED] for details"
+        assert "user@example.com" not in record["body"]
+    finally:
+        _native.disable_native()
+
+
+def test_pattern_redaction_descends_into_nested_maps_and_lists() -> None:
+    ssn = r"\b\d{3}-\d{2}-\d{4}\b"
+    _native.enable_native(service="svc", target="memory", level="DEBUG", sensitive_patterns=[ssn])
+    try:
+        structguru.logger.info(
+            "m",
+            ctx={"note": "ssn is 123-45-6789"},
+            tags=["ok 111-22-3333", 7],
+        )
+        record = _drain_last()
+        assert record["ctx"]["note"] == "ssn is [REDACTED]"
+        assert record["tags"][0] == "ok [REDACTED]"
+        assert record["tags"][1] == 7
+    finally:
+        _native.disable_native()
+
+
+def test_pattern_redaction_skips_non_string_values() -> None:
+    # A pattern that would match anything; non-strings must be untouched.
+    _native.enable_native(
+        service="svc", target="memory", level="DEBUG", sensitive_patterns=[r".+"]
+    )
+    try:
+        structguru.logger.info("m", count=42, flag=True, ratio=1.5, nothing=None)
+        record = _drain_last()
+        assert record["count"] == 42
+        assert record["flag"] is True
+        assert record["ratio"] == 1.5
+        assert record["nothing"] is None
+    finally:
+        _native.disable_native()
+
+
+def test_key_and_pattern_redaction_combine() -> None:
+    _native.enable_native(
+        service="svc",
+        target="memory",
+        level="DEBUG",
+        sensitive_patterns=[r"leak@x\.io"],
+    )
+    try:
+        structguru.logger.info("m", token="abc", msg_field="ping leak@x.io now")
+        record = _drain_last()
+        assert record["token"] == "[REDACTED]"
+        assert record["msg_field"] == "ping [REDACTED] now"
+    finally:
+        _native.disable_native()
+
+
+def test_multiple_patterns_apply_in_order() -> None:
+    _native.enable_native(
+        service="svc",
+        target="memory",
+        level="DEBUG",
+        sensitive_patterns=[r"a@b\.com", r"secret"],
+    )
+    try:
+        structguru.logger.info("m", body="secret email a@b.com here")
+        record = _drain_last()
+        assert record["body"] == "[REDACTED] email [REDACTED] here"
+    finally:
+        _native.disable_native()
+
+
+def test_unsupported_pattern_falls_back_with_warning() -> None:
+    """A pattern using look-around (unsupported by Rust regex) must warn and
+    refuse to enable native mode — the standard path runs instead."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _native.enable_native(
+            service="svc",
+            target="memory",
+            level="DEBUG",
+            sensitive_patterns=[r"(?<=foo)bar"],
+        )
+    try:
+        assert not _native.is_native_enabled()
+        fallback = [w for w in caught if "native pattern redaction unsupported" in str(w.message)]
+        assert len(fallback) == 1
+    finally:
+        _native.disable_native()
+
+
+# -- sampling ---------------------------------------------------------------
+
+
+def test_sampler_rate_one_keeps_all() -> None:
+    _native.enable_native(service="svc", target="memory", level="DEBUG", sample_rate=1.0)
+    try:
+        for _ in range(100):
+            structguru.logger.info("kept")
+        _native.flush_native()
+        assert len(_native.drain_messages()) == 100
+    finally:
+        _native.disable_native()
+
+
+def test_sampler_rate_zero_drops_all() -> None:
+    _native.enable_native(service="svc", target="memory", level="DEBUG", sample_rate=0.0)
+    try:
+        for _ in range(50):
+            structguru.logger.info("dropped")
+        _native.flush_native()
+        assert len(_native.drain_messages()) == 0
+        assert _native.native_metrics()["sampled"] == 50
+    finally:
+        _native.disable_native()
+
+
+def test_sampler_rate_half_is_statistically_bounded() -> None:
+    _native.enable_native(service="svc", target="memory", level="DEBUG", sample_rate=0.5)
+    try:
+        for _ in range(1000):
+            structguru.logger.info("stat")
+        _native.flush_native()
+        kept = len(_native.drain_messages())
+        assert 300 < kept < 700, f"kept={kept}"
+    finally:
+        _native.disable_native()
+
+
+def test_invalid_sample_rate_raises() -> None:
+    for bad in (1.5, -0.1, float("nan")):
+        with pytest.raises(ValueError, match="sample_rate"):
+            _native.enable_native(sample_rate=bad)
+    assert not _native.is_native_enabled()
+
+
+# -- rate limiting ----------------------------------------------------------
+
+
+def test_rate_limit_drops_over_threshold() -> None:
+    _native.enable_native(
+        service="svc", target="memory", level="DEBUG", rate_limit_max=3, rate_limit_period=60.0
+    )
+    try:
+        for _ in range(4):
+            structguru.logger.info("same")
+        _native.flush_native()
+        lines = _native.drain_messages()
+        assert len(lines) == 3
+        assert _native.native_metrics()["rate_limited"] == 1
+    finally:
+        _native.disable_native()
+
+
+def test_rate_limit_keys_are_independent() -> None:
+    _native.enable_native(
+        service="svc", target="memory", level="DEBUG", rate_limit_max=1, rate_limit_period=60.0
+    )
+    try:
+        structguru.logger.info("alpha")
+        structguru.logger.info("beta")
+        structguru.logger.info("alpha")  # dropped: alpha exhausted
+        _native.flush_native()
+        messages = [json.loads(line)["message"] for line in _native.drain_messages()]
+        assert messages == ["alpha", "beta"]
+        assert _native.native_metrics()["rate_limited"] == 1
+    finally:
+        _native.disable_native()
+
+
+def test_rate_limit_window_expires() -> None:
+    _native.enable_native(
+        service="svc",
+        target="memory",
+        level="DEBUG",
+        rate_limit_max=1,
+        rate_limit_period=0.05,
+    )
+    try:
+        structguru.logger.info("k")
+        structguru.logger.info("k")  # dropped within window
+        time.sleep(0.06)
+        structguru.logger.info("k")  # allowed after expiry
+        _native.flush_native()
+        assert len(_native.drain_messages()) == 2
+    finally:
+        _native.disable_native()
+
+
+def test_invalid_rate_limit_raises() -> None:
+    with pytest.raises(ValueError, match="rate_limit_max"):
+        _native.enable_native(rate_limit_max=0)
+    with pytest.raises(ValueError, match="rate_limit_period"):
+        _native.enable_native(rate_limit_max=5, rate_limit_period=0.0)
+    assert not _native.is_native_enabled()
+
+
+# -- combined ---------------------------------------------------------------
+
+
+def test_patterns_and_sampling_combine() -> None:
+    _native.enable_native(
+        service="svc",
+        target="memory",
+        level="DEBUG",
+        sensitive_patterns=[r"pw=\w+"],
+        sample_rate=0.0,
+    )
+    try:
+        structguru.logger.info("m", body="auth pw=hunter2 ok")
+        _native.flush_native()
+        # sample_rate=0 drops everything; nothing is rendered.
+        assert len(_native.drain_messages()) == 0
+        assert _native.native_metrics()["sampled"] == 1
+    finally:
+        _native.disable_native()
+
+
+def test_env_var_sample_rate(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STRUCTGURU_NATIVE", "1")
+    monkeypatch.setenv("STRUCTGURU_NATIVE_TARGET", "memory")
+    monkeypatch.setenv("STRUCTGURU_NATIVE_SAMPLE_RATE", "0.0")
+    _native.disable_native()
+    _native._maybe_enable_from_env()
+    try:
+        assert _native.is_native_enabled()
+        structguru.logger.info("dropped")
+        _native.flush_native()
+        assert len(_native.drain_messages()) == 0
+    finally:
+        _native.disable_native()
+        monkeypatch.delenv("STRUCTGURU_NATIVE", raising=False)
+        monkeypatch.delenv("STRUCTGURU_NATIVE_SAMPLE_RATE", raising=False)
+
+
+def test_env_var_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STRUCTGURU_NATIVE", "1")
+    monkeypatch.setenv("STRUCTGURU_NATIVE_TARGET", "memory")
+    monkeypatch.setenv("STRUCTGURU_NATIVE_RATE_LIMIT", "2/60")
+    _native.disable_native()
+    _native._maybe_enable_from_env()
+    try:
+        assert _native.is_native_enabled()
+        for _ in range(3):
+            structguru.logger.info("same")
+        _native.flush_native()
+        assert len(_native.drain_messages()) == 2
+        assert _native.native_metrics()["rate_limited"] == 1
+    finally:
+        _native.disable_native()
+        monkeypatch.delenv("STRUCTGURU_NATIVE", raising=False)
+        monkeypatch.delenv("STRUCTGURU_NATIVE_RATE_LIMIT", raising=False)
