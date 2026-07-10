@@ -90,6 +90,14 @@ fn redact_patterns(value: &mut Value, patterns: &[Regex]) {
     }
 }
 
+/// Replace the value of an existing `key` in place, or append it.
+fn upsert(entries: &mut Vec<(String, Value)>, key: &str, value: Value) {
+    match entries.iter_mut().find(|(k, _)| k == key) {
+        Some((_, existing)) => *existing = value,
+        None => entries.push((key.to_owned(), value)),
+    }
+}
+
 /// Render a single log line as compact JSON.
 ///
 /// `fields` are the user/bound/contextvars fields (already converted to
@@ -125,23 +133,20 @@ pub fn render_line(
     let canonical = normalize_level(level);
     let severity = syslog_severity(&canonical);
 
-    // Guard against duplicate JSON keys when a user field collides with a
-    // standard key. logger/level/severity/timestamp/message are authoritative
-    // (the structlog processors overwrite them), so drop any user field of the
-    // same name. "service" uses setdefault semantics — a user-provided
+    // Standard keys mirror the structlog processors exactly. logger/level/
+    // severity/timestamp/message are authoritative overrides; the processors
+    // *assign* into the event dict, which replaces a colliding user field's
+    // value at its original position — so upsert in place rather than
+    // drop-and-append. "service" uses setdefault semantics — a user-provided
     // "service" wins — matching `add_service`.
-    const OVERRIDE_KEYS: [&str; 5] = ["logger", "level", "severity", "timestamp", "message"];
-    let has_service = entries.iter().any(|(key, _)| key == "service");
-    entries.retain(|(key, _)| !OVERRIDE_KEYS.contains(&key.as_str()));
-
-    entries.push(("logger".to_owned(), Value::String(logger.to_owned())));
-    entries.push(("level".to_owned(), Value::String(canonical)));
-    entries.push(("severity".to_owned(), Value::Int(i64::from(severity))));
-    entries.push(("timestamp".to_owned(), Value::String(timestamp.to_owned())));
-    if !has_service {
+    upsert(&mut entries, "logger", Value::String(logger.to_owned()));
+    upsert(&mut entries, "level", Value::String(canonical));
+    upsert(&mut entries, "severity", Value::Int(i64::from(severity)));
+    upsert(&mut entries, "timestamp", Value::String(timestamp.to_owned()));
+    if !entries.iter().any(|(key, _)| key == "service") {
         entries.push(("service".to_owned(), Value::String(service.to_owned())));
     }
-    entries.push(("message".to_owned(), Value::String(message.to_owned())));
+    upsert(&mut entries, "message", Value::String(message.to_owned()));
 
     Value::Map(entries).to_json_string()
 }
@@ -202,6 +207,9 @@ mod tests {
         // each standard key appears exactly once (no duplicate JSON keys)
         assert_eq!(line.matches(r#""level":"#).count(), 1);
         assert_eq!(line.matches(r#""service":"#).count(), 1);
+        // the override replaces the user field *in place* (structlog assigns
+        // into the event dict, preserving the colliding key's position)
+        assert!(line.starts_with(r#"{"level":"WARN","service":"user-svc","keep":1,"logger":"l""#));
     }
 
     #[test]
