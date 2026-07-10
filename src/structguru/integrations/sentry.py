@@ -65,6 +65,13 @@ class SentryProcessor:
         If ``True`` (default), ``scope.set_extra("structlog_event", ...)`` is
         only called when :data:`~structguru.redaction.REDACTED_MARKER_KEY`
         is present on the event dict.
+
+    .. tip:: **Native mode:** Instead of adding this processor to the structlog
+        chain, pass it via ``enable_native(sentry_processor=SentryProcessor(...))``.
+        It runs per kept record on the caller's thread with the same contract.
+        When redaction is configured (``sensitive_keys``/``sensitive_patterns``),
+        the native hook injects ``REDACTED_MARKER_KEY`` so the
+        ``require_redaction`` guard recognizes that redaction already ran in Rust.
     """
 
     def __init__(

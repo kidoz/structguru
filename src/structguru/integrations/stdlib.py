@@ -53,6 +53,11 @@ class InterceptHandler(logging.Handler):
     the existing structguru handler(s) so they share the same stream, formatter,
     and processor chain. Otherwise the record is rendered as JSON to
     ``sys.stdout`` using structguru's default processor chain.
+
+    .. note:: **Native mode:** foreign stdlib records always flow through the
+        standard structlog path (the ``ProcessorFormatter`` chain), even when
+        ``enable_native()`` is active. Native mode accelerates only structguru's
+        own ``logger`` calls; third-party ``logging`` output is unaffected.
     """
 
     def __init__(self, *, service: str = "app") -> None:

@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- **Native Sentry integration.** `enable_native(sentry_processor=...)` invokes a
+  structlog-style processor (e.g. `SentryProcessor`) for every kept record on
+  the caller's thread, mirroring the `metric_processor` hook. The raw `exc_info`
+  is passed so `_resolve_exception` works; when redaction is configured
+  (`sensitive_keys`/`sensitive_patterns`), the hook injects
+  `REDACTED_MARKER_KEY` so the processor's `require_redaction` guard recognizes
+  that native Rust redaction already ran. `SentryProcessor` itself is unchanged.
 - **Native rotating-file sink.** `enable_native(file_path=...)` writes rendered
   lines to a rotating file natively (append mode, size-based rotation). Defaults
   mirror `logging.handlers.RotatingFileHandler` (50 MB, 5 backups); configure via

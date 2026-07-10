@@ -190,6 +190,7 @@ _redaction_config: Any = None  # compiled RedactionConfig, None when no patterns
 _filter: Any = None  # NativeFilter, None when no sampling/rate-limit configured
 _exception_config: dict[str, Any] | None = None  # structured-exception knobs, None = string
 _metric_processor: Any = None  # structlog-style processor invoked per kept record
+_sentry_processor: Any = None  # structlog-style processor invoked per kept record (Sentry)
 # Console mode: json=False renders colored human-readable lines instead of JSON.
 _console = False
 _colors = False
@@ -257,6 +258,34 @@ def notify_metrics(method: str, message: str, fields: dict[str, Any]) -> None:
         return
     try:
         _metric_processor(None, method, {"event": message, **fields})
+    except Exception:  # noqa: BLE001 - hooks must never break logging
+        pass
+
+
+def notify_sentry(method: str, message: str, fields: dict[str, Any], exc_info: Any = None) -> None:
+    """Invoke the configured Sentry processor for a kept record.
+
+    Mirrors :func:`notify_metrics` but passes the raw ``exc_info`` (in the shape
+    ``SentryProcessor._resolve_exception`` expects: ``True``, a ``(type, exc, tb)``
+    tuple, or a ``BaseException``) so exception capture works. When redaction is
+    configured (``sensitive_keys`` or ``sensitive_patterns``), the
+    ``REDACTED_MARKER_KEY`` is injected so the processor's ``require_redaction``
+    guard recognizes that redaction already ran in Rust. No-op when no processor
+    is configured; hook errors are swallowed — Sentry must never break logging.
+    """
+    if _sentry_processor is None:
+        return
+    event_dict: dict[str, Any] = {"event": message, **fields}
+    if exc_info is not None:
+        event_dict["exc_info"] = exc_info
+    # Native Rust redaction already ran; mark the dict so SentryProcessor's
+    # require_redaction guard (which checks REDACTED_MARKER_KEY) recognizes it.
+    if _sensitive_keys is not None or _sensitive_patterns is not None:
+        from structguru.redaction import REDACTED_MARKER_KEY
+
+        event_dict.setdefault(REDACTED_MARKER_KEY, True)
+    try:
+        _sentry_processor(None, method, event_dict)
     except Exception:  # noqa: BLE001 - hooks must never break logging
         pass
 
@@ -331,6 +360,7 @@ def enable_native(
     rate_limit_max: int | None = None,
     rate_limit_period: float = 60.0,
     metric_processor: Any = None,
+    sentry_processor: Any = None,
     structured_exceptions: bool = False,
     exception_include_locals: bool = False,
     exception_max_frames: int = 20,
@@ -405,7 +435,7 @@ def enable_native(
     """
     global _enabled, _writer, _service, _maxsize, _target, _overflow
     global _level_threshold, _otel, _sensitive_keys, _sensitive_patterns
-    global _redaction_config, _filter, _exception_config, _metric_processor
+    global _redaction_config, _filter, _exception_config, _metric_processor, _sentry_processor
     global _console, _colors, _callable_sinks, _dispatch_queue, _dispatch_thread
     if _RUST is None:
         msg = "native extension is not available"
@@ -427,6 +457,9 @@ def enable_native(
         raise ValueError(msg)
     if metric_processor is not None and not callable(metric_processor):
         msg = f"metric_processor must be callable, got {type(metric_processor)!r}"
+        raise TypeError(msg)
+    if sentry_processor is not None and not callable(sentry_processor):
+        msg = f"sentry_processor must be callable, got {type(sentry_processor)!r}"
         raise TypeError(msg)
 
     # Validate regex patterns against Rust's engine before enabling. Rust's
@@ -505,6 +538,7 @@ def enable_native(
         _filter = new_filter
         _exception_config = new_exception_config
         _metric_processor = metric_processor
+        _sentry_processor = sentry_processor
         _console = new_console
         _colors = new_colors
         _writer = _RUST._NativeStringWriter(
@@ -623,7 +657,7 @@ def _dispatch_loop() -> None:
 def disable_native() -> None:
     """Turn native mode off and stop the background writer."""
     global _enabled, _writer, _redaction_config, _filter, _exception_config, _metric_processor
-    global _callable_sinks, _dispatch_queue, _console, _colors
+    global _sentry_processor, _callable_sinks, _dispatch_queue, _console, _colors
     _stop_dispatch_thread()
     with _state_lock:
         _enabled = False
@@ -634,6 +668,7 @@ def disable_native() -> None:
         _filter = None
         _exception_config = None
         _metric_processor = None
+        _sentry_processor = None
         _console = False
         _colors = False
         _callable_sinks = None

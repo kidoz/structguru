@@ -328,6 +328,7 @@ class Logger:
             # "stack" between "service" and "message" like StackInfoRenderer.
             stack = _native.format_stack() if stack_info else None
             _native.notify_metrics(method, formatted_msg, fields)
+            _native.notify_sentry(method, formatted_msg, fields, exc_info=exc_info)
             _native.render_and_enqueue(fields, name, method, formatted_msg, stack=stack)
             return
 
