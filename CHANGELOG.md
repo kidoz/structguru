@@ -4,6 +4,38 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.2] - 2026-07-11
+
+### Added
+
+- **Free-threaded CPython (3.13t/3.14t) support.** The native extension declares
+  `gil_used = false`, so importing it no longer re-enables the GIL on a
+  free-threaded build. Each log record captures one coherent runtime snapshot and
+  threads it through formatting, filtering, rendering, and enqueue, so a
+  concurrent `configure()`/`disable_native()` cannot expose partially updated
+  state. A `free-threaded` release gate builds against 3.14t and runs the
+  concurrency and lifecycle regressions before publish.
+- **Async httpx hooks.** `StructguruHTTPXLoggingHooks.get_async_hooks()` returns
+  awaitable request/response hooks for `httpx.AsyncClient`.
+- Benchmarks for the native logging pipeline (structured records, contextvars,
+  redaction, fast paths, GIL vs free-threaded threaded logging) and value
+  conversion.
+
+### Changed (breaking)
+
+- **Removed `setup_structlog()`.** Use `configure()` for runtime setup, the
+  documented import-time environment variables for container defaults, and stdlib
+  `logging.getLogger(name).setLevel(...)` to suppress third-party loggers.
+
+### Fixed
+
+- Rotating file writers that share a path coordinate every rotation through an
+  owner-only `.lock` sidecar, so prefork workers no longer rename or delete each
+  other's active files and backups.
+- `configure()` rejects negative `exception_max_frames`/`exception_max_local_repr`,
+  and `exception_max_frames=0` now correctly omits all traceback frames instead of
+  including every frame.
+
 ## [1.0.1] - 2026-07-11
 
 ### Security
