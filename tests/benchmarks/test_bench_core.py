@@ -15,7 +15,7 @@ from structguru import _native, logger
 from structguru.config import configure_structlog
 
 
-def _setup_structlog_raw(stream: Any) -> Any:
+def _build_structlog_baseline(stream: Any) -> Any:
     """Minimal structlog setup for comparison."""
     structlog.reset_defaults()
     shared_processors = [
@@ -73,7 +73,7 @@ def test_bench_structguru_simple(benchmark: Any, benchmark_stream: io.StringIO) 
 
 def test_bench_structlog_raw_simple(benchmark: Any, benchmark_stream: io.StringIO) -> None:
     """Benchmark raw structlog simple info log."""
-    log = _setup_structlog_raw(benchmark_stream)
+    log = _build_structlog_baseline(benchmark_stream)
 
     @benchmark
     def _() -> None:
@@ -106,7 +106,7 @@ def test_bench_structguru_formatting(benchmark: Any, benchmark_stream: io.String
 
 def test_bench_structlog_raw_formatting(benchmark: Any, benchmark_stream: io.StringIO) -> None:
     """Benchmark raw structlog formatting (manual kwargs)."""
-    log = _setup_structlog_raw(benchmark_stream)
+    log = _build_structlog_baseline(benchmark_stream)
 
     @benchmark
     def _() -> None:
@@ -140,7 +140,7 @@ def test_bench_structguru_bind(benchmark: Any, benchmark_stream: io.StringIO) ->
 
 def test_bench_structlog_raw_bind(benchmark: Any, benchmark_stream: io.StringIO) -> None:
     """Benchmark raw structlog context binding."""
-    log = _setup_structlog_raw(benchmark_stream)
+    log = _build_structlog_baseline(benchmark_stream)
     bound_logger = log.bind(request_id="12345", user_id=42)
 
     @benchmark
