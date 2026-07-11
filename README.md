@@ -22,7 +22,7 @@ Combines a loguru-style API — brace formatting, `bind`, `contextualize`, `opt`
 - **Sampling** — probabilistic and rate-limited log suppression
 - **Metrics** — extract counters/histograms from log events via callbacks
 - **Exception formatting** — render `exc_info` as text or a structured frame dictionary
-- **Non-blocking logging** — off-thread I/O via the native Rust writer (default since v1.0)
+- **Off-thread logging** — native Rust writer with a bounded queue and backpressure
 - **OpenTelemetry** — automatic `trace_id`/`span_id` injection from current span
 
 **Framework integrations** (optional dependencies):
@@ -253,8 +253,10 @@ configure(otel=True)  # no-op injection when opentelemetry-api is absent
 
 ### Non-blocking logging
 
-Since v1.0, log I/O is offloaded to a background thread by default — the native
-Rust writer handles all output asynchronously. No configuration needed.
+Since v1.0, log I/O is offloaded to a background thread by default. The native
+Rust writer uses a bounded 8192-record queue with lossless backpressure. Set
+`overflow="drop"` to favor caller latency, or explicitly pass `maxsize=0` only
+when an unbounded queue is acceptable.
 
 ## Native runtime
 
@@ -290,6 +292,9 @@ The default import-time configuration also honors environment variables:
 LOG_LEVEL=INFO STRUCTGURU_SERVICE=myapp python -m myapp
 ```
 
+Invalid native environment values fail import with an actionable exception. This
+prevents a deployment from starting while the native-only logging path is disabled.
+
 Public API:
 
 | Symbol | Purpose |
@@ -303,7 +308,7 @@ Public API:
 
 Behavior notes:
 
-- **Overflow**: `maxsize=0` is unbounded; a positive `maxsize` uses `overflow="block"` (backpressure, no loss — the default) or `overflow="drop"` (drop-newest + counted, rate-limited warning).
+- **Overflow**: the default `maxsize=8192` uses `overflow="block"` for bounded, lossless backpressure. Use `overflow="drop"` for drop-newest behavior with metrics and rate-limited warnings. `maxsize=0` explicitly opts into an unbounded queue.
 - **Redaction, level filtering, exceptions, and OpenTelemetry** injection are supported natively; redaction covers the message and all structured string values before rendering or Sentry export. `sensitive_keys` overrides the default redaction keys. Rust's linear-time regex engine rejects backreferences and look-around with `ValueError` at configuration time.
 - **Sampling & rate limiting** (`sample_rate`, `rate_limit_max`, `rate_limit_period`) are applied as native pre-render filters — dropped records cost zero rendering. `sampled` and `rate_limited` counters are distinct from the transport `dropped` counter. `sample_max_level` restricts sampling to records at or below that level; more severe records always pass.
 - **Metric hooks** (`metric_processor=...`) invoke a structlog-style processor (e.g. `MetricProcessor`) for every *kept* record on the caller's thread, with `(None, method, {"event": message, **fields})`. Dropped records (level/sampling/rate-limit) never reach it; hook errors are swallowed.

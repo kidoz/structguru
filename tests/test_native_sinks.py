@@ -199,6 +199,45 @@ def test_reconfigure_drains_old_configured_sinks_before_replacing() -> None:
     assert any("new configuration" in line for line in second)
 
 
+def test_failed_reconfigure_preserves_active_writer() -> None:
+    _native.configure(target="memory")
+    structguru.logger.info("before failed reconfigure")
+
+    with pytest.raises(ValueError, match="target"):
+        _native.configure(target="invalid")
+
+    assert _native.is_native_enabled()
+    structguru.logger.info("after failed reconfigure")
+    _native.flush_native()
+    lines = _native.drain_messages()
+    assert any("before failed reconfigure" in line for line in lines)
+    assert any("after failed reconfigure" in line for line in lines)
+
+
+def test_failed_writer_construction_preserves_active_writer(tmp_path: Path) -> None:
+    _native.configure(target="memory")
+    structguru.logger.info("before invalid file")
+
+    with pytest.raises(ValueError):
+        _native.configure(file_path=str(tmp_path))
+
+    assert _native.is_native_enabled()
+    structguru.logger.info("after invalid file")
+    _native.flush_native()
+    lines = _native.drain_messages()
+    assert any("before invalid file" in line for line in lines)
+    assert any("after invalid file" in line for line in lines)
+
+
+def test_default_output_queue_is_bounded() -> None:
+    _native.configure(target="memory")
+
+    metrics = _native.native_metrics()
+
+    assert metrics is not None
+    assert metrics["maxsize"] > 0
+
+
 def test_atexit_drains_callable_sinks(tmp_path: Path) -> None:
     output = tmp_path / "atexit-callback.log"
     code = f"""

@@ -32,6 +32,17 @@ def test_native_auto_enabled_at_import() -> None:
         _native.disable_native()
 
 
+def test_missing_native_extension_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The native-only package must not silently disable logging."""
+    _native.disable_native()
+    monkeypatch.setattr(_native, "_RUST", None)
+
+    with pytest.raises(RuntimeError, match="requires its native extension"):
+        _native._maybe_configure_from_env()
+
+    assert not _native.is_native_enabled()
+
+
 def test_structguru_legacy_env_disables_native(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -11,19 +11,19 @@ from __future__ import annotations
 import atexit
 import importlib
 import io
-import itertools
 import json
 import math
 import os
-import queue
 import sys
 import threading
 import traceback
 import warnings
 from collections.abc import Callable
-from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Protocol, cast
+
+from structguru._native_dispatch import CallableSinkDispatcher
+from structguru._native_env import native_config_from_env
 
 # method name -> numeric level (mirrors logging levels; TRACE/SUCCESS folded)
 _LEVEL_NUM: dict[str, int] = {
@@ -171,7 +171,8 @@ _state_lock = threading.Lock()
 _enabled = False
 _writer: _NativeWriter | None = None
 _service = "app"
-_maxsize = 0
+_DEFAULT_QUEUE_MAXSIZE = 8192
+_maxsize = _DEFAULT_QUEUE_MAXSIZE
 _target = "stdout"
 _overflow = "block"
 # File-sink config (stored for fork respawn — _after_in_child reconstructs the writer).
@@ -193,34 +194,12 @@ _console = False
 _colors = False
 
 
-# Callable sinks: dispatched on a dedicated daemon thread (never the Rust worker,
-# which must not touch the GIL). Each entry is (callable, min_level_num).
-@dataclass(frozen=True)
-class _CallableSink:
-    token: int
-    callback: Callable[[str], None]
-    min_level: int
-
-
-@dataclass(frozen=True)
-class _DispatchRecord:
-    line: str
-    level: int
-
-
-_configured_callable_sinks: list[_CallableSink] = []
-_runtime_callable_sinks: dict[int, _CallableSink] = {}
-_sink_tokens = itertools.count(1)
-_callable_queue_maxsize = 1024
-_dispatch_queue: queue.Queue[object] | None = None
-_dispatch_thread: threading.Thread | None = None
+_callable_dispatcher = CallableSinkDispatcher()
 # Synchronous stream sink: when set (by configure_structlog), rendered lines are
 # written to this stream synchronously on the caller's thread IN ADDITION to the
 # Rust writer. This preserves the pre-1.0 contract that logger output is available
 # on the configured stream immediately after the call (no flush needed).
 _stream_sink: Any = None
-_DISPATCH_STOP = object()
-_dispatch_dropped = 0
 _hooks_registered = False
 _drop_count = 0
 
@@ -251,37 +230,18 @@ def sensitive_keys() -> list[str] | None:
     return _sensitive_keys
 
 
-def _has_callable_sinks() -> bool:
-    return bool(_configured_callable_sinks or _runtime_callable_sinks)
-
-
 def add_callable_sink(fn: Callable[[str], None], min_level: int = 0) -> int:
     """Register a runtime callable sink and return its stable token.
 
     The sink is invoked with each rendered line on the dispatch thread.
     If the dispatch infrastructure is not running, it is started.
     """
-    global _dispatch_queue
-    token = next(_sink_tokens)
-    with _state_lock:
-        _runtime_callable_sinks[token] = _CallableSink(token, fn, min_level)
-        should_start = _enabled and (_dispatch_thread is None or not _dispatch_thread.is_alive())
-        if should_start and _dispatch_queue is None:
-            _dispatch_queue = queue.Queue(maxsize=_callable_queue_maxsize)
-    if should_start:
-        _start_dispatch_thread()
-    return token
+    return _callable_dispatcher.add(fn, min_level, enabled=_enabled)
 
 
 def remove_callable_sink(token: int) -> bool:
     """Drain prior records, then remove exactly one runtime sink token."""
-    flush_callable_sinks()
-    with _state_lock:
-        removed = _runtime_callable_sinks.pop(token, None) is not None
-        should_stop = not _has_callable_sinks()
-    if should_stop and threading.current_thread() is not _dispatch_thread:
-        _stop_dispatch_thread(drain=True)
-    return removed
+    return _callable_dispatcher.remove(token)
 
 
 def sensitive_patterns() -> list[str] | None:
@@ -410,7 +370,7 @@ def format_exception(exc_info: Any) -> str:
 def configure(
     *,
     service: str = "app",
-    maxsize: int = 0,
+    maxsize: int = _DEFAULT_QUEUE_MAXSIZE,
     target: str = "stdout",
     overflow: str = "block",
     level: str = "INFO",
@@ -444,10 +404,11 @@ def configure(
     ``target`` selects the background writer's sink: ``"stdout"`` (default,
     12-factor) or ``"memory"`` (records lines for inspection/tests).
 
-    ``maxsize=0`` is an unbounded queue. With a positive ``maxsize``, ``overflow``
-    governs a full queue: ``"block"`` (default, no loss — the caller waits with the
-    GIL released) or ``"drop"`` (drop the new record, count it, and emit a
-    rate-limited warning; see :func:`native_metrics`).
+    The output queue is bounded to 8192 records by default. ``overflow`` governs a
+    full queue: ``"block"`` (default, no loss — the caller waits with the GIL
+    released) or ``"drop"`` (drop the new record, count it, and emit a rate-limited
+    warning; see :func:`native_metrics`). Pass ``maxsize=0`` only to explicitly opt
+    into an unbounded queue.
 
     ``sensitive_patterns`` is a list of regex source strings applied (in addition
     to key-based redaction) to every string value. Rust's ``regex`` engine
@@ -511,11 +472,16 @@ def configure(
     global _file_path, _file_max_bytes, _file_backup_count, _also_stdout
     global _level_threshold, _otel, _sensitive_keys, _sensitive_patterns
     global _redaction_config, _filter, _exception_config, _metric_processor, _sentry_processor
-    global _console, _colors, _configured_callable_sinks, _dispatch_queue, _stream_sink
-    global _callable_queue_maxsize, _dispatch_dropped
+    global _console, _colors, _stream_sink
     if _RUST is None:
         msg = "native extension is not available"
         raise RuntimeError(msg)
+    if maxsize < 0:
+        msg = f"maxsize must be >= 0, got {maxsize}"
+        raise ValueError(msg)
+    if target not in ("stdout", "null", "memory"):
+        msg = f"target must be 'stdout', 'null', or 'memory', not {target!r}"
+        raise ValueError(msg)
     if overflow not in ("block", "drop"):
         msg = f"overflow must be 'block' or 'drop', not {overflow!r}"
         raise ValueError(msg)
@@ -539,6 +505,12 @@ def configure(
         raise TypeError(msg)
     if callable_queue_maxsize < 1:
         msg = f"callable_queue_maxsize must be >= 1, got {callable_queue_maxsize}"
+        raise ValueError(msg)
+    if file_max_bytes < 0:
+        msg = f"file_max_bytes must be >= 0, got {file_max_bytes}"
+        raise ValueError(msg)
+    if file_backup_count < 0:
+        msg = f"file_backup_count must be >= 0, got {file_backup_count}"
         raise ValueError(msg)
 
     # Validate regex patterns against Rust's engine before enabling. Rust's
@@ -608,8 +580,21 @@ def configure(
     new_console = not json
     new_colors = colors if colors is not None else (sys.stdout.isatty() if new_console else False)
 
-    # Stop any existing dispatch thread before re-enabling.
-    _stop_dispatch_thread(drain=True)
+    # Construct every fallible native resource before touching the active
+    # configuration. A bad target/path/value must not close a working logger.
+    new_writer = _RUST._NativeStringWriter(
+        maxsize,
+        target=target,
+        file_path=file_path,
+        file_max_bytes=file_max_bytes,
+        file_backup_count=file_backup_count,
+        also_stdout=also_stdout,
+    )
+    # Drain configured Python sinks before replacing their callbacks and queue.
+    _callable_dispatcher.configure(
+        callable_sinks or (),
+        maxsize=callable_queue_maxsize,
+    )
 
     with _state_lock:
         if _writer is not None:
@@ -633,30 +618,10 @@ def configure(
         _sentry_processor = sentry_processor
         _console = new_console
         _colors = new_colors
-        _writer = _RUST._NativeStringWriter(
-            maxsize,
-            target=target,
-            file_path=file_path,
-            file_max_bytes=file_max_bytes,
-            file_backup_count=file_backup_count,
-            also_stdout=also_stdout,
-        )
-        _configured_callable_sinks = (
-            [_CallableSink(-index, fn, 0) for index, fn in enumerate(callable_sinks, 1)]
-            if callable_sinks
-            else []
-        )
-        _callable_queue_maxsize = callable_queue_maxsize
-        _dispatch_dropped = 0
-        _dispatch_queue = (
-            queue.Queue(maxsize=callable_queue_maxsize) if _has_callable_sinks() else None
-        )
+        _writer = new_writer
         _stream_sink = stream_sink
         _enabled = True
 
-    # Start the dispatch thread outside the state lock.
-    if _has_callable_sinks():
-        _start_dispatch_thread()
     _register_lifecycle_hooks()
 
 
@@ -677,7 +642,7 @@ def _register_lifecycle_hooks() -> None:
 
 def _atexit_close() -> None:
     """Drain native and callable sinks on interpreter shutdown."""
-    _stop_dispatch_thread(drain=True)
+    _callable_dispatcher.stop(drain=True)
     with _state_lock:
         if _writer is not None:
             _writer.close()
@@ -687,12 +652,12 @@ def _before_fork() -> None:
     """Flush buffered records in the parent before forking."""
     if _writer is not None:
         _writer.flush()
-    flush_callable_sinks()
+    _callable_dispatcher.flush()
 
 
 def _after_in_child() -> None:
     """Respawn the writer in the child: its worker thread did not survive fork."""
-    global _writer, _dispatch_thread, _dispatch_queue
+    global _writer
     if not _enabled or _RUST is None:
         return
     old = _writer
@@ -707,84 +672,14 @@ def _after_in_child() -> None:
         file_backup_count=_file_backup_count,
         also_stdout=_also_stdout,
     )
-    # The dispatch thread also died in the fork; respawn it if callable sinks are active.
-    _dispatch_thread = None
-    _dispatch_queue = (
-        queue.Queue(maxsize=_callable_queue_maxsize) if _has_callable_sinks() else None
-    )
-    if _dispatch_queue is not None:
-        _start_dispatch_thread()
-
-
-def _start_dispatch_thread() -> None:
-    """Start the callable-sink dispatch daemon thread."""
-    global _dispatch_thread
-    dispatch_queue = _dispatch_queue
-    if dispatch_queue is None:
-        return
-    _dispatch_thread = threading.Thread(
-        target=_dispatch_loop,
-        args=(dispatch_queue,),
-        daemon=True,
-    )
-    _dispatch_thread.start()
-
-
-def _stop_dispatch_thread(*, drain: bool) -> None:
-    """Stop the dispatch thread, optionally draining every queued delivery."""
-    global _dispatch_thread, _dispatch_queue
-    thread = _dispatch_thread
-    dispatch_queue = _dispatch_queue
-    if thread is not None and thread.is_alive() and dispatch_queue is not None:
-        if threading.current_thread() is thread:
-            dispatch_queue.put(_DISPATCH_STOP)
-            _dispatch_thread = None
-            _dispatch_queue = None
-            return
-        if drain:
-            dispatch_queue.join()
-        dispatch_queue.put(_DISPATCH_STOP)
-        thread.join()
-    _dispatch_thread = None
-    _dispatch_queue = None
-
-
-def _dispatch_loop(dispatch_queue: queue.Queue[object]) -> None:
-    """Drain the dispatch queue and invoke each callable sink.
-
-    Runs on a dedicated daemon thread so callable sinks (which acquire the GIL)
-    never interact with the Rust writer thread. Per-sink level filtering and
-    error isolation happen here.
-    """
-    while True:
-        item = dispatch_queue.get()
-        if item is _DISPATCH_STOP:
-            dispatch_queue.task_done()
-            return
-        record = cast("_DispatchRecord", item)
-        with _state_lock:
-            sinks = [*_configured_callable_sinks, *_runtime_callable_sinks.values()]
-        for sink in sinks:
-            if record.level >= sink.min_level:
-                try:
-                    sink.callback(record.line)
-                except Exception:  # noqa: BLE001 - callable errors never break logging
-                    pass
-        dispatch_queue.task_done()
-
-
-def flush_callable_sinks() -> None:
-    """Block until every queued callable delivery has completed."""
-    dispatch_queue = _dispatch_queue
-    if dispatch_queue is not None and threading.current_thread() is not _dispatch_thread:
-        dispatch_queue.join()
+    _callable_dispatcher.after_fork(enabled=True)
 
 
 def disable_native() -> None:
     """Turn native mode off and stop the background writer."""
     global _enabled, _writer, _redaction_config, _filter, _exception_config, _metric_processor
-    global _sentry_processor, _configured_callable_sinks, _stream_sink, _console, _colors
-    _stop_dispatch_thread(drain=True)
+    global _sentry_processor, _stream_sink, _console, _colors
+    _callable_dispatcher.disable()
     with _state_lock:
         _enabled = False
         if _writer is not None:
@@ -797,7 +692,6 @@ def disable_native() -> None:
         _sentry_processor = None
         _console = False
         _colors = False
-        _configured_callable_sinks = []
         _stream_sink = None
 
 
@@ -889,21 +783,11 @@ def render_and_enqueue(
         enqueued = _writer.try_enqueue(line)
     if not enqueued:
         _note_drop()
-    # Dispatch callable sinks through their bounded queue using the configured
-    # overflow policy: block for lossless backpressure or drop the delivery.
-    dispatch_queue = _dispatch_queue
-    if dispatch_queue is not None:
-        dispatch_record = _DispatchRecord(
-            line=line,
-            level=_LEVEL_NUM.get(level, _LEVEL_NUM["info"]),
-        )
-        if _overflow == "block":
-            dispatch_queue.put(dispatch_record)
-        else:
-            try:
-                dispatch_queue.put_nowait(dispatch_record)
-            except queue.Full:
-                _note_callable_drop()
+    _callable_dispatcher.enqueue(
+        line,
+        _LEVEL_NUM.get(level, _LEVEL_NUM["info"]),
+        overflow=_overflow,
+    )
     return sentry_line
 
 
@@ -918,30 +802,18 @@ def _note_drop() -> None:
         )
 
 
-def _note_callable_drop() -> None:
-    """Count a callable-sink delivery dropped by its bounded queue."""
-    global _dispatch_dropped
-    _dispatch_dropped += 1
-    if _dispatch_dropped == 1 or _dispatch_dropped % 1000 == 0:
-        warnings.warn(
-            f"structguru callable sinks dropped {_dispatch_dropped} delivery record(s): "
-            "queue full",
-            stacklevel=3,
-        )
-
-
 def _reset_drop_count() -> None:
     """Reset the drop counter (used by tests)."""
-    global _drop_count, _dispatch_dropped
+    global _drop_count
     _drop_count = 0
-    _dispatch_dropped = 0
+    _callable_dispatcher.reset_drop_count()
 
 
 def flush_native() -> None:
     """Block until native output and callable sinks have fully drained."""
     if _writer is not None:
         _writer.flush()
-    flush_callable_sinks()
+    _callable_dispatcher.flush()
 
 
 def drain_messages() -> list[str]:
@@ -959,10 +831,7 @@ def native_metrics() -> dict[str, Any] | None:
     if _writer is None:
         return None
     metrics = dict(_writer.metrics())
-    dispatch_queue = _dispatch_queue
-    metrics["callable_dropped"] = _dispatch_dropped
-    metrics["callable_depth"] = dispatch_queue.qsize() if dispatch_queue is not None else 0
-    metrics["callable_maxsize"] = _callable_queue_maxsize
+    metrics.update(_callable_dispatcher.metrics())
     if _filter is not None:
         metrics.update(_filter.stats())
     return metrics
@@ -977,31 +846,16 @@ def _maybe_configure_from_env() -> None:
     Honors ``LOG_LEVEL``, ``STRUCTGURU_SERVICE``, ``STRUCTGURU_NATIVE_TARGET``,
     ``STRUCTGURU_NATIVE_SAMPLE_RATE`` (float 0.0–1.0), and
     ``STRUCTGURU_NATIVE_RATE_LIMIT`` (``"MAX/PERIOD"`` seconds, e.g. ``"100/60"``).
-    Never breaks import: a missing extension or bad config is silently ignored.
+    A missing extension or invalid environment value raises during import so the
+    application cannot start with its only logging path silently disabled.
     """
     if _RUST is None:
+        msg = "structguru requires its native extension, but structguru._rust is unavailable"
+        raise RuntimeError(msg)
+    kwargs = native_config_from_env(os.environ)
+    if kwargs is None:
         return
-    # STRUCTGURU_LEGACY=1 opts out of native mode (old standard-path default).
-    if os.environ.get("STRUCTGURU_LEGACY", "").strip().lower() in ("1", "true", "yes", "on"):
-        return
-    try:
-        kwargs: dict[str, Any] = {
-            "service": os.environ.get("STRUCTGURU_SERVICE", "app"),
-            "level": os.environ.get("LOG_LEVEL", "INFO"),
-            "target": os.environ.get("STRUCTGURU_NATIVE_TARGET", "stdout"),
-        }
-        sample_rate_str = os.environ.get("STRUCTGURU_NATIVE_SAMPLE_RATE")
-        if sample_rate_str:
-            kwargs["sample_rate"] = float(sample_rate_str)
-        rate_limit_str = os.environ.get("STRUCTGURU_NATIVE_RATE_LIMIT")
-        if rate_limit_str:
-            max_str, _, period_str = rate_limit_str.partition("/")
-            kwargs["rate_limit_max"] = int(max_str)
-            if period_str:
-                kwargs["rate_limit_period"] = float(period_str)
-        configure(**kwargs)
-    except Exception:  # pragma: no cover - defensive: never fail import on env config
-        pass
+    configure(**kwargs)
 
 
 _maybe_configure_from_env()

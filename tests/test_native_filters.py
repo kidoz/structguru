@@ -435,6 +435,29 @@ def test_env_var_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("STRUCTGURU_NATIVE_RATE_LIMIT", raising=False)
 
 
+@pytest.mark.parametrize(
+    ("name", "value", "error"),
+    [
+        ("STRUCTGURU_NATIVE_SAMPLE_RATE", "not-a-number", ValueError),
+        ("STRUCTGURU_NATIVE_RATE_LIMIT", "invalid", ValueError),
+        ("STRUCTGURU_NATIVE_TARGET", "invalid", ValueError),
+    ],
+)
+def test_invalid_env_config_fails_loudly(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+    error: type[Exception],
+) -> None:
+    _native.disable_native()
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(error):
+        _native._maybe_configure_from_env()
+
+    assert not _native.is_native_enabled()
+
+
 # -- level-gated sampling ----------------------------------------------------
 
 
