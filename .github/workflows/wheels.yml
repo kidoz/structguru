@@ -256,4 +256,8 @@ jobs:
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
           packages-dir: dist
+          # Skip files already on PyPI so a re-run after a partial upload
+          # completes the missing artifacts instead of failing on the wheels
+          # that landed first.
+          skip-existing: true
           # PEP 740 attestations are generated automatically.

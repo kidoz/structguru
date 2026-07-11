@@ -35,6 +35,8 @@ All notable changes to this project are documented here. The format is based on
 - `configure()` rejects negative `exception_max_frames`/`exception_max_local_repr`,
   and `exception_max_frames=0` now correctly omits all traceback frames instead of
   including every frame.
+- The source distribution now bundles the `LICENSE` file that the package metadata
+  declares via `License-File`, which PyPI requires for sdist uploads.
 
 ## [1.0.1] - 2026-07-11
 

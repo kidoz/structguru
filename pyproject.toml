@@ -91,6 +91,9 @@ bindings = "pyo3"
 manifest-path = "crates/structguru-py/Cargo.toml"
 module-name = "structguru._rust"
 python-source = "src"
+# maturin declares `License-File: LICENSE` in the metadata; include the file in
+# the sdist too, or PyPI rejects the upload (the wheel already bundles it).
+include = ["LICENSE"]
 
 [tool.ruff]
 target-version = "py311"
