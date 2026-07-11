@@ -289,6 +289,18 @@ def test_invalid_callable_queue_maxsize_raises() -> None:
         _native.configure(callable_queue_maxsize=0)
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"exception_max_frames": -1},
+        {"exception_max_local_repr": -1},
+    ],
+)
+def test_invalid_structured_exception_limits_raise(kwargs: dict[str, int]) -> None:
+    with pytest.raises(ValueError, match="exception_max"):
+        _native.configure(structured_exceptions=True, **kwargs)
+
+
 def test_non_callable_sink_raises() -> None:
     with pytest.raises(TypeError, match="callable_sinks"):
         _native.configure(callable_sinks=["not callable"])  # type: ignore[list-item]

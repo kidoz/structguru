@@ -30,6 +30,13 @@ def build_exception_dict(
     ``repr`` are Python-owned — the native renderer receives this dict and only
     serializes it.
     """
+    if max_frames < 0:
+        msg = f"max_frames must be >= 0, got {max_frames}"
+        raise ValueError(msg)
+    if max_local_repr < 0:
+        msg = f"max_local_repr must be >= 0, got {max_local_repr}"
+        raise ValueError(msg)
+
     if isinstance(exc_info, BaseException):
         exc_info = (type(exc_info), exc_info, exc_info.__traceback__)
     elif exc_info is True:
@@ -52,7 +59,8 @@ def build_exception_dict(
         while tb is not None:
             raw_frames.append((tb.tb_frame, tb.tb_lineno))
             tb = tb.tb_next
-        for frame_obj, lineno in raw_frames[-max_frames:]:
+        selected_frames = raw_frames[-max_frames:] if max_frames else []
+        for frame_obj, lineno in selected_frames:
             frame_info: dict[str, Any] = {
                 "filename": frame_obj.f_code.co_filename,
                 "lineno": lineno,
@@ -62,7 +70,9 @@ def build_exception_dict(
             }
             frames.append(frame_info)
     else:
-        for fs in traceback.extract_tb(exc_tb)[-max_frames:]:
+        extracted_frames = traceback.extract_tb(exc_tb)
+        selected_summaries = extracted_frames[-max_frames:] if max_frames else []
+        for fs in selected_summaries:
             frame_info = {
                 "filename": fs.filename,
                 "lineno": fs.lineno,

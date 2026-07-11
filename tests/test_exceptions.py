@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sys
 
+import pytest
+
 from structguru.exceptions import build_exception_dict
 
 
@@ -62,6 +64,23 @@ class TestBuildExceptionDict:
         result = build_exception_dict(exc_info, max_frames=1)
         assert result is not None
         assert len(result["frames"]) <= 1
+
+    def test_zero_max_frames_captures_no_frames_or_locals(self) -> None:
+        exc_info = _make_exc_info()
+        result = build_exception_dict(exc_info, include_locals=True, max_frames=0)
+        assert result is not None
+        assert result["frames"] == []
+
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"max_frames": -1}, "max_frames"),
+            ({"max_local_repr": -1}, "max_local_repr"),
+        ],
+    )
+    def test_negative_limits_are_rejected(self, kwargs: dict[str, int], match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            build_exception_dict(_make_exc_info(), **kwargs)
 
     def test_include_locals_captures_variables(self) -> None:
         def inner() -> None:
