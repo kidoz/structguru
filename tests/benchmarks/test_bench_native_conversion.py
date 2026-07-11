@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import datetime as dt
+import uuid
+from dataclasses import dataclass
 from typing import Any
 
 import orjson
@@ -66,3 +69,65 @@ def test_bench_native_json_render(benchmark: Any) -> None:
     @benchmark
     def _() -> None:
         rust._render_json_debug(record)
+
+
+def test_bench_native_flat_value_conversion(benchmark: Any) -> None:
+    """Benchmark the common shallow-field conversion shape."""
+    fields = {"request_id": "req-123", "status": 200, "duration_ms": 12.5, "ok": True}
+
+    @benchmark
+    def _() -> None:
+        rust._conversion_stats(fields)
+
+
+def test_bench_native_exotic_value_conversion(benchmark: Any) -> None:
+    """Benchmark datetime, UUID, and dataclass conversion at the PyO3 boundary."""
+
+    @dataclass(frozen=True)
+    class Order:
+        id: uuid.UUID
+        created_at: dt.datetime
+        total: float
+
+    order = Order(
+        id=uuid.UUID("12345678-1234-5678-1234-567812345678"),
+        created_at=dt.datetime(2026, 7, 11, 12, 0, tzinfo=dt.UTC),
+        total=42.5,
+    )
+
+    @benchmark
+    def _() -> None:
+        rust._convert_value_debug(order)
+
+
+def test_bench_native_compiled_redaction_render(benchmark: Any) -> None:
+    """Benchmark rendering with reusable compiled redaction configuration."""
+    config = rust.RedactionConfig([r"token-[A-Za-z0-9]+"])
+    fields = {
+        "authorization": "Bearer token-secret123",
+        "nested": {"query": "access=token-secret123", "user_id": 42},
+    }
+    redacted = rust.render_line_with_config(
+        fields,
+        "benchmark",
+        "info",
+        "api",
+        "authenticated token-secret123",
+        config,
+        "2026-07-11T12:00:00Z",
+        ["authorization"],
+    )
+    assert "token-secret123" not in redacted
+
+    @benchmark
+    def _() -> None:
+        rust.render_line_with_config(
+            fields,
+            "benchmark",
+            "info",
+            "api",
+            "authenticated token-secret123",
+            config,
+            "2026-07-11T12:00:00Z",
+            ["authorization"],
+        )
