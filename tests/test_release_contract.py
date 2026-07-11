@@ -29,9 +29,13 @@ def test_publish_job_depends_on_release_and_supply_chain_gates() -> None:
     workflow = Path(".github/workflows/wheels.yml").read_text(encoding="utf-8")
 
     assert "release-python" in workflow
+    assert "release-free-threaded" in workflow
     assert "release-rust" in workflow
     assert "supply-chain" in workflow
-    assert "needs: [release-python, release-rust, build, sdist, supply-chain]" in workflow
+    assert (
+        "needs: [release-python, release-free-threaded, release-rust, build, sdist, supply-chain]"
+        in workflow
+    )
 
 
 def test_governance_dependency_and_gate_are_declared() -> None:
@@ -40,4 +44,7 @@ def test_governance_dependency_and_gate_are_declared() -> None:
 
     assert '"jsonschema>=4.25,<5"' in pyproject
     assert "governance:" in makefile
+    assert "python-check:" in makefile
+    assert "rust-check:" in makefile
+    assert "check: python-check rust-check" in makefile
     assert "validate_standards_package.py --root . --mode strict-governance" in makefile

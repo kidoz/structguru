@@ -86,7 +86,34 @@ jobs:
       - name: Install locked dependencies
         run: make install
       - name: Run required source quality gates
-        run: make check
+        run: make python-check
+
+  release-free-threaded:
+    name: release gate free-threaded Python 3.14
+    needs: metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: true
+          version: "0.11.28"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Install free-threaded Python
+        run: uv python install 3.14t
+      - name: Install locked free-threaded environment
+        run: uv sync --locked --python 3.14t --no-default-groups --group free-threaded
+      - name: Verify free-threaded mode remains enabled
+        run: >-
+          uv run --python 3.14t python -c
+          "import sys, structguru; assert not sys._is_gil_enabled()"
+      - name: Run free-threaded release regressions
+        run: >-
+          uv run --python 3.14t python -m pytest
+          tests/test_native_free_threaded.py
+          tests/test_native_lifecycle.py::test_disable_during_in_flight_formatting_never_raises
 
   release-rust:
     name: release gate Rust
@@ -211,7 +238,7 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: [release-python, release-rust, build, sdist, supply-chain]
+    needs: [release-python, release-free-threaded, release-rust, build, sdist, supply-chain]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: pypi

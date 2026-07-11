@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install test bench lint format typecheck audit sbom check clean build publish-test publish
+.PHONY: help install test bench lint format typecheck audit sbom python-check rust-check check clean build publish-test publish
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -33,7 +33,15 @@ sbom: ## Generate CycloneDX SBOMs for Python and Rust dependencies
 	uv export --quiet --preview-features sbom-export --locked --all-extras --no-dev --format cyclonedx1.5 --output-file dist/structguru-python.cdx.json
 	uv run python scripts/generate_rust_sbom.py --output dist/structguru-rust.cdx.json
 
-check: lint typecheck test ## Run all required source quality gates
+python-check: lint typecheck test ## Run all required Python source quality gates
+
+rust-check: ## Run all required Rust source quality gates
+	cargo fmt --all -- --check
+	cargo check --workspace
+	cargo test --workspace
+	cargo clippy --workspace --lib -- -D warnings
+
+check: python-check rust-check ## Run the complete Python and Rust quality gate
 
 clean: ## Remove build artifacts and caches
 	rm -rf dist/ build/ target/ src/*.egg-info .mypy_cache .pytest_cache .ruff_cache
