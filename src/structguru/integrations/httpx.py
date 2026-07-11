@@ -1,7 +1,7 @@
 """HTTPX integration for outbound structured request logging.
 
-Provides event hooks for `httpx.Client` and `httpx.AsyncClient` to automatically
-log outbound requests and their responses.
+Provides separate event hooks for `httpx.Client` and `httpx.AsyncClient` to
+automatically log outbound requests and their responses.
 """
 
 from __future__ import annotations
@@ -46,6 +46,16 @@ def log_response(response: Any) -> None:
         _logger.info("Outbound HTTP Request Completed", **extra)
 
 
+async def async_log_request(request: Any) -> None:
+    """AsyncClient-compatible request hook with the synchronous hook's behavior."""
+    log_request(request)
+
+
+async def async_log_response(response: Any) -> None:
+    """AsyncClient-compatible response hook with the synchronous hook's behavior."""
+    log_response(response)
+
+
 class StructguruHTTPXLoggingHooks:
     """A convenient namespace for the HTTPX logging hooks.
 
@@ -59,8 +69,16 @@ class StructguruHTTPXLoggingHooks:
 
     @classmethod
     def get_hooks(cls) -> dict[str, list[Any]]:
-        """Return a fresh dict of event hooks to attach to an HTTPX client."""
+        """Return fresh synchronous hooks for :class:`httpx.Client`."""
         return {
             "request": [log_request],
             "response": [log_response],
+        }
+
+    @classmethod
+    def get_async_hooks(cls) -> dict[str, list[Any]]:
+        """Return fresh asynchronous hooks for :class:`httpx.AsyncClient`."""
+        return {
+            "request": [async_log_request],
+            "response": [async_log_response],
         }

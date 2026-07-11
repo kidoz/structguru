@@ -72,3 +72,33 @@ def test_get_hooks_returns_fresh_lists() -> None:
     first["request"].append(lambda req: None)
     second = StructguruHTTPXLoggingHooks.get_hooks()
     assert len(second["request"]) == 1
+
+
+async def test_httpx_async_logging_hooks_success() -> None:
+    buf = io.StringIO()
+    configure(service="test", level="DEBUG", json=True, stream=buf)
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond),
+        event_hooks=StructguruHTTPXLoggingHooks.get_async_hooks(),
+    ) as client:
+        response = await client.get(
+            "https://example.test/async",
+            headers={"x-request-id": "async-123"},
+        )
+
+    assert response.status_code == 200
+    records = _records(buf)
+    assert len(records) == 1
+    assert records[0]["request_id"] == "async-123"
+    assert records[0]["message"] == "Outbound HTTP Request Completed"
+
+
+def test_get_async_hooks_returns_fresh_lists() -> None:
+    first = StructguruHTTPXLoggingHooks.get_async_hooks()
+    first["request"].append(lambda req: None)
+    second = StructguruHTTPXLoggingHooks.get_async_hooks()
+    assert len(second["request"]) == 1

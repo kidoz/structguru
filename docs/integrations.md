@@ -25,6 +25,15 @@ client = httpx.Client(event_hooks=StructguruHTTPXLoggingHooks.get_hooks())
 response = client.get("https://example.com")
 ```
 
+`AsyncClient` requires awaitable hooks, exposed separately:
+
+```python
+async with httpx.AsyncClient(
+    event_hooks=StructguruHTTPXLoggingHooks.get_async_hooks(),
+) as client:
+    response = await client.get("https://example.com")
+```
+
 The hooks will automatically log request completion and failure, and capture the `X-Request-ID` header if it's set.
 
 ## Requests
