@@ -107,11 +107,11 @@ jobs:
         run: uv sync --locked --python 3.14t --no-default-groups --group free-threaded
       - name: Verify free-threaded mode remains enabled
         run: >-
-          uv run --python 3.14t python -c
+          uv run --no-sync --python 3.14t python -c
           "import sys, structguru; assert not sys._is_gil_enabled()"
       - name: Run free-threaded release regressions
         run: >-
-          uv run --python 3.14t python -m pytest
+          uv run --no-sync --python 3.14t python -m pytest
           tests/test_native_free_threaded.py
           tests/test_native_lifecycle.py::test_disable_during_in_flight_formatting_never_raises
 
@@ -155,7 +155,7 @@ jobs:
       - name: Install pinned cargo-deny
         run: cargo install cargo-deny --version 0.19.9 --locked
       - name: Audit locked Rust dependencies
-        run: cargo deny check advisories --locked
+        run: cargo deny --locked check advisories
       - name: Generate CycloneDX SBOMs
         run: make sbom
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

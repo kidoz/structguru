@@ -105,17 +105,17 @@ jobs:
         run: uv sync --locked --python 3.14t --no-default-groups --group free-threaded
       - name: Verify the extension keeps free-threaded mode enabled
         run: >-
-          uv run --python 3.14t python -c
+          uv run --no-sync --python 3.14t python -c
           "import sys, structguru; assert not sys._is_gil_enabled()"
       - name: Run free-threaded correctness and lifecycle tests
         run: >-
-          uv run --python 3.14t python -m pytest
+          uv run --no-sync --python 3.14t python -m pytest
           tests/test_native_free_threaded.py
           tests/test_native_lifecycle.py::test_disable_during_in_flight_formatting_never_raises
       # Run only the explicitly free-threaded cases. Standard GIL benchmarks
       # remain in the regular benchmark job for an apples-to-apples baseline.
       - name: Run free-threaded concurrency benchmarks
         run: >-
-          uv run --python 3.14t python -m pytest
+          uv run --no-sync --python 3.14t python -m pytest
           tests/benchmarks/test_bench_native_pipeline.py
           -k free_threaded --benchmark-only
