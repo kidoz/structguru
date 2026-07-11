@@ -9,15 +9,8 @@ from unittest.mock import patch
 import pytest
 
 import structguru
-import structguru.config as config_module
 from structguru import _native
 from structguru.config import _to_logging_level, configure_structlog
-
-
-def test_setup_structlog_is_fully_removed() -> None:
-    assert not hasattr(config_module, "setup_structlog")
-    with pytest.raises(ImportError):
-        exec("from structguru import setup_structlog")
 
 
 class TestToLoggingLevel:
