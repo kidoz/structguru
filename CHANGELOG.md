@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] - 2026-07-11
+
+### Security
+
+- Invalid import-time environment configuration and a missing required native
+  extension now fail startup instead of silently disabling the only logging path.
+- Reconfiguration constructs all fallible native resources before replacing the
+  active writer, so a rejected target or file path cannot disable working logging.
+- The native output queue is bounded to 8192 records by default with lossless
+  backpressure; `maxsize=0` remains an explicit opt-in to an unbounded queue.
+- Tagged releases now run the full Python and Rust quality gates before PyPI
+  publication, audit locked Python/Rust dependencies, and attach CycloneDX SBOMs.
+
+### Fixed
+
+- Declared the `jsonschema` dependency required by strict agent-governance
+  validation and exposed the complete check as `make governance`.
+
 ## [1.0.0] - 2026-07-11
 
 ### Security
