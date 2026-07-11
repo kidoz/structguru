@@ -69,6 +69,10 @@ jobs:
     name: wheels ${{ matrix.platform.os }}-${{ matrix.platform.target }}
     needs: metadata
     runs-on: ${{ matrix.platform.runner }}
+    # A single stuck matrix leg previously blocked the whole release (the
+    # publish job needs the entire matrix). Bound each leg so an unavailable
+    # runner fails fast instead of hanging the pipeline indefinitely.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -78,7 +82,12 @@ jobs:
           - { runner: ubuntu-latest,  os: musllinux, target: x86_64,  manylinux: musllinux_1_2 }
           - { runner: ubuntu-latest,  os: musllinux, target: aarch64, manylinux: musllinux_1_2 }
           - { runner: macos-14,       os: macos,   target: aarch64, manylinux: auto }
-          - { runner: macos-13,       os: macos,   target: x86_64,  manylinux: auto }
+          # Intel-mac wheel is cross-compiled on the arm64 runner: the standard
+          # macos-13 (x86_64) image is no longer reliably provisioned, and
+          # x86_64-apple-darwin is a tier-1 Rust target, so maturin cross-builds
+          # it cleanly. (This leg is not smoke-tested — the wheel's arch differs
+          # from the host; abi3audit still validates it below.)
+          - { runner: macos-14,       os: macos,   target: x86_64,  manylinux: auto }
           - { runner: windows-latest, os: windows, target: x64,     manylinux: auto }
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -99,9 +108,11 @@ jobs:
           # (Windows defaults to PowerShell, where the glob behaves differently).
           abi3audit --strict --report dist/*.whl
       - name: Smoke-test host-native wheel
+        # Only import-test wheels whose arch matches the runner. The Intel-mac
+        # wheel is cross-compiled on the arm64 runner, so skip it here.
         if: >-
           (matrix.platform.os == 'linux' && matrix.platform.target == 'x86_64') ||
-          matrix.platform.os == 'macos' ||
+          (matrix.platform.os == 'macos' && matrix.platform.target == 'aarch64') ||
           matrix.platform.os == 'windows'
         shell: bash
         run: |
