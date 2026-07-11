@@ -95,10 +95,9 @@ class StructguruHandler(logging.Handler):
 
     The record's logger name becomes the ``logger`` field, its level selects the
     structguru method, ``extra=`` fields are forwarded as structured fields, and
-    ``exc_info`` is carried through so exceptions render like a native
-    ``logger.exception`` call. The already-formatted message is passed verbatim
-    (no brace re-formatting), so literal ``{...}`` in a message is never
-    misinterpreted.
+    ``exc_info`` and ``stack_info`` are carried through. The already-formatted
+    message is passed verbatim (no brace re-formatting), so literal ``{...}`` in
+    a message is never misinterpreted.
     """
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -114,7 +113,10 @@ class StructguruHandler(logging.Handler):
             if record.exc_info:
                 target = target.opt(exception=record.exc_info)
             emit_method = getattr(target, _method_for_level(record.levelno))
-            emit_method(record.getMessage())
+            if record.stack_info:
+                emit_method(record.getMessage(), stack_info=record.stack_info)
+            else:
+                emit_method(record.getMessage())
         except Exception:  # noqa: BLE001 - a logging handler must never raise
             self.handleError(record)
 
@@ -167,8 +169,10 @@ def install_stdlib_bridge(
     if clear_handlers:
         for handler in list(root.handlers):
             root.removeHandler(handler)
+    threshold = _to_logging_level(level)
     bridge = StructguruHandler()
+    bridge.setLevel(threshold)
     root.addHandler(bridge)
-    root.setLevel(_to_logging_level(level))
+    root.setLevel(threshold)
     _apply_suppression(suppress_loggers, suppress_level)
     return bridge

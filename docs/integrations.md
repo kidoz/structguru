@@ -65,10 +65,12 @@ logging.getLogger("sqlalchemy.engine").info("SELECT 1")
 ```
 
 `install_stdlib_bridge` attaches a `StructguruHandler` to the root logger, sets
-the root level, and raises `suppress_loggers` to `suppress_level` (default
-`WARNING`). The record's logger name becomes the `logger` field, `extra=` fields
-are forwarded as structured fields, and `exc_info` renders like a native
-`logger.exception` call. It returns the handler so you can remove it later.
+the root and handler levels, and raises `suppress_loggers` to `suppress_level`
+(default `WARNING`). The record's logger name becomes the `logger` field,
+`extra=` fields are forwarded as structured fields, `exc_info` and `stack_info`
+render like native structguru fields, and numeric levels are normalized into
+structguru's canonical severity bands. It returns the handler so you can remove
+it later.
 
 For a logger with `propagate=False` (its records never reach the root logger),
 attach the handler directly:

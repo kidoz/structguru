@@ -324,7 +324,7 @@ class Logger:
         if runtime is None:
             return
 
-        stack_info = bool(kwargs.get("stack_info") or self._opt_stack_info)
+        stack_info = kwargs.get("stack_info") or self._opt_stack_info
 
         # Cheap disabled path: level-filter before any formatting.
         if _native.is_below_level(method, runtime):
@@ -360,7 +360,12 @@ class Logger:
                 fields["exception"] = exception
         # Stack capture is Python-owned (frame walking); rendering places
         # "stack" between "service" and "message" like StackInfoRenderer.
-        stack = _native.format_stack() if stack_info else None
+        if isinstance(stack_info, str):
+            stack = stack_info
+        elif stack_info:
+            stack = _native.format_stack()
+        else:
+            stack = None
         _native.notify_metrics(method, formatted_msg, fields, runtime)
         sentry_line = _native.render_and_enqueue(
             fields,

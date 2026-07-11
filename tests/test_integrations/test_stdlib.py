@@ -77,6 +77,14 @@ def test_bridge_forwards_exc_info(native_memory: None, clean_root: None) -> None
     assert "ValueError" in rec["exception"]
 
 
+def test_bridge_forwards_stack_info(native_memory: None, clean_root: None) -> None:
+    install_stdlib_bridge(level="DEBUG")
+    logging.getLogger("svc").warning("stack requested", stack_info=True)
+    rec = _records()[-1]
+    assert "Stack (most recent call last):" in rec["stack"]
+    assert "test_bridge_forwards_stack_info" in rec["stack"]
+
+
 def test_bridge_preserves_literal_braces(native_memory: None, clean_root: None) -> None:
     # An already-formatted message with literal braces must pass through
     # verbatim, never re-run through structguru's brace formatting.
@@ -98,10 +106,30 @@ def test_bridge_preserves_literal_braces(native_memory: None, clean_root: None) 
         (logging.CRITICAL, "CRITICAL"),
     ],
 )
-def test_level_mapping(native_memory: None, clean_root: None, levelno: int, expected: str) -> None:
+def test_level_normalization(
+    native_memory: None, clean_root: None, levelno: int, expected: str
+) -> None:
     install_stdlib_bridge(level="DEBUG")
     logging.getLogger("svc").log(levelno, "msg")
     assert _records()[-1]["level"] == expected
+
+
+def test_bridge_level_filters_child_with_explicit_lower_level(
+    native_memory: None, clean_root: None
+) -> None:
+    child = logging.getLogger("explicit_debug_child")
+    saved_level = child.level
+    saved_propagate = child.propagate
+    try:
+        install_stdlib_bridge(level="INFO")
+        child.setLevel(logging.DEBUG)
+        child.propagate = True
+        child.debug("below bridge threshold")
+        child.info("at bridge threshold")
+        assert [record["message"] for record in _records()] == ["at bridge threshold"]
+    finally:
+        child.setLevel(saved_level)
+        child.propagate = saved_propagate
 
 
 def test_bridge_ignores_structguru_records(native_memory: None, clean_root: None) -> None:

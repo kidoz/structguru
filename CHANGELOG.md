@@ -12,10 +12,11 @@ All notable changes to this project are documented here. The format is based on
   routes standard-library `logging` records (from third-party libraries) through
   structguru's native renderer, so foreign logs share the same JSON/console
   formatting, redaction, level filtering, and output stream. The record's logger
-  name, level, `extra=` fields, and `exc_info` are all preserved, and the
-  already-formatted message is passed through verbatim. A `StructguruHandler`
-  class is exposed for `propagate=False` loggers, and `suppress_loggers()` quiets
-  noisy loggers by raising their level threshold.
+  name, `extra=` fields, `exc_info`, and `stack_info` are preserved; numeric levels
+  are normalized to structguru's canonical levels; and the already-formatted
+  message is passed through verbatim. A `StructguruHandler` class is exposed for
+  `propagate=False` loggers, and `suppress_loggers()` quiets noisy loggers by
+  raising their level threshold.
 
 ## [1.0.2] - 2026-07-11
 
@@ -33,12 +34,6 @@ All notable changes to this project are documented here. The format is based on
 - Benchmarks for the native logging pipeline (structured records, contextvars,
   redaction, fast paths, GIL vs free-threaded threaded logging) and value
   conversion.
-
-### Changed (breaking)
-
-- **Removed `setup_structlog()`.** Use `configure()` for runtime setup, the
-  documented import-time environment variables for container defaults, and stdlib
-  `logging.getLogger(name).setLevel(...)` to suppress third-party loggers.
 
 ### Fixed
 
