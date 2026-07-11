@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import logging
+import os
+import stat
 import warnings
 from pathlib import Path
 
@@ -357,6 +359,18 @@ class TestLoggerAddRemove:
         log.remove(hid)
         assert stream.closed
         assert "native file" in (tmp_path / "test.log").read_text()
+
+    @pytest.mark.skipif(os.name != "posix", reason="Unix permission bits only")
+    def test_path_sink_is_created_owner_only(self, tmp_path: Path) -> None:
+        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
+        log = Logger()
+        path = tmp_path / "private.log"
+        handler_id = log.add(path)
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+        finally:
+            log.remove(handler_id)
+        assert mode == 0o600
 
     def test_remove_all_closes_handlers(self, tmp_path: Path) -> None:
         configure(service="test", level="DEBUG", json=True, stream=io.StringIO())

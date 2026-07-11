@@ -19,6 +19,7 @@ import threading
 import traceback
 import warnings
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from types import TracebackType
 from typing import Any, Protocol, cast
 
@@ -167,31 +168,41 @@ def native_available() -> bool:
 
 # -- native configuration ---------------------------------------------------
 
-_state_lock = threading.Lock()
-_enabled = False
-_writer: _NativeWriter | None = None
-_service = "app"
 _DEFAULT_QUEUE_MAXSIZE = 8192
-_maxsize = _DEFAULT_QUEUE_MAXSIZE
-_target = "stdout"
-_overflow = "block"
-# File-sink config (stored for fork respawn — _after_in_child reconstructs the writer).
-_file_path: str | None = None
-_file_max_bytes = 50 * 1024 * 1024
-_file_backup_count = 5
-_also_stdout = False
-_level_threshold = _LEVEL_NUM["info"]
-_otel = False
-_sensitive_keys: list[str] | None = None
-_sensitive_patterns: list[str] | None = None
-_redaction_config: Any = None  # compiled RedactionConfig, None when no patterns configured
-_filter: Any = None  # NativeFilter, None when no sampling/rate-limit configured
-_exception_config: dict[str, Any] | None = None  # structured-exception knobs, None = string
-_metric_processor: Any = None  # structlog-style processor invoked per kept record
-_sentry_processor: Any = None  # structlog-style processor invoked per kept record (Sentry)
-# Console mode: json=False renders colored human-readable lines instead of JSON.
-_console = False
-_colors = False
+
+
+@dataclass(frozen=True)
+class _RuntimeState:
+    """Coherent native configuration snapshot used for one complete log call."""
+
+    writer: _NativeWriter
+    service: str
+    maxsize: int
+    target: str
+    overflow: str
+    file_path: str | None
+    file_max_bytes: int
+    file_backup_count: int
+    also_stdout: bool
+    level_threshold: int
+    otel: bool
+    sensitive_keys: list[str] | None
+    sensitive_patterns: list[str] | None
+    redaction_config: Any
+    record_filter: Any
+    exception_config: dict[str, Any] | None
+    metric_processor: Any
+    sentry_processor: Any
+    console: bool
+    colors: bool
+    stream_sink: Any
+    callable_sinks: tuple[Callable[[str], None], ...]
+    callable_queue_maxsize: int
+
+
+_state_lock = threading.Lock()
+_runtime: _RuntimeState | None = None
+_lifecycle_generation = 0
 
 
 _callable_dispatcher = CallableSinkDispatcher()
@@ -199,35 +210,49 @@ _callable_dispatcher = CallableSinkDispatcher()
 # written to this stream synchronously on the caller's thread IN ADDITION to the
 # Rust writer. This preserves the pre-1.0 contract that logger output is available
 # on the configured stream immediately after the call (no flush needed).
-_stream_sink: Any = None
 _hooks_registered = False
 _drop_count = 0
+_drop_lock = threading.Lock()
+
+
+def current_runtime() -> _RuntimeState | None:
+    """Return the current immutable-by-convention runtime snapshot."""
+    return _runtime if _RUST is not None else None
 
 
 def is_native_enabled() -> bool:
     """True when native mode is on and the extension is loaded."""
-    return _enabled and _RUST is not None
+    return current_runtime() is not None
 
 
-def is_below_level(method: str) -> bool:
+def is_below_level(method: str, runtime: _RuntimeState | None = None) -> bool:
     """True when a call at *method* is below the native threshold (drop it)."""
-    return _LEVEL_NUM.get(method, _LEVEL_NUM["info"]) < _level_threshold
+    state = runtime or current_runtime()
+    return state is None or _LEVEL_NUM.get(method, _LEVEL_NUM["info"]) < state.level_threshold
 
 
 def set_native_level(level: str) -> None:
     """Adjust the native level threshold at runtime (per-process)."""
-    global _level_threshold
-    _level_threshold = _LEVEL_NUM.get(level.lower(), _LEVEL_NUM["info"])
+    global _runtime, _lifecycle_generation
+    with _state_lock:
+        if _runtime is not None:
+            _runtime = replace(
+                _runtime,
+                level_threshold=_LEVEL_NUM.get(level.lower(), _LEVEL_NUM["info"]),
+            )
+            _lifecycle_generation += 1
 
 
-def otel_enabled() -> bool:
+def otel_enabled(runtime: _RuntimeState | None = None) -> bool:
     """True when OTel trace-context injection is enabled for native mode."""
-    return _otel
+    state = runtime or current_runtime()
+    return state is not None and state.otel
 
 
 def sensitive_keys() -> list[str] | None:
     """Custom redaction keys for native mode, or None for the defaults."""
-    return _sensitive_keys
+    state = current_runtime()
+    return state.sensitive_keys if state is not None else None
 
 
 def add_callable_sink(fn: Callable[[str], None], min_level: int = 0) -> int:
@@ -236,7 +261,9 @@ def add_callable_sink(fn: Callable[[str], None], min_level: int = 0) -> int:
     The sink is invoked with each rendered line on the dispatch thread.
     If the dispatch infrastructure is not running, it is started.
     """
-    return _callable_dispatcher.add(fn, min_level, enabled=_enabled)
+    token = _callable_dispatcher.add(fn, min_level, enabled=is_native_enabled())
+    _sync_callable_dispatcher()
+    return token
 
 
 def remove_callable_sink(token: int) -> bool:
@@ -246,21 +273,34 @@ def remove_callable_sink(token: int) -> bool:
 
 def sensitive_patterns() -> list[str] | None:
     """Custom regex value-patterns for native mode, or None if unset."""
-    return _sensitive_patterns
+    state = current_runtime()
+    return state.sensitive_patterns if state is not None else None
 
 
-def should_render(method: str, message: str) -> bool:
+def should_render(
+    method: str,
+    message: str,
+    runtime: _RuntimeState | None = None,
+) -> bool:
     """True when the pre-render filter (sampling/rate-limit) keeps the record.
 
     Returns ``True`` immediately when no filter is configured, so the default
     native path pays no extra cost. Mirrors the shape of :func:`is_below_level`.
     """
-    if _filter is None:
+    state = runtime or current_runtime()
+    if state is None:
+        return False
+    if state.record_filter is None:
         return True
-    return bool(_filter.allow(message, method))
+    return bool(state.record_filter.allow(message, method))
 
 
-def notify_metrics(method: str, message: str, fields: dict[str, Any]) -> None:
+def notify_metrics(
+    method: str,
+    message: str,
+    fields: dict[str, Any],
+    runtime: _RuntimeState | None = None,
+) -> None:
     """Invoke the configured metric processor for a kept record.
 
     Called on the caller's thread (never the writer thread) with a
@@ -268,10 +308,11 @@ def notify_metrics(method: str, message: str, fields: dict[str, Any]) -> None:
     sees on the standard path. No-op when no processor is configured; hook
     errors are swallowed — metrics must never break logging.
     """
-    if _metric_processor is None:
+    state = runtime or current_runtime()
+    if state is None or state.metric_processor is None:
         return
     try:
-        _metric_processor(None, method, {"event": message, **fields})
+        state.metric_processor(None, method, {"event": message, **fields})
     except Exception:  # noqa: BLE001 - hooks must never break logging
         pass
 
@@ -281,6 +322,7 @@ def notify_sentry(
     redacted_line: str,
     field_names: tuple[str, ...],
     exc_info: Any = None,
+    runtime: _RuntimeState | None = None,
 ) -> None:
     """Invoke the configured Sentry processor with the redacted rendered event.
 
@@ -291,7 +333,8 @@ def notify_sentry(
     guaranteeing that key and pattern redaction runs before third-party export.
     Hook errors are swallowed — Sentry must never break logging.
     """
-    if _sentry_processor is None:
+    state = runtime or current_runtime()
+    if state is None or state.sentry_processor is None:
         return
     try:
         rendered = json.loads(redacted_line)
@@ -307,12 +350,15 @@ def notify_sentry(
 
     event_dict[REDACTED_MARKER_KEY] = True
     try:
-        _sentry_processor(None, method, event_dict)
+        state.sentry_processor(None, method, event_dict)
     except Exception:  # noqa: BLE001 - hooks must never break logging
         pass
 
 
-def build_exception_field(exc_info: Any) -> str | dict[str, Any] | None:
+def build_exception_field(
+    exc_info: Any,
+    runtime: _RuntimeState | None = None,
+) -> str | dict[str, Any] | None:
     """Build the ``exception`` field value for a native record.
 
     Returns the structured dict when ``structured_exceptions`` is enabled
@@ -322,12 +368,13 @@ def build_exception_field(exc_info: Any) -> str | dict[str, Any] | None:
     capture, and ``repr`` are Python-owned — the native renderer only
     serializes the result.
     """
-    if _exception_config is None:
+    state = runtime or current_runtime()
+    if state is None or state.exception_config is None:
         return format_exception(exc_info)
 
     from structguru.exceptions import build_exception_dict
 
-    return build_exception_dict(exc_info, **_exception_config)
+    return build_exception_dict(exc_info, **state.exception_config)
 
 
 def format_stack() -> str:
@@ -468,11 +515,7 @@ def configure(
     buffered records are flushed on exit and the background writer is respawned in
     forked children (gunicorn/celery prefork) instead of deadlocking.
     """
-    global _enabled, _writer, _service, _maxsize, _target, _overflow
-    global _file_path, _file_max_bytes, _file_backup_count, _also_stdout
-    global _level_threshold, _otel, _sensitive_keys, _sensitive_patterns
-    global _redaction_config, _filter, _exception_config, _metric_processor, _sentry_processor
-    global _console, _colors, _stream_sink
+    global _runtime, _lifecycle_generation
     if _RUST is None:
         msg = "native extension is not available"
         raise RuntimeError(msg)
@@ -511,6 +554,12 @@ def configure(
         raise ValueError(msg)
     if file_backup_count < 0:
         msg = f"file_backup_count must be >= 0, got {file_backup_count}"
+        raise ValueError(msg)
+    if exception_max_frames < 0:
+        msg = f"exception_max_frames must be >= 0, got {exception_max_frames}"
+        raise ValueError(msg)
+    if exception_max_local_repr < 0:
+        msg = f"exception_max_local_repr must be >= 0, got {exception_max_local_repr}"
         raise ValueError(msg)
 
     # Validate regex patterns against Rust's engine before enabling. Rust's
@@ -590,112 +639,135 @@ def configure(
         file_backup_count=file_backup_count,
         also_stdout=also_stdout,
     )
-    # Drain configured Python sinks before replacing their callbacks and queue.
-    _callable_dispatcher.configure(
-        callable_sinks or (),
-        maxsize=callable_queue_maxsize,
+    new_runtime = _RuntimeState(
+        writer=new_writer,
+        service=service,
+        maxsize=maxsize,
+        target=target,
+        overflow=overflow,
+        file_path=file_path,
+        file_max_bytes=file_max_bytes,
+        file_backup_count=file_backup_count,
+        also_stdout=also_stdout,
+        level_threshold=_LEVEL_NUM.get(level.lower(), _LEVEL_NUM["info"]),
+        otel=otel,
+        sensitive_keys=list(sensitive_keys) if sensitive_keys is not None else None,
+        sensitive_patterns=new_patterns,
+        redaction_config=new_config,
+        record_filter=new_filter,
+        exception_config=new_exception_config,
+        metric_processor=metric_processor,
+        sentry_processor=sentry_processor,
+        console=new_console,
+        colors=new_colors,
+        stream_sink=stream_sink,
+        callable_sinks=tuple(callable_sinks or ()),
+        callable_queue_maxsize=callable_queue_maxsize,
     )
-
     with _state_lock:
-        if _writer is not None:
-            _writer.close()
-        _maxsize = maxsize
-        _target = target
-        _service = service
-        _overflow = overflow
-        _file_path = file_path
-        _file_max_bytes = file_max_bytes
-        _file_backup_count = file_backup_count
-        _also_stdout = also_stdout
-        _level_threshold = _LEVEL_NUM.get(level.lower(), _LEVEL_NUM["info"])
-        _otel = otel
-        _sensitive_keys = list(sensitive_keys) if sensitive_keys is not None else None
-        _sensitive_patterns = new_patterns
-        _redaction_config = new_config
-        _filter = new_filter
-        _exception_config = new_exception_config
-        _metric_processor = metric_processor
-        _sentry_processor = sentry_processor
-        _console = new_console
-        _colors = new_colors
-        _writer = new_writer
-        _stream_sink = stream_sink
-        _enabled = True
+        old_runtime = _runtime
+        _runtime = new_runtime
+        _lifecycle_generation += 1
+
+    # Closing a retired writer is safe while an in-flight logger still owns its
+    # snapshot: the Rust writer rejects a late enqueue instead of invalidating the
+    # Python object. No record can observe a partially updated configuration.
+    if old_runtime is not None:
+        old_runtime.writer.close()
+    _sync_callable_dispatcher()
 
     _register_lifecycle_hooks()
+
+
+def _sync_callable_dispatcher() -> None:
+    """Converge callable dispatch on the newest runtime generation."""
+    while True:
+        with _state_lock:
+            generation = _lifecycle_generation
+            state = _runtime
+        if state is None:
+            _callable_dispatcher.disable()
+        else:
+            _callable_dispatcher.configure(
+                state.callable_sinks,
+                maxsize=state.callable_queue_maxsize,
+            )
+        with _state_lock:
+            if generation == _lifecycle_generation:
+                return
 
 
 def _register_lifecycle_hooks() -> None:
     """Register atexit + fork handlers exactly once."""
     global _hooks_registered
-    if _hooks_registered:
-        return
-    atexit.register(_atexit_close)
-    # register_at_fork is POSIX-only; on Windows (spawn) there is nothing to do.
-    if hasattr(os, "register_at_fork"):
-        os.register_at_fork(
-            before=_before_fork,
-            after_in_child=_after_in_child,
-        )
-    _hooks_registered = True
+    with _state_lock:
+        if _hooks_registered:
+            return
+        atexit.register(_atexit_close)
+        # register_at_fork is POSIX-only; on Windows (spawn) there is nothing to do.
+        if hasattr(os, "register_at_fork"):
+            os.register_at_fork(
+                before=_before_fork,
+                after_in_child=_after_in_child,
+            )
+        _hooks_registered = True
 
 
 def _atexit_close() -> None:
     """Drain native and callable sinks on interpreter shutdown."""
     _callable_dispatcher.stop(drain=True)
-    with _state_lock:
-        if _writer is not None:
-            _writer.close()
+    state = current_runtime()
+    if state is not None:
+        state.writer.close()
 
 
 def _before_fork() -> None:
     """Flush buffered records in the parent before forking."""
-    if _writer is not None:
-        _writer.flush()
+    state = current_runtime()
+    if state is not None:
+        state.writer.flush()
     _callable_dispatcher.flush()
 
 
 def _after_in_child() -> None:
     """Respawn the writer in the child: its worker thread did not survive fork."""
-    global _writer
-    if not _enabled or _RUST is None:
+    global _runtime, _state_lock, _drop_lock
+    state = _runtime
+    # No other Python thread survives fork. Replace inherited synchronization
+    # objects before touching state that may have been locked by a vanished thread.
+    _state_lock = threading.Lock()
+    _drop_lock = threading.Lock()
+    if state is None or _RUST is None:
+        _callable_dispatcher.after_fork(enabled=False)
         return
-    old = _writer
-    if old is not None:
-        old.abandon()  # never join the parent's (now absent) worker thread
+    state.writer.abandon()  # never join the parent's (now absent) worker thread
     # Replay the full sink config so file paths and stdout mirroring survive fork.
-    _writer = _RUST._NativeStringWriter(
-        _maxsize,
-        target=_target,
-        file_path=_file_path,
-        file_max_bytes=_file_max_bytes,
-        file_backup_count=_file_backup_count,
-        also_stdout=_also_stdout,
+    writer = _RUST._NativeStringWriter(
+        state.maxsize,
+        target=state.target,
+        file_path=state.file_path,
+        file_max_bytes=state.file_max_bytes,
+        file_backup_count=state.file_backup_count,
+        also_stdout=state.also_stdout,
     )
+    _runtime = replace(state, writer=writer)
     _callable_dispatcher.after_fork(enabled=True)
 
 
 def disable_native() -> None:
     """Turn native mode off and stop the background writer."""
-    global _enabled, _writer, _redaction_config, _filter, _exception_config, _metric_processor
-    global _sentry_processor, _stream_sink, _console, _colors
-    _callable_dispatcher.disable()
+    global _runtime, _lifecycle_generation
     with _state_lock:
-        _enabled = False
-        if _writer is not None:
-            _writer.close()
-            _writer = None
-        _redaction_config = None
-        _filter = None
-        _exception_config = None
-        _metric_processor = None
-        _sentry_processor = None
-        _console = False
-        _colors = False
-        _stream_sink = None
+        old_runtime = _runtime
+        _runtime = None
+        _lifecycle_generation += 1
+    if old_runtime is not None:
+        old_runtime.writer.close()
+    _sync_callable_dispatcher()
 
 
 def _render_json(
+    runtime: _RuntimeState,
     fields: dict[str, Any],
     logger: str,
     level: str,
@@ -704,20 +776,28 @@ def _render_json(
 ) -> str:
     """Render a redacted JSON event, reusing compiled configuration."""
     assert _RUST is not None
-    if _redaction_config is not None:
+    if runtime.redaction_config is not None:
         return _RUST.render_line_with_config(
             fields,
             logger,
             level,
-            _service,
+            runtime.service,
             message,
-            _redaction_config,
+            runtime.redaction_config,
             None,
-            _sensitive_keys,
+            runtime.sensitive_keys,
             stack,
         )
     return _RUST.render_line(
-        fields, logger, level, _service, message, None, _sensitive_keys, None, stack
+        fields,
+        logger,
+        level,
+        runtime.service,
+        message,
+        None,
+        runtime.sensitive_keys,
+        None,
+        stack,
     )
 
 
@@ -727,6 +807,7 @@ def render_and_enqueue(
     level: str,
     message: str,
     stack: str | None = None,
+    runtime: _RuntimeState | None = None,
 ) -> str | None:
     """Render and enqueue one record; return redacted JSON for Sentry when enabled.
 
@@ -735,19 +816,21 @@ def render_and_enqueue(
     redaction is configured, the pre-built ``RedactionConfig`` is reused so no
     per-record regex compilation occurs.
     """
-    assert _RUST is not None and _writer is not None  # guarded by is_native_enabled
-    if _console:
-        if _redaction_config is not None:
+    state = runtime or current_runtime()
+    if _RUST is None or state is None:
+        return None
+    if state.console:
+        if state.redaction_config is not None:
             rendered = _RUST.render_console_with_config(
                 fields,
                 logger,
                 level,
-                _service,
+                state.service,
                 message,
-                _colors,
-                _redaction_config,
+                state.colors,
+                state.redaction_config,
                 None,
-                _sensitive_keys,
+                state.sensitive_keys,
                 stack,
             )
         else:
@@ -755,49 +838,59 @@ def render_and_enqueue(
                 fields,
                 logger,
                 level,
-                _service,
+                state.service,
                 message,
-                _colors,
+                state.colors,
                 None,
-                _sensitive_keys,
+                state.sensitive_keys,
                 None,
                 stack,
             )
     else:
-        rendered = _render_json(fields, logger, level, message, stack)
+        rendered = _render_json(state, fields, logger, level, message, stack)
     sentry_line = None
-    if _sentry_processor is not None:
+    if state.sentry_processor is not None:
         sentry_line = (
-            rendered if not _console else _render_json(fields, logger, level, message, stack)
+            rendered
+            if not state.console
+            else _render_json(state, fields, logger, level, message, stack)
         )
     line = rendered + "\n"
     # Synchronous stream sink (used by configure_structlog for backward compat).
-    if _stream_sink is not None:
+    if state.stream_sink is not None:
         try:
-            _stream_sink.write(line)
+            state.stream_sink.write(line)
         except Exception:  # noqa: BLE001 - stream errors must never break logging
             pass
-    if _overflow == "block":
-        enqueued = _writer.enqueue_blocking(line)
+    if state.overflow == "block":
+        enqueued = state.writer.enqueue_blocking(line)
     else:
-        enqueued = _writer.try_enqueue(line)
-    if not enqueued:
+        enqueued = state.writer.try_enqueue(line)
+    # A retired writer rejects late records during configure/disable. That is a
+    # lifecycle boundary, not queue overflow, and must not raise or emit a false
+    # "queue full" warning from application code.
+    still_active = current_runtime() is state
+    if not enqueued and still_active:
         _note_drop()
-    _callable_dispatcher.enqueue(
-        line,
-        _LEVEL_NUM.get(level, _LEVEL_NUM["info"]),
-        overflow=_overflow,
-    )
-    return sentry_line
+    if still_active:
+        _callable_dispatcher.enqueue(
+            line,
+            _LEVEL_NUM.get(level, _LEVEL_NUM["info"]),
+            overflow=state.overflow,
+        )
+        return sentry_line
+    return None
 
 
 def _note_drop() -> None:
     """Emit a rate-limited warning when the queue drops a record (drop mode)."""
     global _drop_count
-    _drop_count += 1
-    if _drop_count == 1 or _drop_count % 1000 == 0:
+    with _drop_lock:
+        _drop_count += 1
+        dropped = _drop_count
+    if dropped == 1 or dropped % 1000 == 0:
         warnings.warn(
-            f"structguru native logging dropped {_drop_count} record(s): queue full",
+            f"structguru native logging dropped {dropped} record(s): queue full",
             stacklevel=3,
         )
 
@@ -805,20 +898,23 @@ def _note_drop() -> None:
 def _reset_drop_count() -> None:
     """Reset the drop counter (used by tests)."""
     global _drop_count
-    _drop_count = 0
+    with _drop_lock:
+        _drop_count = 0
     _callable_dispatcher.reset_drop_count()
 
 
 def flush_native() -> None:
     """Block until native output and callable sinks have fully drained."""
-    if _writer is not None:
-        _writer.flush()
+    state = current_runtime()
+    if state is not None:
+        state.writer.flush()
     _callable_dispatcher.flush()
 
 
 def drain_messages() -> list[str]:
     """Return all lines the writer has flushed to its in-memory sink (tests)."""
-    return _writer.messages() if _writer is not None else []
+    state = current_runtime()
+    return state.writer.messages() if state is not None else []
 
 
 def native_metrics() -> dict[str, Any] | None:
@@ -828,12 +924,13 @@ def native_metrics() -> dict[str, Any] | None:
     etc. When a pre-render filter is active, ``sampled`` and ``rate_limited`` are
     added — these are distinct from the transport ``dropped`` counter.
     """
-    if _writer is None:
+    state = current_runtime()
+    if state is None:
         return None
-    metrics = dict(_writer.metrics())
+    metrics = dict(state.writer.metrics())
     metrics.update(_callable_dispatcher.metrics())
-    if _filter is not None:
-        metrics.update(_filter.stats())
+    if state.record_filter is not None:
+        metrics.update(state.record_filter.stats())
     return metrics
 
 

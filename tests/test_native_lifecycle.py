@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import select
+import threading
 
 import pytest
 
@@ -62,6 +63,37 @@ def test_drop_emits_rate_limited_warning() -> None:
     _native._reset_drop_count()
     with pytest.warns(UserWarning, match="dropped"):
         _native._note_drop()
+
+
+def test_disable_during_in_flight_formatting_never_raises() -> None:
+    """A record that started before shutdown may be retired, but cannot crash."""
+    formatting_started = threading.Event()
+    resume_formatting = threading.Event()
+    errors: list[BaseException] = []
+
+    class SlowMessage:
+        def __str__(self) -> str:
+            formatting_started.set()
+            assert resume_formatting.wait(timeout=2)
+            return "in flight"
+
+    _native.configure(target="null")
+
+    def emit() -> None:
+        try:
+            structguru.logger.info(SlowMessage())
+        except BaseException as exc:  # capture the exact regression, including AssertionError
+            errors.append(exc)
+
+    producer = threading.Thread(target=emit)
+    producer.start()
+    assert formatting_started.wait(timeout=1)
+    _native.disable_native()
+    resume_formatting.set()
+    producer.join(timeout=2)
+
+    assert not producer.is_alive()
+    assert errors == []
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork (POSIX)")

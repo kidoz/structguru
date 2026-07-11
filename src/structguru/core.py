@@ -17,6 +17,7 @@ import functools
 import itertools
 import json
 import logging
+import os
 import string
 import sys
 import threading
@@ -62,12 +63,30 @@ class _CallableHandler(logging.Handler):
             self.handleError(record)
 
 
+class _SecureFileHandler(logging.FileHandler):
+    """File handler that creates new Unix log files with owner-only permissions."""
+
+    def _open(self) -> Any:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        descriptor = os.open(self.baseFilename, flags, 0o600)
+        try:
+            return os.fdopen(
+                descriptor,
+                self.mode,
+                encoding=self.encoding,
+                errors=self.errors,
+            )
+        except Exception:
+            os.close(descriptor)
+            raise
+
+
 def _make_handler(sink: Sink) -> logging.Handler:
     """Create a :class:`logging.Handler` from various *sink* types."""
     if isinstance(sink, logging.Handler):
         return sink
     if isinstance(sink, (str, Path)):
-        return logging.FileHandler(str(sink), encoding="utf-8")
+        return _SecureFileHandler(str(sink), encoding="utf-8")
     if hasattr(sink, "write"):
         return logging.StreamHandler(sink)
     if callable(sink):
@@ -298,14 +317,17 @@ class Logger:
         kwargs: dict[str, Any],
     ) -> None:
         """Internal dispatch — native Rust path (the only path since v1.0)."""
-        # If native mode is off (e.g. after disable_native), log calls are no-ops.
-        if not _native.is_native_enabled():
+        # One coherent snapshot follows the record through every processing stage.
+        # Reconfigure/disable may retire its writer, but cannot invalidate this
+        # Python object or expose a partially updated configuration.
+        runtime = _native.current_runtime()
+        if runtime is None:
             return
 
         stack_info = bool(kwargs.get("stack_info") or self._opt_stack_info)
 
         # Cheap disabled path: level-filter before any formatting.
-        if _native.is_native_enabled() and _native.is_below_level(method):
+        if _native.is_below_level(method, runtime):
             return
 
         formatted_msg, consumed_keys = _safe_format(message, args, kwargs)
@@ -317,7 +339,7 @@ class Logger:
 
         # Pre-render filter (sampling/rate-limit): decide before building fields.
         # Keys on the formatted message, matching the rate-limiter's grouping.
-        if _native.is_native_enabled() and not _native.should_render(method, formatted_msg):
+        if not _native.should_render(method, formatted_msg, runtime):
             return
 
         exc_info = kwargs.get("exc_info", self._opt_exc_info)
@@ -330,19 +352,32 @@ class Logger:
         # matching structlog's merge_contextvars setdefault semantics.
         for key, value in get_contextvars().items():
             fields.setdefault(key, value)
-        if _native.otel_enabled():
+        if _native.otel_enabled(runtime):
             add_otel_context(None, method, fields)
         if exc_info:
-            exception = _native.build_exception_field(exc_info)
+            exception = _native.build_exception_field(exc_info, runtime)
             if exception:
                 fields["exception"] = exception
         # Stack capture is Python-owned (frame walking); rendering places
         # "stack" between "service" and "message" like StackInfoRenderer.
         stack = _native.format_stack() if stack_info else None
-        _native.notify_metrics(method, formatted_msg, fields)
-        sentry_line = _native.render_and_enqueue(fields, name, method, formatted_msg, stack=stack)
+        _native.notify_metrics(method, formatted_msg, fields, runtime)
+        sentry_line = _native.render_and_enqueue(
+            fields,
+            name,
+            method,
+            formatted_msg,
+            stack=stack,
+            runtime=runtime,
+        )
         if sentry_line is not None:
-            _native.notify_sentry(method, sentry_line, tuple(fields), exc_info=exc_info)
+            _native.notify_sentry(
+                method,
+                sentry_line,
+                tuple(fields),
+                exc_info=exc_info,
+                runtime=runtime,
+            )
 
     # -- sink (handler) management ------------------------------------------
 

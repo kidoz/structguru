@@ -194,6 +194,10 @@ def test_bench_cpu_heavy_logging_gil(benchmark: Any, workers: int) -> None:
             checksum = benchmark(_threaded_workload, executor, workers)
         assert checksum > 0
         _native.flush_native()
+        metrics = _native.native_metrics()
+        assert metrics is not None
+        assert metrics["enqueued"] == metrics["written"]
+        assert metrics["dropped"] == 0
     finally:
         _native.disable_native()
 
@@ -208,6 +212,10 @@ def test_bench_cpu_heavy_logging_free_threaded(benchmark: Any, workers: int) -> 
             checksum = benchmark(_threaded_workload, executor, workers)
         assert checksum > 0
         _native.flush_native()
+        metrics = _native.native_metrics()
+        assert metrics is not None
+        assert metrics["enqueued"] == metrics["written"]
+        assert metrics["dropped"] == 0
     finally:
         _native.disable_native()
 
