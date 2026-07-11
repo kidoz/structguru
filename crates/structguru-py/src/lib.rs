@@ -744,7 +744,11 @@ fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny
     }
 }
 
-#[pymodule(name = "_rust")]
+// The module stores no borrowed Python objects or unsynchronized native globals.
+// Exported classes own Send/Sync Rust state, and Python object traversal remains
+// scoped to an attached `Python` token, so importing this extension must not
+// re-enable the GIL on a free-threaded CPython build.
+#[pymodule(name = "_rust", gil_used = false)]
 fn rust_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(version, module)?)?;
     module.add_function(wrap_pyfunction!(normalize_level, module)?)?;

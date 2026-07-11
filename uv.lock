@@ -1705,6 +1705,10 @@ docs = [
     { name = "mkdocs-material" },
     { name = "mkdocstrings", extra = ["python"] },
 ]
+free-threaded = [
+    { name = "pytest" },
+    { name = "pytest-benchmark" },
+]
 governance = [
     { name = "jsonschema" },
 ]
@@ -1763,6 +1767,10 @@ docs = [
     { name = "mkdocs", specifier = ">=1.6.1" },
     { name = "mkdocs-material", specifier = ">=9.7.6" },
     { name = "mkdocstrings", extras = ["python"], specifier = ">=1.0.4" },
+]
+free-threaded = [
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-benchmark", specifier = ">=5.2.3" },
 ]
 governance = [{ name = "jsonschema", specifier = ">=4.25,<5" }]
 lint = [
