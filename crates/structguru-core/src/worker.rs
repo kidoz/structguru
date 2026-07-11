@@ -162,10 +162,12 @@ impl StringSink for FailingSink {
 /// opened. `max_bytes == 0` disables rotation. The size check happens before
 /// each write, matching CPython's `RotatingFileHandler` behavior.
 ///
-/// Like CPython, there is no cross-process lock — concurrent writers sharing one
-/// path will corrupt rotation. Within a single writer thread this is sound.
+/// Writers sharing one path coordinate every rotation through an owner-only
+/// sidecar lock file. This keeps prefork workers from renaming or deleting each
+/// other's active files and backups.
 pub struct RotatingFileSink {
     file: Option<BufWriter<File>>,
+    lock_file: File,
     path: PathBuf,
     max_bytes: usize,
     backup_count: usize,
@@ -186,7 +188,12 @@ impl RotatingFileSink {
         {
             fs::create_dir_all(parent).map_err(|err| SinkError::new(err.to_string()))?;
         }
-        let file = open_append(&path)?;
+        let lock_file = open_lock(&path)?;
+        File::lock(&lock_file).map_err(|err| SinkError::new(err.to_string()))?;
+        let opened = open_append(&path);
+        let unlock_result = File::unlock(&lock_file);
+        let file = opened?;
+        unlock_result.map_err(|err| SinkError::new(err.to_string()))?;
         let bytes_written = file
             .get_ref()
             .metadata()
@@ -194,6 +201,7 @@ impl RotatingFileSink {
             .len() as usize;
         Ok(Self {
             file: Some(file),
+            lock_file,
             path,
             max_bytes,
             backup_count,
@@ -266,11 +274,28 @@ impl RotatingFileSink {
             .as_mut()
             .ok_or_else(|| SinkError::new("rotating file sink has no active file"))
     }
-}
 
-impl StringSink for RotatingFileSink {
-    fn write(&mut self, message: String) -> Result<(), SinkError> {
+    /// Reopen the active path after another process may have rotated it.
+    fn refresh_active_file(&mut self) -> Result<(), SinkError> {
+        if let Some(mut file) = self.file.take() {
+            file.flush()
+                .map_err(|err| SinkError::new(err.to_string()))?;
+        }
+        let file = open_append(&self.path)?;
+        self.bytes_written = file
+            .get_ref()
+            .metadata()
+            .map_err(|err| SinkError::new(err.to_string()))?
+            .len() as usize;
+        self.file = Some(file);
+        Ok(())
+    }
+
+    fn write_locked(&mut self, message: String) -> Result<(), SinkError> {
         let bytes = message.as_bytes();
+        if self.max_bytes > 0 && self.backup_count > 0 {
+            self.refresh_active_file()?;
+        }
         // Match RotatingFileHandler: when the active file is non-empty, roll
         // before writing the record that would reach or cross the threshold.
         if self.max_bytes > 0
@@ -284,7 +309,21 @@ impl StringSink for RotatingFileSink {
             .write_all(bytes)
             .map_err(|err| SinkError::new(err.to_string()))?;
         self.bytes_written += bytes.len();
-        Ok(())
+        // Do not retain buffered bytes after releasing the process lock: another
+        // worker may rotate the path immediately afterwards.
+        self.active_file()?
+            .flush()
+            .map_err(|err| SinkError::new(err.to_string()))
+    }
+}
+
+impl StringSink for RotatingFileSink {
+    fn write(&mut self, message: String) -> Result<(), SinkError> {
+        File::lock(&self.lock_file).map_err(|err| SinkError::new(err.to_string()))?;
+        let write_result = self.write_locked(message);
+        let unlock_result =
+            File::unlock(&self.lock_file).map_err(|err| SinkError::new(err.to_string()));
+        write_result.and(unlock_result)
     }
 
     fn flush(&mut self) -> Result<(), SinkError> {
@@ -313,6 +352,29 @@ fn open_append(path: &Path) -> Result<BufWriter<File>, SinkError> {
         .open(path)
         .map_err(|err| SinkError::new(err.to_string()))?;
     Ok(BufWriter::new(file))
+}
+
+fn open_lock(path: &Path) -> Result<File, SinkError> {
+    let lock_path = lock_path(path);
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(lock_path)
+        .map_err(|err| SinkError::new(err.to_string()))
+}
+
+fn lock_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|value| value.to_os_string())
+        .unwrap_or_default();
+    name.push(".lock");
+    path.with_file_name(name)
 }
 
 fn backup_path(base: &Path, index: usize) -> PathBuf {
@@ -933,6 +995,7 @@ mod tests {
         for i in 0..=6 {
             let _ = std::fs::remove_file(backup_path(path, i));
         }
+        let _ = std::fs::remove_file(lock_path(path));
     }
 
     #[test]
@@ -1084,6 +1147,25 @@ mod tests {
             "existing"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn rotating_file_coordinates_multiple_writers() {
+        let path = temp_log_path("rotate-multiple-writers");
+        let mut first = RotatingFileSink::new(&path, 10, 2).unwrap();
+        let mut second = RotatingFileSink::new(&path, 10, 2).unwrap();
+
+        first.write("123456789".to_owned()).unwrap();
+        // The second sink was opened while the file was empty. It must refresh
+        // the shared size under the process lock and rotate before this write.
+        second.write("second".to_owned()).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+        assert_eq!(
+            std::fs::read_to_string(backup_path(&path, 1)).unwrap(),
+            "123456789"
+        );
         cleanup(&path);
     }
 

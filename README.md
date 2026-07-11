@@ -138,29 +138,13 @@ logger.remove(handler_id)
 logger.remove()
 ```
 
+On Unix, new files created by either `logger.add(path)` or the native rotating
+file sink are owner-only (`0600`). Existing files retain their permissions.
+
 All sink forms receive structguru records. They are also registered with the
 stdlib root logger for third-party records. Native delivery uses the bounded
 callable queue and participates in `flush_native()`, reconfiguration, disable,
 fork, and shutdown draining.
-
-### Environment-based setup
-
-`setup_structlog()` reads from environment variables for easy container deployment:
-
-```python
-from structguru import setup_structlog
-
-setup_structlog(
-    service="myapp",
-    suppress_loggers=("elasticsearch", "urllib3"),
-)
-```
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LOG_LEVEL` | `INFO` | Minimum log level |
-| `JSON_LOGS` | `1` | `0` for console, `1` for JSON |
-| `LOG_PATH` | *(none)* | Optional file sink with 50 MB rotation |
 
 ### Console vs JSON output
 
@@ -241,6 +225,9 @@ from structguru import configure
 configure(structured_exceptions=True, exception_max_frames=20)
 ```
 
+`exception_max_frames=0` omits traceback frames entirely. Negative frame and
+local-representation limits are rejected during configuration.
+
 ### OpenTelemetry correlation
 
 Inject trace context into every log event:
@@ -312,7 +299,7 @@ Behavior notes:
 - **Redaction, level filtering, exceptions, and OpenTelemetry** injection are supported natively; redaction covers the message and all structured string values before rendering or Sentry export. `sensitive_keys` overrides the default redaction keys. Rust's linear-time regex engine rejects backreferences and look-around with `ValueError` at configuration time.
 - **Sampling & rate limiting** (`sample_rate`, `rate_limit_max`, `rate_limit_period`) are applied as native pre-render filters — dropped records cost zero rendering. `sampled` and `rate_limited` counters are distinct from the transport `dropped` counter. `sample_max_level` restricts sampling to records at or below that level; more severe records always pass.
 - **Metric hooks** (`metric_processor=...`) invoke a structlog-style processor (e.g. `MetricProcessor`) for every *kept* record on the caller's thread, with `(None, method, {"event": message, **fields})`. Dropped records (level/sampling/rate-limit) never reach it; hook errors are swallowed.
-- **Fork/shutdown safe** — the writer is flushed on exit and respawned in forked children (gunicorn/celery prefork).
+- **Fork/shutdown safe** — the writer is flushed on exit and respawned in forked children (gunicorn/celery prefork). Rotating-file writers sharing a path coordinate through an owner-only `.lock` sidecar; distributed hosts should still prefer stdout and an external collector.
 - **Structured exceptions** (`structured_exceptions=True`) render `type`, `message`, `module`, and frames as a dictionary, with optional redacted/truncated locals controlled by the `exception_*` options.
 - **`stack_info` is supported natively**: the stack is captured in Python and rendered in the same position as `StackInfoRenderer` (`stack` between `service` and `message`). Unlike the standard path, the stack ends at the *user's* calling frame (structguru-internal frames are skipped, the way structlog skips its own).
 - **Console mode** (`json=False`): renders colored, human-readable lines instead of JSON — structguru's own stable dev format (`<timestamp> [<LEVEL>] <message>  k=v`), with ANSI colors by default on a TTY. Override with `colors=True/False`.

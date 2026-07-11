@@ -80,6 +80,11 @@ For a primary rotating file sink, configure it directly:
 configure(file_path="application.log", file_max_bytes=50 * 1024 * 1024)
 ```
 
+The rotating sink coordinates workers that share a path through an owner-only
+`application.log.lock` sidecar. Keep that lock file on the same local filesystem
+as the log; for containers or distributed hosts, stdout plus an external log
+collector remains the recommended deployment model.
+
 ## Exceptions and tracing
 
 ```python
