@@ -30,6 +30,8 @@ def test_public_native_api_is_exported() -> None:
     ):
         assert hasattr(structguru, name), name
     assert not hasattr(structguru, "enable_native")
+    assert not hasattr(structguru, "setup_structlog")
+    assert "setup_structlog" not in structguru.__all__
 
 
 def test_public_configure_and_runtime_level_change() -> None:

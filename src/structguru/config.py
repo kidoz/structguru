@@ -1,16 +1,14 @@
 """Logging configuration for structguru.
 
 Since v1.0, structguru uses the native Rust renderer as its only logging path.
-These functions are compatibility shims that configure the native renderer to
-match the pre-1.0 observable contract (output lands on the configured stream).
+The remaining compatibility shim configures the native renderer to match the
+pre-1.0 observable stream contract.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import sys
-from collections.abc import Sequence
 from typing import Any
 
 from structguru._native import configure as _configure
@@ -88,56 +86,3 @@ def configure_structlog(
         target="null",
         stream_sink=stream,
     )
-
-
-def setup_structlog(
-    *,
-    service: str = "app",
-    suppress_loggers: Sequence[str] = (),
-) -> None:
-    """Application-level logging setup.
-
-    Reads environment variables:
-
-    - ``LOG_LEVEL`` (default: ``"INFO"``)
-    - ``JSON_LOGS`` (``"0"`` = console, default: ``"1"`` = JSON)
-    - ``LOG_PATH`` (optional file sink with 50 MB rotation)
-
-    Parameters
-    ----------
-    service:
-        Application/service name added to every log record.
-    suppress_loggers:
-        Logger names to suppress to WARNING level.
-    """
-    level = os.environ.get("LOG_LEVEL", "INFO")
-    json_logs = os.environ.get("JSON_LOGS", "1") != "0"
-
-    kwargs: dict[str, Any] = {
-        "service": service,
-        "level": level,
-        "json": json_logs,
-    }
-
-    log_path = os.environ.get("LOG_PATH")
-    if log_path:
-        kwargs["file_path"] = log_path
-
-    _configure(**kwargs)
-
-    for name in suppress_loggers:
-        logging.getLogger(name).setLevel(logging.WARNING)
-
-    def _log_exception(
-        exc_type: type[BaseException],
-        exc_value: BaseException,
-        exc_traceback: Any,
-    ) -> None:
-        if issubclass(exc_type, KeyboardInterrupt):
-            sys.__excepthook__(exc_type, exc_value, exc_traceback)
-            return
-        from structguru.core import logger
-
-        logger.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
-
-    sys.excepthook = _log_exception
