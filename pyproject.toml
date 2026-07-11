@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "structguru"
-version = "1.0.0"
+version = "1.0.1"
 description = "Native structured logging with a loguru-style Python API"
 readme = "README.md"
 license = "MIT"
@@ -52,6 +52,7 @@ dev = [
     { include-group = "lint" },
     { include-group = "docs" },
     { include-group = "bench" },
+    { include-group = "governance" },
 ]
 test = [
     "pytest>=8.0",
@@ -76,6 +77,9 @@ docs = [
 bench = [
     "pytest-benchmark>=5.2.3",
     "loguru>=0.7.3",
+]
+governance = [
+    "jsonschema>=4.25,<5",
 ]
 
 [tool.maturin]
