@@ -89,9 +89,12 @@ jobs:
         run: make python-check
 
   release-free-threaded:
-    name: release gate free-threaded Python 3.14
+    name: release gate free-threaded Python ${{ matrix.python-version }}
     needs: metadata
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.13t", "3.14t"]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
@@ -102,16 +105,16 @@ jobs:
         with:
           toolchain: stable
       - name: Install free-threaded Python
-        run: uv python install 3.14t
+        run: uv python install ${{ matrix.python-version }}
       - name: Install locked free-threaded environment
-        run: uv sync --locked --python 3.14t --no-default-groups --group free-threaded
+        run: uv sync --locked --python ${{ matrix.python-version }} --no-default-groups --group free-threaded
       - name: Verify free-threaded mode remains enabled
         run: >-
-          uv run --no-sync --python 3.14t python -c
+          uv run --no-sync --python ${{ matrix.python-version }} python -c
           "import sys, structguru; assert not sys._is_gil_enabled()"
       - name: Run free-threaded release regressions
         run: >-
-          uv run --no-sync --python 3.14t python -m pytest
+          uv run --no-sync --python ${{ matrix.python-version }} python -m pytest
           tests/test_native_free_threaded.py
           tests/test_native_lifecycle.py::test_disable_during_in_flight_formatting_never_raises
 

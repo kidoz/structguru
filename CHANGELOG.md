@@ -27,8 +27,8 @@ All notable changes to this project are documented here. The format is based on
   free-threaded build. Each log record captures one coherent runtime snapshot and
   threads it through formatting, filtering, rendering, and enqueue, so a
   concurrent `configure()`/`disable_native()` cannot expose partially updated
-  state. A `free-threaded` release gate builds against 3.14t and runs the
-  concurrency and lifecycle regressions before publish.
+  state. The `free-threaded` release gates build against both 3.13t and 3.14t and
+  run the concurrency and lifecycle regressions before publish.
 - **Async httpx hooks.** `StructguruHTTPXLoggingHooks.get_async_hooks()` returns
   awaitable request/response hooks for `httpx.AsyncClient`.
 - Benchmarks for the native logging pipeline (structured records, contextvars,
