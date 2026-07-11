@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **stdlib logging bridge.** `structguru.integrations.stdlib.install_stdlib_bridge()`
+  routes standard-library `logging` records (from third-party libraries) through
+  structguru's native renderer, so foreign logs share the same JSON/console
+  formatting, redaction, level filtering, and output stream. The record's logger
+  name, level, `extra=` fields, and `exc_info` are all preserved, and the
+  already-formatted message is passed through verbatim. A `StructguruHandler`
+  class is exposed for `propagate=False` loggers, and `suppress_loggers()` quiets
+  noisy loggers by raising their level threshold.
+
 ## [1.0.2] - 2026-07-11
 
 ### Added

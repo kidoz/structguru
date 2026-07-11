@@ -49,11 +49,47 @@ session.get("https://example.com")
 
 ## Standard Library Integration
 
-Since v1.0, structguru uses the native Rust renderer for its own logs. Third-party
-libraries that log through the standard `logging` module are unaffected — their
-records flow through the stdlib handler chain normally. Configure the root logger's
-handlers via `logging.basicConfig()` or Django's `LOGGING` dict if you need
-third-party logs formatted a specific way.
+Third-party libraries log through the standard `logging` module. To render those
+records through structguru's native path — same JSON/console formatting,
+redaction, level filtering, and output stream as `structguru.logger` — install
+the bridge:
+
+```python
+from structguru.integrations.stdlib import install_stdlib_bridge
+
+install_stdlib_bridge(level="INFO", suppress_loggers=("urllib3", "botocore"))
+
+import logging
+logging.getLogger("sqlalchemy.engine").info("SELECT 1")
+# -> {"logger":"sqlalchemy.engine","level":"INFO",...,"message":"SELECT 1"}
+```
+
+`install_stdlib_bridge` attaches a `StructguruHandler` to the root logger, sets
+the root level, and raises `suppress_loggers` to `suppress_level` (default
+`WARNING`). The record's logger name becomes the `logger` field, `extra=` fields
+are forwarded as structured fields, and `exc_info` renders like a native
+`logger.exception` call. It returns the handler so you can remove it later.
+
+For a logger with `propagate=False` (its records never reach the root logger),
+attach the handler directly:
+
+```python
+import logging
+from structguru.integrations.stdlib import StructguruHandler
+
+access = logging.getLogger("uvicorn.access")
+access.handlers = [StructguruHandler()]
+access.propagate = False
+```
+
+To only quiet noisy loggers without routing them, use `suppress_loggers` on its
+own:
+
+```python
+from structguru.integrations.stdlib import suppress_loggers
+
+suppress_loggers("urllib3", "botocore", level="WARNING")
+```
 
 ## ASGI (FastAPI / Starlette)
 
