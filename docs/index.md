@@ -71,8 +71,8 @@ logger.remove(file_id)
 
 `logger.add()` supports file paths, streams, stdlib handlers, and callables. Each
 sink receives structguru records and is attached to the stdlib root logger for
-third-party records. Native delivery uses a bounded queue and is drained by
-`flush_native()`, reconfiguration, disable, fork handling, and shutdown.
+third-party records. Native delivery uses a bounded queue and is drained on
+flush, reconfiguration, `shutdown()`, fork handling, and interpreter exit.
 
 For a primary rotating file sink, configure it directly:
 

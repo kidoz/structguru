@@ -1,9 +1,15 @@
 # API Reference: Configuration
 
-## Primary configuration
+## Configure the runtime
 
 ::: structguru.configure
 
-## Compatibility helpers
+## Runtime control
 
-::: structguru.config
+::: structguru.shutdown
+
+::: structguru.is_available
+
+::: structguru.set_level
+
+::: structguru.writer_metrics

@@ -143,8 +143,8 @@ file sink are owner-only (`0600`). Existing files retain their permissions.
 
 All sink forms receive structguru records. They are also registered with the
 stdlib root logger for third-party records. Native delivery uses the bounded
-callable queue and participates in `flush_native()`, reconfiguration, disable,
-fork, and shutdown draining.
+callable queue and is drained on flush, reconfiguration, `shutdown()`, fork, and
+interpreter exit.
 
 ### Console vs JSON output
 
