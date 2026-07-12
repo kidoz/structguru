@@ -40,6 +40,10 @@ _LEVEL_NUM: dict[str, int] = {
     "fatal": 50,
 }
 
+# Supported output renderers. ``format=`` on configure() accepts these names;
+# the choice maps to the ``console`` runtime flag until more than two formats exist.
+_FORMATS: tuple[str, ...] = ("json", "console")
+
 
 class _NativeWriter(Protocol):
     def try_enqueue(self, message: str) -> bool: ...
@@ -436,7 +440,7 @@ def configure(
     exception_include_locals: bool = False,
     exception_max_frames: int = 20,
     exception_max_local_repr: int = 200,
-    json: bool = True,
+    format: str = "json",
     colors: bool | None = None,
     file_path: str | None = None,
     file_max_bytes: int = 50 * 1024 * 1024,
@@ -496,10 +500,11 @@ def configure(
     ``sensitive_keys`` reused for locals redaction) instead of the formatted
     traceback string.
 
-    ``json=False`` selects the native console renderer (colored, human-readable
-    dev output) instead of JSON. ``colors`` defaults to ``sys.stdout.isatty()``
-    in console mode; set it explicitly to override. The console format is
-    structguru's own stable dev format, not a structlog ``ConsoleRenderer`` clone.
+    ``format`` selects the renderer: ``"json"`` (default, production-friendly
+    compact JSON) or ``"console"`` (colored, human-readable dev output in
+    structguru's own stable format — not a structlog ``ConsoleRenderer`` clone).
+    ``colors`` defaults to ``sys.stdout.isatty()`` in console mode; set it
+    explicitly to override (ignored in JSON mode).
 
     ``file_path`` enables a native rotating-file sink (append mode). Defaults
     mirror :class:`logging.handlers.RotatingFileHandler`: ``file_max_bytes=50MB``,
@@ -560,6 +565,13 @@ def configure(
         raise ValueError(msg)
     if exception_max_local_repr < 0:
         msg = f"exception_max_local_repr must be >= 0, got {exception_max_local_repr}"
+        raise ValueError(msg)
+
+    # Resolve the output format. ``format=`` is the canonical selector
+    # ("json" | "console"); ``format="json"`` is the default.
+    resolved_format = format
+    if resolved_format not in _FORMATS:
+        msg = f"format must be one of {_FORMATS}, got {resolved_format!r}"
         raise ValueError(msg)
 
     # Validate regex patterns against Rust's engine before enabling. Rust's
@@ -625,8 +637,8 @@ def configure(
                 msg = f"callable_sinks[{i}] must be callable, got {type(fn)!r}"
                 raise TypeError(msg)
 
-    # Resolve console/colors.
-    new_console = not json
+    # Resolve console/colors from the chosen format.
+    new_console = resolved_format == "console"
     new_colors = colors if colors is not None else (sys.stdout.isatty() if new_console else False)
 
     # Construct every fallible native resource before touching the active

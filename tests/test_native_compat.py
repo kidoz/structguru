@@ -8,11 +8,11 @@ from typing import Any
 import pytest
 
 import structguru
-from structguru import _native
+from structguru import _runtime
 from structguru._contextvars import bind_contextvars, clear_contextvars
 
 pytestmark = pytest.mark.skipif(
-    not _native.is_available(),
+    not _runtime.is_available(),
     reason="native extension not built",
 )
 
@@ -39,8 +39,8 @@ def test_public_configure_and_runtime_level_change() -> None:
         structguru.set_level("ERROR")
         structguru.logger.info("dropped")  # below ERROR now
         structguru.logger.error("kept")
-        _native.flush_native()
-        lines = _native.drain_messages()
+        _runtime.flush_native()
+        lines = _runtime.drain_messages()
         assert len(lines) == 1
         assert _last(lines)["message"] == "kept"
     finally:
@@ -52,8 +52,8 @@ def test_native_honors_bind_and_contextualize() -> None:
     try:
         with structguru.logger.contextualize(request_id="r1"):
             structguru.logger.bind(user="alice").info("hi")
-        _native.flush_native()
-        record = _last(_native.drain_messages())
+        _runtime.flush_native()
+        record = _last(_runtime.drain_messages())
         assert record["request_id"] == "r1"
         assert record["user"] == "alice"
     finally:
@@ -68,8 +68,8 @@ def test_native_picks_up_integration_contextvars() -> None:
     try:
         bind_contextvars(request_id="req-9", method="GET")
         structguru.logger.info("handled")
-        _native.flush_native()
-        record = _last(_native.drain_messages())
+        _runtime.flush_native()
+        record = _last(_runtime.drain_messages())
         assert record["request_id"] == "req-9"
         assert record["method"] == "GET"
     finally:
@@ -80,9 +80,9 @@ def test_native_picks_up_integration_contextvars() -> None:
 def test_env_var_auto_enable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STRUCTGURU_NATIVE_TARGET", "memory")
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
-    _native.shutdown()
+    _runtime.shutdown()
     try:
-        _native._maybe_configure_from_env()
-        assert _native.is_native_enabled()
+        _runtime._maybe_configure_from_env()
+        assert _runtime.is_native_enabled()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()

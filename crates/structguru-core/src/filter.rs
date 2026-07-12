@@ -24,7 +24,7 @@ pub trait RecordFilter: Send + Sync {
     fn allow(&self, key: &str, level: &str) -> Decision;
 }
 
-/// Numeric level for a method name (mirrors `_LEVEL_NUM` in `_native.py`).
+/// Numeric level for a method name (mirrors `_LEVEL_NUM` in `_runtime.py`).
 fn method_level_num(method: &str) -> u8 {
     match method {
         "trace" => 5,

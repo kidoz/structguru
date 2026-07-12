@@ -13,17 +13,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import structguru
-from structguru import _native
+from structguru import _runtime
 
 pytestmark = pytest.mark.skipif(
-    not _native.is_available(),
+    not _runtime.is_available(),
     reason="native extension not built",
 )
 
 
 def _drain_all() -> list[str]:
-    _native.flush_native()
-    return _native.drain_messages()
+    _runtime.flush_native()
+    return _runtime.drain_messages()
 
 
 def test_sentry_hook_invoked_per_kept_record() -> None:
@@ -33,13 +33,13 @@ def test_sentry_hook_invoked_per_kept_record() -> None:
         calls.append((_logger, method, event_dict))
         return event_dict
 
-    _native.configure(service="svc", target="memory", level="DEBUG", sentry_processor=hook)
+    _runtime.configure(service="svc", target="memory", level="DEBUG", sentry_processor=hook)
     try:
         structguru.logger.info("first", request_id="r1")
         structguru.logger.error("second", code=500)
         _drain_all()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert len(calls) == 2
     assert calls[0][1] == "info"
@@ -58,12 +58,12 @@ def test_sentry_hook_receives_raw_exc_info() -> None:
         captured.append(event_dict.get("exc_info"))
         return event_dict
 
-    _native.configure(service="svc", target="memory", level="DEBUG", sentry_processor=hook)
+    _runtime.configure(service="svc", target="memory", level="DEBUG", sentry_processor=hook)
     try:
         structguru.logger.error("failed", exc_info=err)
         _drain_all()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert len(captured) == 1
     assert captured[0] is err, "hook must receive the raw BaseException instance"
@@ -76,7 +76,7 @@ def test_sentry_hook_not_invoked_for_dropped_records() -> None:
         calls.append(event_dict)
         return event_dict
 
-    _native.configure(
+    _runtime.configure(
         service="svc",
         target="memory",
         level="DEBUG",
@@ -87,7 +87,7 @@ def test_sentry_hook_not_invoked_for_dropped_records() -> None:
         structguru.logger.info("dropped")
         _drain_all()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert len(calls) == 0, "sampling must drop before the Sentry hook runs"
 
@@ -99,7 +99,7 @@ def test_sentry_hook_not_invoked_for_level_filtered() -> None:
         calls.append(event_dict)
         return event_dict
 
-    _native.configure(
+    _runtime.configure(
         service="svc",
         target="memory",
         level="WARNING",  # INFO is below threshold
@@ -110,7 +110,7 @@ def test_sentry_hook_not_invoked_for_level_filtered() -> None:
         structguru.logger.warning("kept")
         _drain_all()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert len(calls) == 1
     assert calls[0]["event"] == "kept"
@@ -120,13 +120,13 @@ def test_sentry_hook_errors_are_swallowed() -> None:
     def bad_hook(_logger: Any, method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("sentry hook boom")
 
-    _native.configure(service="svc", target="memory", level="DEBUG", sentry_processor=bad_hook)
+    _runtime.configure(service="svc", target="memory", level="DEBUG", sentry_processor=bad_hook)
     try:
         # Must not raise — the record is still rendered and enqueued.
         structguru.logger.info("survives")
         lines = _drain_all()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert len(lines) == 1
     assert "survives" in lines[0]
@@ -147,21 +147,21 @@ def test_sentry_hook_with_real_sentry_processor() -> None:
     err = RuntimeError("production failure")
     processor = SentryProcessor(event_level=40, require_redaction=False)
 
-    _native.configure(service="svc", target="memory", level="DEBUG", sentry_processor=processor)
+    _runtime.configure(service="svc", target="memory", level="DEBUG", sentry_processor=processor)
     try:
         with patch.object(sentry_mod, "_sentry_sdk", mock_sentry):
             structguru.logger.error("something broke", exc_info=err)
             _drain_all()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     mock_sentry.capture_exception.assert_called_once_with(err)
 
 
 def test_non_callable_sentry_processor_raises() -> None:
     with pytest.raises(TypeError, match="sentry_processor"):
-        _native.configure(sentry_processor="not callable")  # type: ignore[arg-type]
-    assert not _native.is_native_enabled()
+        _runtime.configure(sentry_processor="not callable")  # type: ignore[arg-type]
+    assert not _runtime.is_native_enabled()
 
 
 def test_sentry_hook_injects_redaction_marker_when_redaction_configured() -> None:
@@ -175,7 +175,7 @@ def test_sentry_hook_injects_redaction_marker_when_redaction_configured() -> Non
         captured.append(event_dict)
         return event_dict
 
-    _native.configure(
+    _runtime.configure(
         service="svc",
         target="memory",
         level="DEBUG",
@@ -186,7 +186,7 @@ def test_sentry_hook_injects_redaction_marker_when_redaction_configured() -> Non
         structguru.logger.info("login", password="hunter2")
         _drain_all()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert len(captured) == 1
     assert captured[0].get(REDACTED_MARKER_KEY) is True
@@ -200,7 +200,7 @@ def test_sentry_hook_receives_pattern_redacted_message_and_fields() -> None:
         captured.append(event_dict)
         return event_dict
 
-    _native.configure(
+    _runtime.configure(
         target="memory",
         sensitive_patterns=[r"secret=\w+"],
         sentry_processor=hook,
@@ -209,7 +209,7 @@ def test_sentry_hook_receives_pattern_redacted_message_and_fields() -> None:
         structguru.logger.error("message secret=abc", detail="field secret=xyz")
         _drain_all()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert captured[0]["event"] == "message [REDACTED]"
     assert captured[0]["detail"] == "field [REDACTED]"
@@ -226,7 +226,7 @@ def test_real_sentry_processor_never_receives_unredacted_extras() -> None:
     context.__exit__.return_value = False
     mock_sentry.new_scope.return_value = context
 
-    _native.configure(
+    _runtime.configure(
         target="memory",
         sensitive_keys=["password"],
         sentry_processor=SentryProcessor(capture_messages=True),
@@ -236,7 +236,7 @@ def test_real_sentry_processor_never_receives_unredacted_extras() -> None:
             structguru.logger.error("login", password="cleartext")
             _drain_all()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     breadcrumb = mock_sentry.add_breadcrumb.call_args.kwargs
     assert breadcrumb["data"]["password"] == "[REDACTED]"

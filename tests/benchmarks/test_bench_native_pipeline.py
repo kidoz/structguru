@@ -10,11 +10,11 @@ from typing import Any
 import pytest
 import structguru._rust as rust
 
-from structguru import _native, logger
+from structguru import _runtime, logger
 from structguru.core import _safe_format
 
 pytestmark = pytest.mark.skipif(
-    not _native.is_available(),
+    not _runtime.is_available(),
     reason="native extension not built",
 )
 
@@ -70,24 +70,24 @@ def _request_fields() -> dict[str, Any]:
 def test_bench_native_structured_record(benchmark: Any) -> None:
     """Benchmark formatting, conversion, rendering, and enqueue of nested fields."""
     fields = _request_fields()
-    _native.configure(service="checkout", target="null", level="INFO")
+    _runtime.configure(service="checkout", target="null", level="INFO")
     try:
 
         @benchmark
         def _() -> None:
             logger.info("order accepted", **fields)
 
-        _native.flush_native()
-        metrics = _native.writer_metrics()
+        _runtime.flush_native()
+        metrics = _runtime.writer_metrics()
         assert metrics is not None
         assert metrics["written"] > 0
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_bench_native_contextvars_merge(benchmark: Any) -> None:
     """Benchmark a native record with request-scoped context already bound."""
-    _native.configure(service="api", target="null", level="INFO")
+    _runtime.configure(service="api", target="null", level="INFO")
     try:
         with logger.contextualize(request_id="req-123", tenant_id="tenant-7"):
 
@@ -95,14 +95,14 @@ def test_bench_native_contextvars_merge(benchmark: Any) -> None:
             def _() -> None:
                 logger.info("request handled", status_code=200, duration_ms=12.5)
 
-        _native.flush_native()
+        _runtime.flush_native()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_bench_native_redaction(benchmark: Any) -> None:
     """Benchmark key and compiled-pattern redaction on nested structured fields."""
-    _native.configure(
+    _runtime.configure(
         service="api",
         target="null",
         sensitive_keys=["authorization"],
@@ -118,42 +118,42 @@ def test_bench_native_redaction(benchmark: Any) -> None:
         def _() -> None:
             logger.info("authenticated token-secret123", **fields)
 
-        _native.flush_native()
+        _runtime.flush_native()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_bench_native_disabled_level_fast_path(benchmark: Any) -> None:
     """Benchmark a record rejected before formatting and native rendering."""
-    _native.configure(service="api", target="null", level="WARNING")
+    _runtime.configure(service="api", target="null", level="WARNING")
     try:
 
         @benchmark
         def _() -> None:
             logger.debug("debug payload {value}", value=42, nested={"enabled": True})
 
-        metrics = _native.writer_metrics()
+        metrics = _runtime.writer_metrics()
         assert metrics is not None
         assert metrics["enqueued"] == 0
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_bench_native_sampling_drop_fast_path(benchmark: Any) -> None:
     """Benchmark deterministic sampling rejection before field construction."""
-    _native.configure(service="api", target="null", sample_rate=0.0)
+    _runtime.configure(service="api", target="null", sample_rate=0.0)
     try:
 
         @benchmark
         def _() -> None:
             logger.info("sampled event", nested={"value": 42})
 
-        metrics = _native.writer_metrics()
+        metrics = _runtime.writer_metrics()
         assert metrics is not None
         assert metrics["sampled"] > 0
         assert metrics["enqueued"] == 0
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_bench_native_writer_blocking_enqueue(benchmark: Any) -> None:
@@ -188,36 +188,36 @@ class _Customer:
 @pytest.mark.parametrize("workers", [1, 4], ids=["one-thread", "four-threads"])
 def test_bench_cpu_heavy_logging_gil(benchmark: Any, workers: int) -> None:
     """Benchmark CPU-heavy threaded logging on standard GIL-enabled CPython."""
-    _native.configure(service="workers", target="null", level="INFO")
+    _runtime.configure(service="workers", target="null", level="INFO")
     try:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             checksum = benchmark(_threaded_workload, executor, workers)
         assert checksum > 0
-        _native.flush_native()
-        metrics = _native.writer_metrics()
+        _runtime.flush_native()
+        metrics = _runtime.writer_metrics()
         assert metrics is not None
         assert metrics["enqueued"] == metrics["written"]
         assert metrics["dropped"] == 0
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 @pytest.mark.skipif(_gil_enabled(), reason="requires a free-threaded CPython build")
 @pytest.mark.parametrize("workers", [1, 4], ids=["one-thread", "four-threads"])
 def test_bench_cpu_heavy_logging_free_threaded(benchmark: Any, workers: int) -> None:
     """Benchmark the same workload on a free-threaded CPython build."""
-    _native.configure(service="workers", target="null", level="INFO")
+    _runtime.configure(service="workers", target="null", level="INFO")
     try:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             checksum = benchmark(_threaded_workload, executor, workers)
         assert checksum > 0
-        _native.flush_native()
-        metrics = _native.writer_metrics()
+        _runtime.flush_native()
+        metrics = _runtime.writer_metrics()
         assert metrics is not None
         assert metrics["enqueued"] == metrics["written"]
         assert metrics["dropped"] == 0
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 @pytest.mark.skipif(not _gil_enabled(), reason="GIL-release behavior is specific to GIL builds")

@@ -1,6 +1,6 @@
 """structguru — ergonomic structured logging with a native Rust runtime."""
 
-from structguru._native import (
+from structguru._runtime import (
     configure,
     is_available,
     set_level,

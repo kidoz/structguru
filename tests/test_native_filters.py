@@ -13,18 +13,18 @@ from typing import Any
 import pytest
 
 import structguru
-from structguru import _native
+from structguru import _runtime
 
 pytestmark = pytest.mark.skipif(
-    not _native.is_available(),
+    not _runtime.is_available(),
     reason="native extension not built",
 )
 
 
 def _drain_last() -> dict[str, Any]:
     """Flush the writer and return the last rendered record as a dict."""
-    _native.flush_native()
-    return json.loads(_native.drain_messages()[-1])
+    _runtime.flush_native()
+    return json.loads(_runtime.drain_messages()[-1])
 
 
 # -- value-pattern redaction -------------------------------------------------
@@ -32,18 +32,18 @@ def _drain_last() -> dict[str, Any]:
 
 def test_pattern_redacts_matching_substring_in_string_value() -> None:
     email = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
-    _native.configure(service="svc", target="memory", level="DEBUG", sensitive_patterns=[email])
+    _runtime.configure(service="svc", target="memory", level="DEBUG", sensitive_patterns=[email])
     try:
         structguru.logger.info("msg", body="Contact user@example.com for details")
         record = _drain_last()
         assert record["body"] == "Contact [REDACTED] for details"
         assert "user@example.com" not in record["body"]
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_pattern_redacts_matching_substring_in_message() -> None:
-    _native.configure(
+    _runtime.configure(
         service="svc",
         target="memory",
         level="DEBUG",
@@ -53,14 +53,14 @@ def test_pattern_redacts_matching_substring_in_message() -> None:
         structguru.logger.info("token secret=abc")
         record = _drain_last()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert record["message"] == "token [REDACTED]"
 
 
 def test_pattern_redaction_descends_into_nested_maps_and_lists() -> None:
     ssn = r"\b\d{3}-\d{2}-\d{4}\b"
-    _native.configure(service="svc", target="memory", level="DEBUG", sensitive_patterns=[ssn])
+    _runtime.configure(service="svc", target="memory", level="DEBUG", sensitive_patterns=[ssn])
     try:
         structguru.logger.info(
             "m",
@@ -72,12 +72,12 @@ def test_pattern_redaction_descends_into_nested_maps_and_lists() -> None:
         assert record["tags"][0] == "ok [REDACTED]"
         assert record["tags"][1] == 7
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_pattern_redaction_skips_non_string_values() -> None:
     # A pattern that would match anything; non-strings must be untouched.
-    _native.configure(service="svc", target="memory", level="DEBUG", sensitive_patterns=[r".+"])
+    _runtime.configure(service="svc", target="memory", level="DEBUG", sensitive_patterns=[r".+"])
     try:
         structguru.logger.info("m", count=42, flag=True, ratio=1.5, nothing=None)
         record = _drain_last()
@@ -86,11 +86,11 @@ def test_pattern_redaction_skips_non_string_values() -> None:
         assert record["ratio"] == 1.5
         assert record["nothing"] is None
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_key_and_pattern_redaction_combine() -> None:
-    _native.configure(
+    _runtime.configure(
         service="svc",
         target="memory",
         level="DEBUG",
@@ -102,11 +102,11 @@ def test_key_and_pattern_redaction_combine() -> None:
         assert record["token"] == "[REDACTED]"
         assert record["msg_field"] == "ping [REDACTED] now"
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_multiple_patterns_apply_in_order() -> None:
-    _native.configure(
+    _runtime.configure(
         service="svc",
         target="memory",
         level="DEBUG",
@@ -117,13 +117,13 @@ def test_multiple_patterns_apply_in_order() -> None:
         record = _drain_last()
         assert record["body"] == "[REDACTED] email [REDACTED] here"
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_pattern_replacement_expands_capture_groups() -> None:
     """The look-behind rewrite: `(?<=password=)\\S+` becomes `password=(\\S+)`
     with a group-preserving replacement — same output, linear-time engine."""
-    _native.configure(
+    _runtime.configure(
         service="svc",
         target="memory",
         level="DEBUG",
@@ -136,11 +136,11 @@ def test_pattern_replacement_expands_capture_groups() -> None:
         assert record["body"] == "login with password=[REDACTED] ok"
         assert "hunter2" not in record["body"]
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_pattern_replacement_custom_literal() -> None:
-    _native.configure(
+    _runtime.configure(
         service="svc",
         target="memory",
         level="DEBUG",
@@ -152,7 +152,7 @@ def test_pattern_replacement_custom_literal() -> None:
         record = _drain_last()
         assert record["body"] == "ssn is ***"
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 @pytest.mark.parametrize(
@@ -169,24 +169,24 @@ def test_unsupported_pattern_raises_at_setup(pattern: str) -> None:
     and redaction that silently differs from the configuration is worse than
     an error. The message includes rewrite guidance."""
     with pytest.raises(ValueError, match="unsupported sensitive_patterns regex"):
-        _native.configure(
+        _runtime.configure(
             service="svc",
             target="memory",
             level="DEBUG",
             sensitive_patterns=[pattern],
         )
-    assert not _native.is_native_enabled()
+    assert not _runtime.is_native_enabled()
 
 
 def test_unsupported_pattern_error_mentions_backtracking_opt_in() -> None:
     with pytest.raises(ValueError, match="allow_backtracking_patterns=True"):
-        _native.configure(
+        _runtime.configure(
             service="svc",
             target="memory",
             level="DEBUG",
             sensitive_patterns=[r"(?<=foo)bar"],
         )
-    assert not _native.is_native_enabled()
+    assert not _runtime.is_native_enabled()
 
 
 @pytest.mark.parametrize(
@@ -218,7 +218,7 @@ def test_backtracking_opt_in_redacts_lookaround_and_backreferences(
     """`allow_backtracking_patterns=True` routes patterns the linear engine
     rejects through a bounded backtracking engine, so they work as written
     (at the cost of the linear-time guarantee for those patterns)."""
-    _native.configure(
+    _runtime.configure(
         service="svc",
         target="memory",
         level="DEBUG",
@@ -230,11 +230,11 @@ def test_backtracking_opt_in_redacts_lookaround_and_backreferences(
         record = _drain_last()
         assert record["body"] == expected
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_backtracking_opt_in_redacts_message() -> None:
-    _native.configure(
+    _runtime.configure(
         service="svc",
         target="memory",
         level="DEBUG",
@@ -245,118 +245,118 @@ def test_backtracking_opt_in_redacts_message() -> None:
         structguru.logger.info("token secret=abc")
         record = _drain_last()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert record["message"] == "token secret=[REDACTED]"
 
 
 def test_invalid_pattern_raises_even_with_backtracking_opt_in() -> None:
     with pytest.raises(ValueError, match="invalid sensitive_patterns regex"):
-        _native.configure(
+        _runtime.configure(
             service="svc",
             target="memory",
             level="DEBUG",
             sensitive_patterns=[r"(unclosed"],
             allow_backtracking_patterns=True,
         )
-    assert not _native.is_native_enabled()
+    assert not _runtime.is_native_enabled()
 
 
 def test_huge_rate_limit_period_raises_not_crashes() -> None:
     # A finite-but-enormous period overflows Rust's Duration; it must surface as
     # a ValueError, not an uncatchable panic at configure()/import time.
     with pytest.raises(ValueError, match="rate_limit_period"):
-        _native.configure(
+        _runtime.configure(
             service="svc",
             target="memory",
             level="DEBUG",
             rate_limit_max=5,
             rate_limit_period=1e300,
         )
-    assert not _native.is_native_enabled()
+    assert not _runtime.is_native_enabled()
 
 
 # -- sampling ---------------------------------------------------------------
 
 
 def test_sampler_rate_one_keeps_all() -> None:
-    _native.configure(service="svc", target="memory", level="DEBUG", sample_rate=1.0)
+    _runtime.configure(service="svc", target="memory", level="DEBUG", sample_rate=1.0)
     try:
         for _ in range(100):
             structguru.logger.info("kept")
-        _native.flush_native()
-        assert len(_native.drain_messages()) == 100
+        _runtime.flush_native()
+        assert len(_runtime.drain_messages()) == 100
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_sampler_rate_zero_drops_all() -> None:
-    _native.configure(service="svc", target="memory", level="DEBUG", sample_rate=0.0)
+    _runtime.configure(service="svc", target="memory", level="DEBUG", sample_rate=0.0)
     try:
         for _ in range(50):
             structguru.logger.info("dropped")
-        _native.flush_native()
-        assert len(_native.drain_messages()) == 0
-        assert _native.writer_metrics()["sampled"] == 50
+        _runtime.flush_native()
+        assert len(_runtime.drain_messages()) == 0
+        assert _runtime.writer_metrics()["sampled"] == 50
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_sampler_rate_half_is_statistically_bounded() -> None:
-    _native.configure(service="svc", target="memory", level="DEBUG", sample_rate=0.5)
+    _runtime.configure(service="svc", target="memory", level="DEBUG", sample_rate=0.5)
     try:
         for _ in range(1000):
             structguru.logger.info("stat")
-        _native.flush_native()
-        kept = len(_native.drain_messages())
+        _runtime.flush_native()
+        kept = len(_runtime.drain_messages())
         assert 300 < kept < 700, f"kept={kept}"
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_invalid_sample_rate_raises() -> None:
     for bad in (1.5, -0.1, float("nan")):
         with pytest.raises(ValueError, match="sample_rate"):
-            _native.configure(sample_rate=bad)
-    assert not _native.is_native_enabled()
+            _runtime.configure(sample_rate=bad)
+    assert not _runtime.is_native_enabled()
 
 
 # -- rate limiting ----------------------------------------------------------
 
 
 def test_rate_limit_drops_over_threshold() -> None:
-    _native.configure(
+    _runtime.configure(
         service="svc", target="memory", level="DEBUG", rate_limit_max=3, rate_limit_period=60.0
     )
     try:
         for _ in range(4):
             structguru.logger.info("same")
-        _native.flush_native()
-        lines = _native.drain_messages()
+        _runtime.flush_native()
+        lines = _runtime.drain_messages()
         assert len(lines) == 3
-        assert _native.writer_metrics()["rate_limited"] == 1
+        assert _runtime.writer_metrics()["rate_limited"] == 1
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_rate_limit_keys_are_independent() -> None:
-    _native.configure(
+    _runtime.configure(
         service="svc", target="memory", level="DEBUG", rate_limit_max=1, rate_limit_period=60.0
     )
     try:
         structguru.logger.info("alpha")
         structguru.logger.info("beta")
         structguru.logger.info("alpha")  # dropped: alpha exhausted
-        _native.flush_native()
-        messages = [json.loads(line)["message"] for line in _native.drain_messages()]
+        _runtime.flush_native()
+        messages = [json.loads(line)["message"] for line in _runtime.drain_messages()]
         assert messages == ["alpha", "beta"]
-        assert _native.writer_metrics()["rate_limited"] == 1
+        assert _runtime.writer_metrics()["rate_limited"] == 1
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_rate_limit_window_expires() -> None:
-    _native.configure(
+    _runtime.configure(
         service="svc",
         target="memory",
         level="DEBUG",
@@ -368,25 +368,25 @@ def test_rate_limit_window_expires() -> None:
         structguru.logger.info("k")  # dropped within window
         time.sleep(0.06)
         structguru.logger.info("k")  # allowed after expiry
-        _native.flush_native()
-        assert len(_native.drain_messages()) == 2
+        _runtime.flush_native()
+        assert len(_runtime.drain_messages()) == 2
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_invalid_rate_limit_raises() -> None:
     with pytest.raises(ValueError, match="rate_limit_max"):
-        _native.configure(rate_limit_max=0)
+        _runtime.configure(rate_limit_max=0)
     with pytest.raises(ValueError, match="rate_limit_period"):
-        _native.configure(rate_limit_max=5, rate_limit_period=0.0)
-    assert not _native.is_native_enabled()
+        _runtime.configure(rate_limit_max=5, rate_limit_period=0.0)
+    assert not _runtime.is_native_enabled()
 
 
 # -- combined ---------------------------------------------------------------
 
 
 def test_patterns_and_sampling_combine() -> None:
-    _native.configure(
+    _runtime.configure(
         service="svc",
         target="memory",
         level="DEBUG",
@@ -395,43 +395,43 @@ def test_patterns_and_sampling_combine() -> None:
     )
     try:
         structguru.logger.info("m", body="auth pw=hunter2 ok")
-        _native.flush_native()
+        _runtime.flush_native()
         # sample_rate=0 drops everything; nothing is rendered.
-        assert len(_native.drain_messages()) == 0
-        assert _native.writer_metrics()["sampled"] == 1
+        assert len(_runtime.drain_messages()) == 0
+        assert _runtime.writer_metrics()["sampled"] == 1
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_env_var_sample_rate(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STRUCTGURU_NATIVE_TARGET", "memory")
     monkeypatch.setenv("STRUCTGURU_NATIVE_SAMPLE_RATE", "0.0")
-    _native.shutdown()
-    _native._maybe_configure_from_env()
+    _runtime.shutdown()
+    _runtime._maybe_configure_from_env()
     try:
-        assert _native.is_native_enabled()
+        assert _runtime.is_native_enabled()
         structguru.logger.info("dropped")
-        _native.flush_native()
-        assert len(_native.drain_messages()) == 0
+        _runtime.flush_native()
+        assert len(_runtime.drain_messages()) == 0
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
         monkeypatch.delenv("STRUCTGURU_NATIVE_SAMPLE_RATE", raising=False)
 
 
 def test_env_var_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STRUCTGURU_NATIVE_TARGET", "memory")
     monkeypatch.setenv("STRUCTGURU_NATIVE_RATE_LIMIT", "2/60")
-    _native.shutdown()
-    _native._maybe_configure_from_env()
+    _runtime.shutdown()
+    _runtime._maybe_configure_from_env()
     try:
-        assert _native.is_native_enabled()
+        assert _runtime.is_native_enabled()
         for _ in range(3):
             structguru.logger.info("same")
-        _native.flush_native()
-        assert len(_native.drain_messages()) == 2
-        assert _native.writer_metrics()["rate_limited"] == 1
+        _runtime.flush_native()
+        assert len(_runtime.drain_messages()) == 2
+        assert _runtime.writer_metrics()["rate_limited"] == 1
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
         monkeypatch.delenv("STRUCTGURU_NATIVE_RATE_LIMIT", raising=False)
 
 
@@ -449,20 +449,20 @@ def test_invalid_env_config_fails_loudly(
     value: str,
     error: type[Exception],
 ) -> None:
-    _native.shutdown()
+    _runtime.shutdown()
     monkeypatch.setenv(name, value)
 
     with pytest.raises(error):
-        _native._maybe_configure_from_env()
+        _runtime._maybe_configure_from_env()
 
-    assert not _native.is_native_enabled()
+    assert not _runtime.is_native_enabled()
 
 
 # -- level-gated sampling ----------------------------------------------------
 
 
 def test_sample_max_level_gates_sampling() -> None:
-    _native.configure(
+    _runtime.configure(
         service="svc",
         target="memory",
         level="DEBUG",
@@ -474,21 +474,21 @@ def test_sample_max_level_gates_sampling() -> None:
         structguru.logger.info("sampled out too")
         structguru.logger.warning("always kept")
         structguru.logger.error("always kept too")
-        _native.flush_native()
-        lines = _native.drain_messages()
+        _runtime.flush_native()
+        lines = _runtime.drain_messages()
         assert len(lines) == 2
         assert json.loads(lines[0])["level"] == "WARN"
         assert json.loads(lines[1])["level"] == "ERROR"
-        metrics = _native.writer_metrics()
+        metrics = _runtime.writer_metrics()
         assert metrics is not None
         assert metrics["sampled"] == 2
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_invalid_sample_max_level_raises() -> None:
     with pytest.raises(ValueError, match="sample_max_level"):
-        _native.configure(target="memory", sample_rate=0.5, sample_max_level="bogus")
+        _runtime.configure(target="memory", sample_rate=0.5, sample_max_level="bogus")
 
 
 # -- metric hooks --------------------------------------------------------------
@@ -503,13 +503,13 @@ def test_metric_processor_invoked_per_kept_record() -> None:
     metrics.counter("user.login", seen.append)
     metrics.histogram("db.query", "duration_ms", lambda v, _ed: values.append(v))
 
-    _native.configure(service="svc", target="memory", metric_processor=metrics)
+    _runtime.configure(service="svc", target="memory", metric_processor=metrics)
     try:
         structguru.logger.info("user.login ok", user="alice")
         structguru.logger.info("db.query done", duration_ms=12.5)
         structguru.logger.info("unrelated")
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert len(seen) == 1
     assert seen[0]["event"] == "user.login ok"
@@ -524,7 +524,7 @@ def test_metric_processor_not_invoked_for_dropped_records() -> None:
         calls.append(method)
         return event_dict
 
-    _native.configure(
+    _runtime.configure(
         service="svc",
         target="memory",
         level="INFO",
@@ -537,7 +537,7 @@ def test_metric_processor_not_invoked_for_dropped_records() -> None:
         structguru.logger.info("sampled out")
         structguru.logger.warning("kept")
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert calls == ["warning"]
 
@@ -546,15 +546,15 @@ def test_metric_processor_errors_are_swallowed() -> None:
     def hook(_logger: Any, _method: str, _event_dict: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("metrics backend down")
 
-    _native.configure(service="svc", target="memory", metric_processor=hook)
+    _runtime.configure(service="svc", target="memory", metric_processor=hook)
     try:
         structguru.logger.info("still logged")
         record = _drain_last()
         assert record["message"] == "still logged"
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_non_callable_metric_processor_raises() -> None:
     with pytest.raises(TypeError, match="metric_processor"):
-        _native.configure(target="memory", metric_processor="not-a-callable")
+        _runtime.configure(target="memory", metric_processor="not-a-callable")

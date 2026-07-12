@@ -9,60 +9,60 @@ import threading
 import pytest
 
 import structguru
-from structguru import _native
+from structguru import _runtime
 
 pytestmark = pytest.mark.skipif(
-    not _native.is_available(),
+    not _runtime.is_available(),
     reason="native extension not built",
 )
 
 
 def test_close_drains_buffered_records() -> None:
     """flush() must drain queued records to the sink before they are read."""
-    _native.configure(service="svc", target="memory")
+    _runtime.configure(service="svc", target="memory")
     try:
         structguru.logger.info("last message")
-        _native.flush_native()
-        assert any("last message" in line for line in _native.drain_messages())
+        _runtime.flush_native()
+        assert any("last message" in line for line in _runtime.drain_messages())
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_metrics_track_enqueue_and_write() -> None:
-    _native.configure(service="svc", target="memory")
+    _runtime.configure(service="svc", target="memory")
     try:
         for _ in range(5):
             structguru.logger.info("m")
-        _native.flush_native()
-        metrics = _native.writer_metrics()
+        _runtime.flush_native()
+        metrics = _runtime.writer_metrics()
         assert metrics is not None
         assert metrics["enqueued"] == 5
         assert metrics["written"] == 5
         assert metrics["dropped"] == 0
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_block_overflow_never_drops_under_backpressure() -> None:
     """A small bounded queue in block mode must apply backpressure, not drop."""
-    _native.configure(service="svc", target="memory", maxsize=4, overflow="block")
+    _runtime.configure(service="svc", target="memory", maxsize=4, overflow="block")
     try:
         for _ in range(200):
             structguru.logger.info("m")
-        _native.flush_native()
-        metrics = _native.writer_metrics()
+        _runtime.flush_native()
+        metrics = _runtime.writer_metrics()
         assert metrics is not None
         assert metrics["enqueued"] == 200
         assert metrics["written"] == 200
         assert metrics["dropped"] == 0
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_drop_emits_rate_limited_warning() -> None:
-    _native._reset_drop_count()
+    _runtime._reset_drop_count()
     with pytest.warns(UserWarning, match="dropped"):
-        _native._note_drop()
+        _runtime._note_drop()
 
 
 def test_disable_during_in_flight_formatting_never_raises() -> None:
@@ -77,7 +77,7 @@ def test_disable_during_in_flight_formatting_never_raises() -> None:
             assert resume_formatting.wait(timeout=2)
             return "in flight"
 
-    _native.configure(target="null")
+    _runtime.configure(target="null")
 
     def emit() -> None:
         try:
@@ -88,7 +88,7 @@ def test_disable_during_in_flight_formatting_never_raises() -> None:
     producer = threading.Thread(target=emit)
     producer.start()
     assert formatting_started.wait(timeout=1)
-    _native.shutdown()
+    _runtime.shutdown()
     resume_formatting.set()
     producer.join(timeout=2)
 
@@ -104,7 +104,7 @@ def test_native_writer_survives_fork() -> None:
     child tried to use or join it, this test would hang (caught by the select
     timeout). The registered ``after_in_child`` hook must swap in a fresh writer.
     """
-    _native.configure(service="svc", target="memory")
+    _runtime.configure(service="svc", target="memory")
     try:
         structguru.logger.info("parent log")
         read_fd, write_fd = os.pipe()
@@ -112,8 +112,8 @@ def test_native_writer_survives_fork() -> None:
         if pid == 0:  # child
             try:
                 structguru.logger.info("child log")
-                _native.flush_native()
-                logged = any("child log" in line for line in _native.drain_messages())
+                _runtime.flush_native()
+                logged = any("child log" in line for line in _runtime.drain_messages())
                 os.write(write_fd, b"1" if logged else b"0")
             except BaseException:
                 os.write(write_fd, b"E")
@@ -129,4 +129,4 @@ def test_native_writer_survives_fork() -> None:
         os.waitpid(pid, 0)
         assert result == b"1", f"child failed to log natively after fork: {result!r}"
     finally:
-        _native.shutdown()
+        _runtime.shutdown()

@@ -8,7 +8,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from structguru import _native
+from structguru import _runtime
 from structguru.integrations.stdlib import (
     StructguruHandler,
     install_stdlib_bridge,
@@ -16,7 +16,7 @@ from structguru.integrations.stdlib import (
 )
 
 pytestmark = pytest.mark.skipif(
-    not _native.is_available(),
+    not _runtime.is_available(),
     reason="native extension not built",
 )
 
@@ -24,11 +24,11 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture
 def native_memory() -> Iterator[None]:
     """Native mode writing to the in-memory sink, restored afterwards."""
-    _native.configure(service="app", target="memory", level="DEBUG")
+    _runtime.configure(service="app", target="memory", level="DEBUG")
     try:
         yield
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 @pytest.fixture
@@ -45,8 +45,8 @@ def clean_root() -> Iterator[None]:
 
 
 def _records() -> list[dict]:
-    _native.flush_native()
-    return [json.loads(line) for line in _native.drain_messages()]
+    _runtime.flush_native()
+    return [json.loads(line) for line in _runtime.drain_messages()]
 
 
 def test_bridge_routes_stdlib_record(native_memory: None, clean_root: None) -> None:

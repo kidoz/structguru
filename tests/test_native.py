@@ -4,7 +4,7 @@ import orjson
 import pytest
 import structguru._rust as rust
 
-from structguru import _native
+from structguru import _runtime
 
 
 def orjson_serializer(obj: object) -> str:
@@ -15,7 +15,7 @@ def test_native_module_exports_core_version() -> None:
     import structguru
 
     assert rust.version() == structguru.__version__
-    assert _native.is_available()
+    assert _runtime.is_available()
 
 
 def test_native_level_helpers_match_processor_contract() -> None:

@@ -28,7 +28,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypeAlias
 
-from structguru import _native
+from structguru import _runtime
 from structguru._contextvars import bound_contextvars, get_contextvars
 from structguru.config import _to_logging_level
 from structguru.otel import add_otel_context
@@ -320,14 +320,14 @@ class Logger:
         # One coherent snapshot follows the record through every processing stage.
         # Reconfigure/disable may retire its writer, but cannot invalidate this
         # Python object or expose a partially updated configuration.
-        runtime = _native.current_runtime()
+        runtime = _runtime.current_runtime()
         if runtime is None:
             return
 
         stack_info = kwargs.get("stack_info") or self._opt_stack_info
 
         # Cheap disabled path: level-filter before any formatting.
-        if _native.is_below_level(method, runtime):
+        if _runtime.is_below_level(method, runtime):
             return
 
         formatted_msg, consumed_keys = _safe_format(message, args, kwargs)
@@ -339,7 +339,7 @@ class Logger:
 
         # Pre-render filter (sampling/rate-limit): decide before building fields.
         # Keys on the formatted message, matching the rate-limiter's grouping.
-        if not _native.should_render(method, formatted_msg, runtime):
+        if not _runtime.should_render(method, formatted_msg, runtime):
             return
 
         exc_info = kwargs.get("exc_info", self._opt_exc_info)
@@ -352,10 +352,10 @@ class Logger:
         # matching structlog's merge_contextvars setdefault semantics.
         for key, value in get_contextvars().items():
             fields.setdefault(key, value)
-        if _native.otel_enabled(runtime):
+        if _runtime.otel_enabled(runtime):
             add_otel_context(None, method, fields)
         if exc_info:
-            exception = _native.build_exception_field(exc_info, runtime)
+            exception = _runtime.build_exception_field(exc_info, runtime)
             if exception:
                 fields["exception"] = exception
         # Stack capture is Python-owned (frame walking); rendering places
@@ -363,11 +363,11 @@ class Logger:
         if isinstance(stack_info, str):
             stack = stack_info
         elif stack_info:
-            stack = _native.format_stack()
+            stack = _runtime.format_stack()
         else:
             stack = None
-        _native.notify_metrics(method, formatted_msg, fields, runtime)
-        sentry_line = _native.render_and_enqueue(
+        _runtime.notify_metrics(method, formatted_msg, fields, runtime)
+        sentry_line = _runtime.render_and_enqueue(
             fields,
             name,
             method,
@@ -376,7 +376,7 @@ class Logger:
             runtime=runtime,
         )
         if sentry_line is not None:
-            _native.notify_sentry(
+            _runtime.notify_sentry(
                 method,
                 sentry_line,
                 tuple(fields),
@@ -420,7 +420,7 @@ class Logger:
             if callable(sink) and not isinstance(sink, logging.Handler)
             else functools.partial(_emit_rendered, handler)
         )
-        native_token = _native.add_callable_sink(native_callback, min_level=native_level)
+        native_token = _runtime.add_callable_sink(native_callback, min_level=native_level)
 
         root = logging.getLogger()
         root.addHandler(handler)
@@ -456,7 +456,7 @@ class Logger:
                 ]
         for handler, token in registrations:
             if token is not None:
-                _native.remove_callable_sink(token)
+                _runtime.remove_callable_sink(token)
             if handler is not None:
                 root.removeHandler(handler)
                 handler.close()

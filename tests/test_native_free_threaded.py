@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 import structguru
-from structguru import _native
+from structguru import _runtime
 
 
 def _gil_enabled() -> bool:
@@ -25,7 +25,7 @@ pytestmark = pytest.mark.skipif(
 def test_concurrent_logging_preserves_every_record() -> None:
     workers = 4
     records_per_worker = 250
-    _native.configure(service="free-threaded", target="memory", maxsize=32)
+    _runtime.configure(service="free-threaded", target="memory", maxsize=32)
     try:
 
         def emit(worker_id: int) -> None:
@@ -38,14 +38,14 @@ def test_concurrent_logging_preserves_every_record() -> None:
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             list(executor.map(emit, range(workers)))
-        _native.flush_native()
+        _runtime.flush_native()
 
         expected = workers * records_per_worker
-        metrics = _native.writer_metrics()
+        metrics = _runtime.writer_metrics()
         assert metrics is not None
         assert metrics["enqueued"] == expected
         assert metrics["written"] == expected
         assert metrics["dropped"] == 0
-        assert len(_native.drain_messages()) == expected
+        assert len(_runtime.drain_messages()) == expected
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
