@@ -64,6 +64,9 @@ test = [
     # (which compares native output against the standard structlog/orjson path).
     "structlog>=24.1.0",
     "orjson>=3.9.0",
+    # fastapi drives the full-stack example smoke test (examples/full_stack_fastapi);
+    # celery/sqlalchemy/httpx it also needs come from the integration extras.
+    "fastapi>=0.110",
 ]
 lint = [
     "mypy>=1.8",
