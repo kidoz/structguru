@@ -310,7 +310,7 @@ class TestLoggerAddRemove:
         assert len(messages) == 1
 
     def test_callable_added_while_disabled_activates_on_configure(self) -> None:
-        _native.disable_native()
+        _native.shutdown()
         log = Logger()
         messages: list[str] = []
         handler_id = log.add(messages.append)

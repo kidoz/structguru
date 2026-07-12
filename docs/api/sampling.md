@@ -14,5 +14,5 @@ configure(
 )
 ```
 
-Drops occur before rendering. `native_metrics()` reports `sampled` and
+Drops occur before rendering. `writer_metrics()` reports `sampled` and
 `rate_limited` separately from output-queue drops.

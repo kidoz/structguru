@@ -16,7 +16,7 @@ import structguru
 from structguru import _native
 
 pytestmark = pytest.mark.skipif(
-    not _native.native_available(),
+    not _native.is_available(),
     reason="native extension not built",
 )
 
@@ -39,7 +39,7 @@ def test_sentry_hook_invoked_per_kept_record() -> None:
         structguru.logger.error("second", code=500)
         _drain_all()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     assert len(calls) == 2
     assert calls[0][1] == "info"
@@ -63,7 +63,7 @@ def test_sentry_hook_receives_raw_exc_info() -> None:
         structguru.logger.error("failed", exc_info=err)
         _drain_all()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     assert len(captured) == 1
     assert captured[0] is err, "hook must receive the raw BaseException instance"
@@ -87,7 +87,7 @@ def test_sentry_hook_not_invoked_for_dropped_records() -> None:
         structguru.logger.info("dropped")
         _drain_all()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     assert len(calls) == 0, "sampling must drop before the Sentry hook runs"
 
@@ -110,7 +110,7 @@ def test_sentry_hook_not_invoked_for_level_filtered() -> None:
         structguru.logger.warning("kept")
         _drain_all()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     assert len(calls) == 1
     assert calls[0]["event"] == "kept"
@@ -126,7 +126,7 @@ def test_sentry_hook_errors_are_swallowed() -> None:
         structguru.logger.info("survives")
         lines = _drain_all()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     assert len(lines) == 1
     assert "survives" in lines[0]
@@ -153,7 +153,7 @@ def test_sentry_hook_with_real_sentry_processor() -> None:
             structguru.logger.error("something broke", exc_info=err)
             _drain_all()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     mock_sentry.capture_exception.assert_called_once_with(err)
 
@@ -186,7 +186,7 @@ def test_sentry_hook_injects_redaction_marker_when_redaction_configured() -> Non
         structguru.logger.info("login", password="hunter2")
         _drain_all()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     assert len(captured) == 1
     assert captured[0].get(REDACTED_MARKER_KEY) is True
@@ -209,7 +209,7 @@ def test_sentry_hook_receives_pattern_redacted_message_and_fields() -> None:
         structguru.logger.error("message secret=abc", detail="field secret=xyz")
         _drain_all()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     assert captured[0]["event"] == "message [REDACTED]"
     assert captured[0]["detail"] == "field [REDACTED]"
@@ -236,7 +236,7 @@ def test_real_sentry_processor_never_receives_unredacted_extras() -> None:
             structguru.logger.error("login", password="cleartext")
             _drain_all()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     breadcrumb = mock_sentry.add_breadcrumb.call_args.kwargs
     assert breadcrumb["data"]["password"] == "[REDACTED]"

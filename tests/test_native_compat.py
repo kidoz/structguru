@@ -12,7 +12,7 @@ from structguru import _native
 from structguru._contextvars import bind_contextvars, clear_contextvars
 
 pytestmark = pytest.mark.skipif(
-    not _native.native_available(),
+    not _native.is_available(),
     reason="native extension not built",
 )
 
@@ -24,9 +24,9 @@ def _last(record_lines: list[str]) -> dict[str, Any]:
 def test_public_native_api_is_exported() -> None:
     for name in (
         "configure",
-        "disable_native",
-        "set_native_level",
-        "native_metrics",
+        "shutdown",
+        "set_level",
+        "writer_metrics",
     ):
         assert hasattr(structguru, name), name
     assert not hasattr(structguru, "enable_native")
@@ -35,8 +35,8 @@ def test_public_native_api_is_exported() -> None:
 def test_public_configure_and_runtime_level_change() -> None:
     structguru.configure(service="svc", target="memory", level="INFO")
     try:
-        assert structguru.native_metrics() is not None
-        structguru.set_native_level("ERROR")
+        assert structguru.writer_metrics() is not None
+        structguru.set_level("ERROR")
         structguru.logger.info("dropped")  # below ERROR now
         structguru.logger.error("kept")
         _native.flush_native()
@@ -44,7 +44,7 @@ def test_public_configure_and_runtime_level_change() -> None:
         assert len(lines) == 1
         assert _last(lines)["message"] == "kept"
     finally:
-        structguru.disable_native()
+        structguru.shutdown()
 
 
 def test_native_honors_bind_and_contextualize() -> None:
@@ -57,7 +57,7 @@ def test_native_honors_bind_and_contextualize() -> None:
         assert record["request_id"] == "r1"
         assert record["user"] == "alice"
     finally:
-        structguru.disable_native()
+        structguru.shutdown()
 
 
 def test_native_picks_up_integration_contextvars() -> None:
@@ -74,15 +74,15 @@ def test_native_picks_up_integration_contextvars() -> None:
         assert record["method"] == "GET"
     finally:
         clear_contextvars()
-        structguru.disable_native()
+        structguru.shutdown()
 
 
 def test_env_var_auto_enable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STRUCTGURU_NATIVE_TARGET", "memory")
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
-    _native.disable_native()
+    _native.shutdown()
     try:
         _native._maybe_configure_from_env()
         assert _native.is_native_enabled()
     finally:
-        _native.disable_native()
+        _native.shutdown()

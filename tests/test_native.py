@@ -15,7 +15,7 @@ def test_native_module_exports_core_version() -> None:
     import structguru
 
     assert rust.version() == structguru.__version__
-    assert _native.native_available()
+    assert _native.is_available()
 
 
 def test_native_level_helpers_match_processor_contract() -> None:

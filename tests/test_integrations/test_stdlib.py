@@ -16,7 +16,7 @@ from structguru.integrations.stdlib import (
 )
 
 pytestmark = pytest.mark.skipif(
-    not _native.native_available(),
+    not _native.is_available(),
     reason="native extension not built",
 )
 
@@ -28,7 +28,7 @@ def native_memory() -> Iterator[None]:
     try:
         yield
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 @pytest.fixture

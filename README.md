@@ -285,10 +285,10 @@ Public API:
 | Symbol | Purpose |
 |--------|---------|
 | `configure(...)` | Configure rendering, filtering, redaction, and output sinks. See the API reference for the complete signature. |
-| `disable_native()` | Stop the writer; logging is disabled until `configure()` is called. |
-| `set_native_level(level)` | Adjust the level threshold at runtime. |
-| `native_metrics()` | Writer counters (enqueued/written/dropped/depth/...) plus filter counters (`sampled`/`rate_limited`) when active. |
-| `native_available()` | Whether the compiled extension is importable. |
+| `shutdown()` | Stop the writer; logging is disabled until `configure()` is called. |
+| `set_level(level)` | Adjust the level threshold at runtime. |
+| `writer_metrics()` | Writer counters (enqueued/written/dropped/depth/...) plus filter counters (`sampled`/`rate_limited`) when active. |
+| `is_available()` | Whether the compiled extension is importable. |
 
 Behavior notes:
 

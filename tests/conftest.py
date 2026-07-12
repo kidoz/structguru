@@ -26,7 +26,7 @@ def _reset_logging() -> None:  # type: ignore[misc]
     root.setLevel(original_level)
     logging.setLogRecordFactory(original_factory)
     sys.excepthook = original_excepthook
-    _native.disable_native()
+    _native.shutdown()
 
 
 def configure(

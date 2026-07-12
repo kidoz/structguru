@@ -14,7 +14,7 @@ from structguru import _native, logger
 from structguru.core import _safe_format
 
 pytestmark = pytest.mark.skipif(
-    not _native.native_available(),
+    not _native.is_available(),
     reason="native extension not built",
 )
 
@@ -78,11 +78,11 @@ def test_bench_native_structured_record(benchmark: Any) -> None:
             logger.info("order accepted", **fields)
 
         _native.flush_native()
-        metrics = _native.native_metrics()
+        metrics = _native.writer_metrics()
         assert metrics is not None
         assert metrics["written"] > 0
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 def test_bench_native_contextvars_merge(benchmark: Any) -> None:
@@ -97,7 +97,7 @@ def test_bench_native_contextvars_merge(benchmark: Any) -> None:
 
         _native.flush_native()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 def test_bench_native_redaction(benchmark: Any) -> None:
@@ -120,7 +120,7 @@ def test_bench_native_redaction(benchmark: Any) -> None:
 
         _native.flush_native()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 def test_bench_native_disabled_level_fast_path(benchmark: Any) -> None:
@@ -132,11 +132,11 @@ def test_bench_native_disabled_level_fast_path(benchmark: Any) -> None:
         def _() -> None:
             logger.debug("debug payload {value}", value=42, nested={"enabled": True})
 
-        metrics = _native.native_metrics()
+        metrics = _native.writer_metrics()
         assert metrics is not None
         assert metrics["enqueued"] == 0
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 def test_bench_native_sampling_drop_fast_path(benchmark: Any) -> None:
@@ -148,12 +148,12 @@ def test_bench_native_sampling_drop_fast_path(benchmark: Any) -> None:
         def _() -> None:
             logger.info("sampled event", nested={"value": 42})
 
-        metrics = _native.native_metrics()
+        metrics = _native.writer_metrics()
         assert metrics is not None
         assert metrics["sampled"] > 0
         assert metrics["enqueued"] == 0
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 def test_bench_native_writer_blocking_enqueue(benchmark: Any) -> None:
@@ -194,12 +194,12 @@ def test_bench_cpu_heavy_logging_gil(benchmark: Any, workers: int) -> None:
             checksum = benchmark(_threaded_workload, executor, workers)
         assert checksum > 0
         _native.flush_native()
-        metrics = _native.native_metrics()
+        metrics = _native.writer_metrics()
         assert metrics is not None
         assert metrics["enqueued"] == metrics["written"]
         assert metrics["dropped"] == 0
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 @pytest.mark.skipif(_gil_enabled(), reason="requires a free-threaded CPython build")
@@ -212,12 +212,12 @@ def test_bench_cpu_heavy_logging_free_threaded(benchmark: Any, workers: int) -> 
             checksum = benchmark(_threaded_workload, executor, workers)
         assert checksum > 0
         _native.flush_native()
-        metrics = _native.native_metrics()
+        metrics = _native.writer_metrics()
         assert metrics is not None
         assert metrics["enqueued"] == metrics["written"]
         assert metrics["dropped"] == 0
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 @pytest.mark.skipif(not _gil_enabled(), reason="GIL-release behavior is specific to GIL builds")

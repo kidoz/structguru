@@ -15,7 +15,7 @@ import structguru
 from structguru import _native
 
 pytestmark = pytest.mark.skipif(
-    not _native.native_available(),
+    not _native.is_available(),
     reason="native extension not built",
 )
 
@@ -23,18 +23,18 @@ pytestmark = pytest.mark.skipif(
 def test_native_auto_enabled_at_import() -> None:
     """Native mode is on by default (no configure call needed)."""
     # _maybe_configure_from_env() ran at import time; native should be on unless
-    # a prior test called disable_native or configure. Re-trigger.
-    _native.disable_native()
+    # a prior test called shutdown or configure. Re-trigger.
+    _native.shutdown()
     _native._maybe_configure_from_env()
     try:
         assert _native.is_native_enabled()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 def test_missing_native_extension_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
     """The native-only package must not silently disable logging."""
-    _native.disable_native()
+    _native.shutdown()
     monkeypatch.setattr(_native, "_RUST", None)
 
     with pytest.raises(RuntimeError, match="requires its native extension"):
@@ -48,25 +48,25 @@ def test_structguru_legacy_env_disables_native(
 ) -> None:
     """STRUCTGURU_LEGACY=1 opts out of native auto-enable."""
     monkeypatch.setenv("STRUCTGURU_LEGACY", "1")
-    _native.disable_native()
+    _native.shutdown()
     _native._maybe_configure_from_env()
     try:
         assert not _native.is_native_enabled()
     finally:
         monkeypatch.delenv("STRUCTGURU_LEGACY", raising=False)
-        _native.disable_native()
+        _native.shutdown()
 
 
 def test_configure_with_stream_enables_native() -> None:
     """configure() with a stream sink enables native mode (v1.0 behavior)."""
-    _native.disable_native()
+    _native.shutdown()
 
     buf = io.StringIO()
     configure(service="test", level="DEBUG", json=True, stream=buf)
     try:
         assert _native.is_native_enabled(), "configure should enable native with stream_sink"
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 def test_native_logs_without_configure() -> None:
@@ -79,4 +79,4 @@ def test_native_logs_without_configure() -> None:
         assert len(lines) == 1
         assert "native default 1" in lines[0]
     finally:
-        _native.disable_native()
+        _native.shutdown()

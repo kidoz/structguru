@@ -12,7 +12,7 @@ import structguru
 from structguru import _native
 
 pytestmark = pytest.mark.skipif(
-    not _native.native_available(),
+    not _native.is_available(),
     reason="native extension not built",
 )
 
@@ -25,7 +25,7 @@ def test_close_drains_buffered_records() -> None:
         _native.flush_native()
         assert any("last message" in line for line in _native.drain_messages())
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 def test_metrics_track_enqueue_and_write() -> None:
@@ -34,13 +34,13 @@ def test_metrics_track_enqueue_and_write() -> None:
         for _ in range(5):
             structguru.logger.info("m")
         _native.flush_native()
-        metrics = _native.native_metrics()
+        metrics = _native.writer_metrics()
         assert metrics is not None
         assert metrics["enqueued"] == 5
         assert metrics["written"] == 5
         assert metrics["dropped"] == 0
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 def test_block_overflow_never_drops_under_backpressure() -> None:
@@ -50,13 +50,13 @@ def test_block_overflow_never_drops_under_backpressure() -> None:
         for _ in range(200):
             structguru.logger.info("m")
         _native.flush_native()
-        metrics = _native.native_metrics()
+        metrics = _native.writer_metrics()
         assert metrics is not None
         assert metrics["enqueued"] == 200
         assert metrics["written"] == 200
         assert metrics["dropped"] == 0
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 def test_drop_emits_rate_limited_warning() -> None:
@@ -88,7 +88,7 @@ def test_disable_during_in_flight_formatting_never_raises() -> None:
     producer = threading.Thread(target=emit)
     producer.start()
     assert formatting_started.wait(timeout=1)
-    _native.disable_native()
+    _native.shutdown()
     resume_formatting.set()
     producer.join(timeout=2)
 
@@ -129,4 +129,4 @@ def test_native_writer_survives_fork() -> None:
         os.waitpid(pid, 0)
         assert result == b"1", f"child failed to log natively after fork: {result!r}"
     finally:
-        _native.disable_native()
+        _native.shutdown()

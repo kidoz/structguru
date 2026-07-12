@@ -152,7 +152,7 @@ def test_bench_structlog_raw_bind(benchmark: Any, benchmark_stream: io.StringIO)
 # -- native end-to-end (the numbers the full-Rust cutover is judged against) --
 
 _needs_native = pytest.mark.skipif(
-    not _native.native_available(),
+    not _native.is_available(),
     reason="native extension not built",
 )
 
@@ -168,7 +168,7 @@ def test_bench_structguru_native_simple(benchmark: Any) -> None:
             logger.info("Hello world")
 
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 @_needs_native
@@ -182,7 +182,7 @@ def test_bench_structguru_native_formatting(benchmark: Any) -> None:
             logger.info("Hello {name}, ID={id}", name="world", id=42)
 
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 @_needs_native
@@ -197,4 +197,4 @@ def test_bench_structguru_native_bind(benchmark: Any) -> None:
             bound_logger.info("With context")
 
     finally:
-        _native.disable_native()
+        _native.shutdown()

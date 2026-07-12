@@ -35,7 +35,7 @@ import structguru
 from structguru import _native
 
 pytestmark = pytest.mark.skipif(
-    not _native.native_available(),
+    not _native.is_available(),
     reason="native extension not built",
 )
 
@@ -76,7 +76,7 @@ def _native_line(
         assert messages, "native path emitted no record"
         return messages[-1].strip()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 def _assert_byte_parity(
@@ -220,7 +220,7 @@ def test_parity_contextualize() -> None:
 
         native = run(nat)
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     assert _normalize_ts(native) == _normalize_ts(standard)
 
@@ -247,7 +247,7 @@ def _exception_pair(**log_kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         _native.flush_native()
         native = json.loads(_native.drain_messages()[-1])
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     standard.pop("timestamp", None)
     native.pop("timestamp", None)
@@ -279,7 +279,7 @@ def test_parity_exception_with_chained_cause() -> None:
         _native.flush_native()
         native = json.loads(_native.drain_messages()[-1])
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     assert native["exception"] == standard["exception"]
     assert "inner" in native["exception"] and "outer" in native["exception"]
@@ -301,7 +301,7 @@ def _native_structured_exception(exc: BaseException, **enable_kwargs: Any) -> di
         _native.flush_native()
         return json.loads(_native.drain_messages()[-1])  # type: ignore[no-any-return]
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 def _processor_exception(exc: BaseException, **proc_kwargs: Any) -> dict[str, Any]:
@@ -435,7 +435,7 @@ def test_parity_stack_info_handled_natively() -> None:
         line = messages[-1]
         record = json.loads(line)
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     assert record["stack"].startswith("Stack (most recent call last):\n")
     assert "test_parity_golden.py" in record["stack"]  # ends at the user frame
@@ -453,7 +453,7 @@ def test_parity_stack_info_via_opt() -> None:
         _native.flush_native()
         record = json.loads(_native.drain_messages()[-1])
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     assert record["stack"].startswith("Stack (most recent call last):\n")
     assert record["level"] == "WARN"

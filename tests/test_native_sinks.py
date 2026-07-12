@@ -20,7 +20,7 @@ import structguru
 from structguru import _native
 
 pytestmark = pytest.mark.skipif(
-    not _native.native_available(),
+    not _native.is_available(),
     reason="native extension not built",
 )
 
@@ -38,7 +38,7 @@ def test_file_sink_writes_records_to_file() -> None:
             structguru.logger.info("file sink test", request_id="r1")
             _native.flush_native()
         finally:
-            _native.disable_native()
+            _native.shutdown()
 
         with open(path) as f:
             content = f.read()
@@ -69,7 +69,7 @@ def test_file_sink_rotates_at_max_bytes() -> None:
                 structguru.logger.info("rotation test {n}", n=i)
             _native.flush_native()
         finally:
-            _native.disable_native()
+            _native.shutdown()
 
         # After rotation, .1 should exist (the first rotated file).
         assert os.path.exists(f"{path}.1"), "backup .1 should exist after rotation"
@@ -106,7 +106,7 @@ def test_file_sink_and_stdout_both_receive() -> None:
             structguru.logger.info("mirrored record")
             _native.flush_native()
         finally:
-            _native.disable_native()
+            _native.shutdown()
 
         with open(path) as f:
             assert "mirrored record" in f.read()
@@ -132,7 +132,7 @@ def test_callable_sink_receives_rendered_lines() -> None:
             structguru.logger.info("callable {n}", n=i)
         _native.flush_native()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     assert len(received) == 5
     assert json.loads(received[0])["message"] == "callable 0"
@@ -159,7 +159,7 @@ def test_callable_sink_errors_are_swallowed() -> None:
         structguru.logger.info("survives")
         _native.flush_native()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     assert len(good) == 1, "good sink must still receive despite bad_sink raising"
 
@@ -174,10 +174,10 @@ def test_callable_sink_stopped_on_disable() -> None:
 
     _native.configure(service="svc", target="memory", level="DEBUG", callable_sinks=[collector])
     structguru.logger.info("before disable")
-    _native.disable_native()
+    _native.shutdown()
 
     count_before = len(received)
-    assert count_before == 1, "disable_native must drain pending callable deliveries"
+    assert count_before == 1, "shutdown must drain pending callable deliveries"
     structguru.logger.info("after disable")
     assert len(received) == count_before
 
@@ -192,7 +192,7 @@ def test_reconfigure_drains_old_configured_sinks_before_replacing() -> None:
         structguru.logger.info("new configuration")
         _native.flush_native()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     assert any("old configuration" in line for line in first)
     assert not any("new configuration" in line for line in first)
@@ -232,7 +232,7 @@ def test_failed_writer_construction_preserves_active_writer(tmp_path: Path) -> N
 def test_default_output_queue_is_bounded() -> None:
     _native.configure(target="memory")
 
-    metrics = _native.native_metrics()
+    metrics = _native.writer_metrics()
 
     assert metrics is not None
     assert metrics["maxsize"] > 0
@@ -275,13 +275,13 @@ def test_callable_sink_queue_is_bounded_and_counts_drops() -> None:
         structguru.logger.info("second")
         with pytest.warns(UserWarning, match="callable sinks dropped"):
             structguru.logger.info("third")
-        metrics = _native.native_metrics()
+        metrics = _native.writer_metrics()
         assert metrics is not None
         assert metrics["callable_maxsize"] == 1
         assert metrics["callable_dropped"] == 1
     finally:
         release.set()
-        _native.disable_native()
+        _native.shutdown()
 
 
 def test_invalid_callable_queue_maxsize_raises() -> None:
@@ -321,7 +321,7 @@ def test_console_renderer_human_readable_no_colors() -> None:
         structguru.logger.info("hello {name}", name="world", count=3)
         line = _drain_last_line()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     # Format: <timestamp> [<LEVEL>] <message>  k=v ...
     assert "[INFO    ]" in line
@@ -336,7 +336,7 @@ def test_console_renderer_applies_colors() -> None:
         structguru.logger.error("boom")
         line = _drain_last_line()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     assert "\x1b[31m" in line  # ANSI red
     assert "\x1b[0m" in line  # ANSI reset
@@ -349,7 +349,7 @@ def test_console_renderer_redacts_sensitive_keys() -> None:
         structguru.logger.info("login", password="hunter2", user="alice")
         line = _drain_last_line()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     assert 'password="[REDACTED]"' in line
     assert "hunter2" not in line
@@ -362,7 +362,7 @@ def test_console_renderer_warn_level_uses_yellow() -> None:
         structguru.logger.warning("careful")
         line = _drain_last_line()
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     assert "\x1b[33m" in line  # ANSI yellow
     assert "[WARN    ]" in line

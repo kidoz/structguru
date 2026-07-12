@@ -22,7 +22,7 @@ import structguru
 from structguru import _native
 
 pytestmark = pytest.mark.skipif(
-    not _native.native_available(),
+    not _native.is_available(),
     reason="native extension not built",
 )
 
@@ -45,7 +45,7 @@ def _native_json(bound: dict[str, Any], method: str, msg: str, **kwargs: Any) ->
         line = _native.drain_messages()[-1]
         return json.loads(line)
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 def _without_ts(record: dict[str, Any]) -> dict[str, Any]:
@@ -128,7 +128,7 @@ def test_native_exception_matches_structlog() -> None:
         _native.flush_native()
         native = json.loads(_native.drain_messages()[-1])
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     buf = io.StringIO()
     configure(service="svc", level="DEBUG", json=True, stream=buf)
@@ -147,7 +147,7 @@ def test_malformed_exc_info_does_not_break_logging() -> None:
         _native.flush_native()
         record = json.loads(_native.drain_messages()[-1])
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
     assert record["message"] == "bad metadata"
     assert "exception" not in record
@@ -163,7 +163,7 @@ def test_native_level_filtering_drops_below_threshold() -> None:
         assert len(lines) == 1
         assert json.loads(lines[0])["message"] == "kept"
     finally:
-        _native.disable_native()
+        _native.shutdown()
 
 
 def test_native_reserved_key_collision_matches_structlog() -> None:
@@ -185,4 +185,4 @@ def test_native_custom_sensitive_keys() -> None:
         assert record["secret_sauce"] == "[REDACTED]"
         assert record["ssn"] == "123"  # default key, not in the custom set
     finally:
-        _native.disable_native()
+        _native.shutdown()

@@ -41,11 +41,11 @@ def test_concurrent_logging_preserves_every_record() -> None:
         _native.flush_native()
 
         expected = workers * records_per_worker
-        metrics = _native.native_metrics()
+        metrics = _native.writer_metrics()
         assert metrics is not None
         assert metrics["enqueued"] == expected
         assert metrics["written"] == expected
         assert metrics["dropped"] == 0
         assert len(_native.drain_messages()) == expected
     finally:
-        _native.disable_native()
+        _native.shutdown()

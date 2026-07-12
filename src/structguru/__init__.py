@@ -2,10 +2,10 @@
 
 from structguru._native import (
     configure,
-    disable_native,
-    native_available,
-    native_metrics,
-    set_native_level,
+    is_available,
+    set_level,
+    shutdown,
+    writer_metrics,
 )
 from structguru.core import Logger, logger
 from structguru.metrics import MetricProcessor
@@ -20,9 +20,9 @@ __all__ = [
     "MetricProcessor",
     "add_otel_context",
     "configure",
-    "disable_native",
+    "is_available",
     "logger",
-    "native_available",
-    "native_metrics",
-    "set_native_level",
+    "set_level",
+    "shutdown",
+    "writer_metrics",
 ]

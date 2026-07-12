@@ -161,7 +161,7 @@ def _load_rust_module() -> _RustModule | None:
 _RUST = _load_rust_module()
 
 
-def native_available() -> bool:
+def is_available() -> bool:
     """Return whether the compiled native extension is importable."""
     return _RUST is not None
 
@@ -231,7 +231,7 @@ def is_below_level(method: str, runtime: _RuntimeState | None = None) -> bool:
     return state is None or _LEVEL_NUM.get(method, _LEVEL_NUM["info"]) < state.level_threshold
 
 
-def set_native_level(level: str) -> None:
+def set_level(level: str) -> None:
     """Adjust the native level threshold at runtime (per-process)."""
     global _runtime, _lifecycle_generation
     with _state_lock:
@@ -454,7 +454,7 @@ def configure(
     The output queue is bounded to 8192 records by default. ``overflow`` governs a
     full queue: ``"block"`` (default, no loss — the caller waits with the GIL
     released) or ``"drop"`` (drop the new record, count it, and emit a rate-limited
-    warning; see :func:`native_metrics`). Pass ``maxsize=0`` only to explicitly opt
+    warning; see :func:`writer_metrics`). Pass ``maxsize=0`` only to explicitly opt
     into an unbounded queue.
 
     ``sensitive_patterns`` is a list of regex source strings applied (in addition
@@ -479,7 +479,7 @@ def configure(
     ``sample_rate`` (0.0–1.0) and ``rate_limit_max``/``rate_limit_period`` add
     pre-render filters: dropped records cost zero rendering. ``sampled`` and
     ``rate_limited`` counters are reported separately from the writer's transport
-    ``dropped`` counter (see :func:`native_metrics`). ``sample_max_level``
+    ``dropped`` counter (see :func:`writer_metrics`). ``sample_max_level``
     restricts sampling to records at or below that level (more severe records
     always pass) — the native analog of level-gated sampling.
 
@@ -754,7 +754,7 @@ def _after_in_child() -> None:
     _callable_dispatcher.after_fork(enabled=True)
 
 
-def disable_native() -> None:
+def shutdown() -> None:
     """Turn native mode off and stop the background writer."""
     global _runtime, _lifecycle_generation
     with _state_lock:
@@ -917,7 +917,7 @@ def drain_messages() -> list[str]:
     return state.writer.messages() if state is not None else []
 
 
-def native_metrics() -> dict[str, Any] | None:
+def writer_metrics() -> dict[str, Any] | None:
     """Return writer + filter metrics.
 
     Writer counters: ``enqueued``, ``dropped`` (queue-full), ``written``, ``depth``,

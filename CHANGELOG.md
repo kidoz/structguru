@@ -11,6 +11,10 @@ All notable changes to this project are documented here. The format is based on
 - **Removed `configure_structlog()`.** The deprecated pre-1.0 configuration
   wrapper is gone; use `configure()` (with `stream_sink=` for the synchronous
   stream behavior it provided).
+- **Renamed the public runtime functions** to drop the now-redundant `native`
+  prefix (the Rust renderer is the only path): `disable_native()` → `shutdown()`,
+  `native_available()` → `is_available()`, `native_metrics()` → `writer_metrics()`,
+  `set_native_level()` → `set_level()`.
 
 ## [1.0.3] - 2026-07-12
 
