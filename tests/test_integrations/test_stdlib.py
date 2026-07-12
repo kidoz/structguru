@@ -50,10 +50,13 @@ def _records() -> list[dict]:
 
 
 def test_bridge_routes_stdlib_record(native_memory: None, clean_root: None) -> None:
+    # Use a synthetic logger name, not a real library's (e.g. "sqlalchemy.engine"):
+    # a library imported elsewhere in the session may set propagate=False on its
+    # own logger, which would keep the record from ever reaching the root bridge.
     install_stdlib_bridge(level="DEBUG")
-    logging.getLogger("sqlalchemy.engine").info("SELECT 1")
+    logging.getLogger("thirdparty.db.engine").info("SELECT 1")
     rec = _records()[-1]
-    assert rec["logger"] == "sqlalchemy.engine"
+    assert rec["logger"] == "thirdparty.db.engine"
     assert rec["level"] == "INFO"
     assert rec["message"] == "SELECT 1"
 
