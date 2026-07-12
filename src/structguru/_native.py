@@ -206,10 +206,10 @@ _lifecycle_generation = 0
 
 
 _callable_dispatcher = CallableSinkDispatcher()
-# Synchronous stream sink: when set (by configure_structlog), rendered lines are
-# written to this stream synchronously on the caller's thread IN ADDITION to the
-# Rust writer. This preserves the pre-1.0 contract that logger output is available
-# on the configured stream immediately after the call (no flush needed).
+# Synchronous stream sink: when set (via configure(stream_sink=...)), rendered
+# lines are written to this stream synchronously on the caller's thread IN
+# ADDITION to the Rust writer, so logger output is available on the configured
+# stream immediately after the call (no flush needed).
 _hooks_registered = False
 _drop_count = 0
 _drop_lock = threading.Lock()
@@ -856,7 +856,7 @@ def render_and_enqueue(
             else _render_json(state, fields, logger, level, message, stack)
         )
     line = rendered + "\n"
-    # Synchronous stream sink (used by configure_structlog for backward compat).
+    # Synchronous stream sink (configure(stream_sink=...)).
     if state.stream_sink is not None:
         try:
             state.stream_sink.write(line)

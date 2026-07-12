@@ -131,6 +131,3 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-filterwarnings = [
-    "ignore:configure_structlog\\(\\) is deprecated; use configure\\(\\) instead\\. It will be removed in v2\\.0\\.:DeprecationWarning",
-]

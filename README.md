@@ -262,8 +262,6 @@ structguru.logger.info("order {id} accepted", id=987)
 
 No configuration is required for the default JSON-to-stdout behavior. Call
 `configure(...)` to customize the renderer, filtering, or sinks.
-`configure_structlog(...)` remains as a deprecated compatibility wrapper for
-its simpler service/level/format/stream interface and will be removed in v2.0.
 
 ```python
 import structguru
@@ -287,7 +285,6 @@ Public API:
 | Symbol | Purpose |
 |--------|---------|
 | `configure(...)` | Configure rendering, filtering, redaction, and output sinks. See the API reference for the complete signature. |
-| `configure_structlog(...)` | Deprecated compatibility wrapper; use `configure()`. Removed in v2.0. |
 | `disable_native()` | Stop the writer; logging is disabled until `configure()` is called. |
 | `set_native_level(level)` | Adjust the level threshold at runtime. |
 | `native_metrics()` | Writer counters (enqueued/written/dropped/depth/...) plus filter counters (`sampled`/`rate_limited`) when active. |

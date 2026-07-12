@@ -38,8 +38,8 @@ def configure(
 ) -> None:
     """Configure native logging with a stream sink (test helper).
 
-    Replaces configure_structlog in tests: wires the native renderer to *stream*
-    so logger output is available synchronously.
+    Wires the native renderer to *stream* so logger output is available
+    synchronously.
     """
     _native.configure(
         service=service,

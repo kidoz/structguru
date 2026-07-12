@@ -11,8 +11,7 @@ import structlog
 from loguru import logger as loguru_logger
 from structlog.stdlib import ProcessorFormatter
 
-from structguru import _native, logger
-from structguru.config import configure_structlog
+from structguru import _native, configure, logger
 
 
 def _build_structlog_baseline(stream: Any) -> Any:
@@ -62,7 +61,7 @@ def benchmark_stream() -> io.StringIO:
 
 def test_bench_structguru_simple(benchmark: Any, benchmark_stream: io.StringIO) -> None:
     """Benchmark structguru simple info log."""
-    configure_structlog(json_logs=True, stream=benchmark_stream)
+    configure(json=True, target="null", stream_sink=benchmark_stream)
 
     @benchmark
     def _() -> None:
@@ -95,7 +94,7 @@ def test_bench_loguru_simple(benchmark: Any, benchmark_stream: io.StringIO) -> N
 
 def test_bench_structguru_formatting(benchmark: Any, benchmark_stream: io.StringIO) -> None:
     """Benchmark structguru brace formatting."""
-    configure_structlog(json_logs=True, stream=benchmark_stream)
+    configure(json=True, target="null", stream_sink=benchmark_stream)
 
     @benchmark
     def _() -> None:
@@ -128,7 +127,7 @@ def test_bench_loguru_formatting(benchmark: Any, benchmark_stream: io.StringIO) 
 
 def test_bench_structguru_bind(benchmark: Any, benchmark_stream: io.StringIO) -> None:
     """Benchmark structguru context binding via `bind()`."""
-    configure_structlog(json_logs=True, stream=benchmark_stream)
+    configure(json=True, target="null", stream_sink=benchmark_stream)
     bound_logger = logger.bind(request_id="12345", user_id=42)
 
     @benchmark

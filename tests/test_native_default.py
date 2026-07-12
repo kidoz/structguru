@@ -57,8 +57,8 @@ def test_structguru_legacy_env_disables_native(
         _native.disable_native()
 
 
-def test_configure_structlog_enables_native_with_stream() -> None:
-    """configure_structlog wires native to the stream (v1.0 behavior)."""
+def test_configure_with_stream_enables_native() -> None:
+    """configure() with a stream sink enables native mode (v1.0 behavior)."""
     _native.disable_native()
 
     buf = io.StringIO()
