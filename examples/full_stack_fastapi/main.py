@@ -15,7 +15,7 @@ from structguru.integrations.celery import setup_celery_logging
 from structguru.integrations.sqlalchemy import setup_query_logging
 
 # 1. Configure logging
-configure(service="fullstack-app", json=False)
+configure(service="fullstack-app", format="console")
 
 # 2. Database setup
 Base: Any = declarative_base()
