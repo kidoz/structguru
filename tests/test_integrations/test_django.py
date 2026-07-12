@@ -51,7 +51,7 @@ class TestBuildLoggingConfig:
 class TestStructguruMiddleware:
     def test_binds_context_and_logs(self) -> None:
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
 
         mock_request = MagicMock()
         mock_request.method = "GET"
@@ -75,7 +75,7 @@ class TestStructguruMiddleware:
 
     def test_sets_request_id_header(self) -> None:
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
 
         mock_request = MagicMock()
         mock_request.method = "GET"
@@ -93,7 +93,7 @@ class TestStructguruMiddleware:
 
     def test_binds_user_id_when_available(self) -> None:
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
 
         mock_request = MagicMock()
         mock_request.method = "GET"

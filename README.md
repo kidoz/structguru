@@ -57,7 +57,7 @@ Available extras: `otel`, `celery`, `flask`, `django`, `sqlalchemy`, `grpc`,
 from structguru import configure, logger
 
 # Configure once at startup
-configure(service="myapp", level="DEBUG", json=True)
+configure(service="myapp", level="DEBUG", format="json")
 
 # Use anywhere
 logger.info("Hello {name}", name="world")
@@ -148,13 +148,16 @@ interpreter exit.
 
 ### Console vs JSON output
 
+`format=` selects the renderer: `"json"` (default, production) or `"console"`
+(colored, human-readable development output).
+
 ```python
 # JSON (production)
-configure(service="myapp", json=True)
+configure(service="myapp", format="json")
 # → {"timestamp": "...", "service": "myapp", "level": "INFO", "message": "..."}
 
 # Console (development) — colored, human-readable
-configure(service="myapp", json=False)
+configure(service="myapp", format="console")
 # → 2025-01-15 12:00:00 [info     ] Hello world
 ```
 
@@ -299,7 +302,7 @@ Behavior notes:
 - **Fork/shutdown safe** — the writer is flushed on exit and respawned in forked children (gunicorn/celery prefork). Rotating-file writers sharing a path coordinate through an owner-only `.lock` sidecar; distributed hosts should still prefer stdout and an external collector.
 - **Structured exceptions** (`structured_exceptions=True`) render `type`, `message`, `module`, and frames as a dictionary, with optional redacted/truncated locals controlled by the `exception_*` options.
 - **`stack_info` is supported natively**: the stack is captured in Python and rendered in the same position as `StackInfoRenderer` (`stack` between `service` and `message`). Unlike the standard path, the stack ends at the *user's* calling frame (structguru-internal frames are skipped, the way structlog skips its own).
-- **Console mode** (`json=False`): renders colored, human-readable lines instead of JSON — structguru's own stable dev format (`<timestamp> [<LEVEL>] <message>  k=v`), with ANSI colors by default on a TTY. Override with `colors=True/False`.
+- **Console mode** (`format="console"`): renders colored, human-readable lines instead of JSON — structguru's own stable dev format (`<timestamp> [<LEVEL>] <message>  k=v`), with ANSI colors by default on a TTY. Override with `colors=True/False`.
 - **File sinks** (`file_path=...`): write to a rotating file natively. Defaults mirror `RotatingFileHandler` (50 MB, 5 backups); configure via `file_max_bytes`/`file_backup_count`. Set `also_stdout=True` to mirror output to both file and stdout (e.g. container + persistent log).
 - **Callable sinks** (`callable_sinks=[fn, ...]`): use a bounded queue (`callable_queue_maxsize=1024`). `overflow="block"` provides lossless backpressure; `overflow="drop"` reports `callable_dropped` metrics. Flush and lifecycle operations drain queued calls.
 - **Sentry integration** (`sentry_processor=SentryProcessor(...)`): receives the already-redacted event and raw `exc_info` only for exception capture.

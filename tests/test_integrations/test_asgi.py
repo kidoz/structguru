@@ -24,7 +24,7 @@ class TestStructguruMiddleware:
     @pytest.mark.asyncio
     async def test_binds_context_and_logs(self) -> None:
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
 
         app = StructguruMiddleware(_simple_app)
         scope: dict = {
@@ -52,7 +52,7 @@ class TestStructguruMiddleware:
     @pytest.mark.asyncio
     async def test_injects_request_id_header(self) -> None:
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
 
         app = StructguruMiddleware(_simple_app)
         scope: dict = {
@@ -79,7 +79,7 @@ class TestStructguruMiddleware:
     @pytest.mark.asyncio
     async def test_reads_existing_request_id(self) -> None:
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
 
         app = StructguruMiddleware(_simple_app)
         scope: dict = {
@@ -105,7 +105,7 @@ class TestStructguruMiddleware:
     @pytest.mark.asyncio
     async def test_non_http_passthrough(self) -> None:
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
 
         called = False
 
@@ -120,7 +120,7 @@ class TestStructguruMiddleware:
     @pytest.mark.asyncio
     async def test_websocket_no_false_500(self) -> None:
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
 
         async def ws_app(scope: dict, receive: Any, send: Any) -> None:
             await send({"type": "websocket.accept"})
@@ -152,7 +152,7 @@ class TestStructguruMiddleware:
     @pytest.mark.asyncio
     async def test_exception_logged(self) -> None:
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
 
         app = StructguruMiddleware(_error_app)
         scope: dict = {
@@ -172,7 +172,7 @@ class TestStructguruMiddleware:
     @pytest.mark.asyncio
     async def test_invalid_utf8_request_id_header(self) -> None:
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
 
         app = StructguruMiddleware(_simple_app)
         scope: dict = {

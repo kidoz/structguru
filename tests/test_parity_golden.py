@@ -32,10 +32,10 @@ import pytest
 from conftest import configure
 
 import structguru
-from structguru import _native
+from structguru import _runtime
 
 pytestmark = pytest.mark.skipif(
-    not _native.is_available(),
+    not _runtime.is_available(),
     reason="native extension not built",
 )
 
@@ -54,7 +54,7 @@ def _standard_line(
     kwargs: dict[str, Any],
 ) -> str:
     buf = io.StringIO()
-    configure(service="svc", level="DEBUG", json=True, stream=buf)
+    configure(service="svc", level="DEBUG", stream=buf)
     log = structguru.logger.bind(**bound) if bound else structguru.logger
     getattr(log, method)(msg, *args, **kwargs)
     return buf.getvalue().strip().splitlines()[-1]
@@ -67,16 +67,16 @@ def _native_line(
     bound: dict[str, Any],
     kwargs: dict[str, Any],
 ) -> str:
-    _native.configure(service="svc", target="memory", level="DEBUG")
+    _runtime.configure(service="svc", target="memory", level="DEBUG")
     try:
         log = structguru.logger.bind(**bound) if bound else structguru.logger
         getattr(log, method)(msg, *args, **kwargs)
-        _native.flush_native()
-        messages = _native.drain_messages()
+        _runtime.flush_native()
+        messages = _runtime.drain_messages()
         assert messages, "native path emitted no record"
         return messages[-1].strip()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def _assert_byte_parity(
@@ -202,7 +202,7 @@ def test_parity_contextualize() -> None:
             return capture()
 
     buf = io.StringIO()
-    configure(service="svc", level="DEBUG", json=True, stream=buf)
+    configure(service="svc", level="DEBUG", stream=buf)
 
     def std() -> str:
         structguru.logger.info("ctx", extra=1)
@@ -210,17 +210,17 @@ def test_parity_contextualize() -> None:
 
     standard = run(std)
 
-    _native.configure(service="svc", target="memory", level="DEBUG")
+    _runtime.configure(service="svc", target="memory", level="DEBUG")
     try:
 
         def nat() -> str:
             structguru.logger.info("ctx", extra=1)
-            _native.flush_native()
-            return _native.drain_messages()[-1].strip()
+            _runtime.flush_native()
+            return _runtime.drain_messages()[-1].strip()
 
         native = run(nat)
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert _normalize_ts(native) == _normalize_ts(standard)
 
@@ -237,17 +237,17 @@ def _exception_pair(**log_kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         exc = err
 
     buf = io.StringIO()
-    configure(service="svc", level="DEBUG", json=True, stream=buf)
+    configure(service="svc", level="DEBUG", stream=buf)
     structguru.logger.error("failed", exc_info=exc, **log_kwargs)
     standard = json.loads(buf.getvalue().strip().splitlines()[-1])
 
-    _native.configure(service="svc", target="memory", level="DEBUG")
+    _runtime.configure(service="svc", target="memory", level="DEBUG")
     try:
         structguru.logger.error("failed", exc_info=exc, **log_kwargs)
-        _native.flush_native()
-        native = json.loads(_native.drain_messages()[-1])
+        _runtime.flush_native()
+        native = json.loads(_runtime.drain_messages()[-1])
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     standard.pop("timestamp", None)
     native.pop("timestamp", None)
@@ -269,17 +269,17 @@ def test_parity_exception_with_chained_cause() -> None:
         exc = err
 
     buf = io.StringIO()
-    configure(service="svc", level="DEBUG", json=True, stream=buf)
+    configure(service="svc", level="DEBUG", stream=buf)
     structguru.logger.error("failed", exc_info=exc)
     standard = json.loads(buf.getvalue().strip().splitlines()[-1])
 
-    _native.configure(service="svc", target="memory", level="DEBUG")
+    _runtime.configure(service="svc", target="memory", level="DEBUG")
     try:
         structguru.logger.error("failed", exc_info=exc)
-        _native.flush_native()
-        native = json.loads(_native.drain_messages()[-1])
+        _runtime.flush_native()
+        native = json.loads(_runtime.drain_messages()[-1])
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert native["exception"] == standard["exception"]
     assert "inner" in native["exception"] and "outer" in native["exception"]
@@ -289,7 +289,7 @@ def test_parity_exception_with_chained_cause() -> None:
 
 
 def _native_structured_exception(exc: BaseException, **enable_kwargs: Any) -> dict[str, Any]:
-    _native.configure(
+    _runtime.configure(
         service="svc",
         target="memory",
         level="DEBUG",
@@ -298,10 +298,10 @@ def _native_structured_exception(exc: BaseException, **enable_kwargs: Any) -> di
     )
     try:
         structguru.logger.error("failed", exc_info=exc)
-        _native.flush_native()
-        return json.loads(_native.drain_messages()[-1])  # type: ignore[no-any-return]
+        _runtime.flush_native()
+        return json.loads(_runtime.drain_messages()[-1])  # type: ignore[no-any-return]
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def _processor_exception(exc: BaseException, **proc_kwargs: Any) -> dict[str, Any]:
@@ -426,16 +426,16 @@ def test_parity_structured_exception_custom_sensitive_keys() -> None:
 
 
 def test_parity_stack_info_handled_natively() -> None:
-    _native.configure(service="svc", target="memory", level="DEBUG")
+    _runtime.configure(service="svc", target="memory", level="DEBUG")
     try:
         structguru.logger.info("where am I", stack_info=True)
-        _native.flush_native()
-        messages = _native.drain_messages()
+        _runtime.flush_native()
+        messages = _runtime.drain_messages()
         assert messages, "stack_info call bypassed the native path"
         line = messages[-1]
         record = json.loads(line)
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert record["stack"].startswith("Stack (most recent call last):\n")
     assert "test_parity_golden.py" in record["stack"]  # ends at the user frame
@@ -447,13 +447,13 @@ def test_parity_stack_info_handled_natively() -> None:
 
 
 def test_parity_stack_info_via_opt() -> None:
-    _native.configure(service="svc", target="memory", level="DEBUG")
+    _runtime.configure(service="svc", target="memory", level="DEBUG")
     try:
         structguru.logger.opt(stack_info=True).warning("careful")
-        _native.flush_native()
-        record = json.loads(_native.drain_messages()[-1])
+        _runtime.flush_native()
+        record = json.loads(_runtime.drain_messages()[-1])
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert record["stack"].startswith("Stack (most recent call last):\n")
     assert record["level"] == "WARN"

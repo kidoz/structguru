@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from structguru import _native
+from structguru import _runtime
 
 
 @pytest.fixture(autouse=True)
@@ -26,24 +26,24 @@ def _reset_logging() -> None:  # type: ignore[misc]
     root.setLevel(original_level)
     logging.setLogRecordFactory(original_factory)
     sys.excepthook = original_excepthook
-    _native.shutdown()
+    _runtime.shutdown()
 
 
 def configure(
     *,
     service: str = "app",
     level: str = "DEBUG",
-    json: bool = True,
     stream: Any = None,
+    format: str = "json",
 ) -> None:
     """Configure native logging with a stream sink (test helper).
 
     Wires the native renderer to *stream* so logger output is available
-    synchronously.
+    synchronously. ``format`` is forwarded to ``_runtime.configure``.
     """
-    _native.configure(
+    _runtime.configure(
         service=service,
         level=level,
-        json=json,
+        format=format,
         stream_sink=stream,
     )

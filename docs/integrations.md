@@ -10,7 +10,7 @@ application entry point when you need a custom service, level, or sink:
 ```python
 from structguru import configure
 
-configure(service="myapp", level="INFO", json=True)
+configure(service="myapp", level="INFO", format="json")
 ```
 
 ## HTTPX

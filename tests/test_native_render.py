@@ -19,17 +19,17 @@ import pytest
 from conftest import configure
 
 import structguru
-from structguru import _native
+from structguru import _runtime
 
 pytestmark = pytest.mark.skipif(
-    not _native.is_available(),
+    not _runtime.is_available(),
     reason="native extension not built",
 )
 
 
 def _standard_json(bound: dict[str, Any], method: str, msg: str, **kwargs: Any) -> dict[str, Any]:
     buf = io.StringIO()
-    configure(service="svc", level="DEBUG", json=True, stream=buf)
+    configure(service="svc", level="DEBUG", stream=buf)
     log = structguru.logger.bind(**bound)
     getattr(log, method)(msg, **kwargs)
     line = buf.getvalue().strip().splitlines()[-1]
@@ -37,15 +37,15 @@ def _standard_json(bound: dict[str, Any], method: str, msg: str, **kwargs: Any) 
 
 
 def _native_json(bound: dict[str, Any], method: str, msg: str, **kwargs: Any) -> dict[str, Any]:
-    _native.configure(service="svc", target="memory", level="DEBUG")
+    _runtime.configure(service="svc", target="memory", level="DEBUG")
     try:
         log = structguru.logger.bind(**bound)
         getattr(log, method)(msg, **kwargs)
-        _native.flush_native()
-        line = _native.drain_messages()[-1]
+        _runtime.flush_native()
+        line = _runtime.drain_messages()[-1]
         return json.loads(line)
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def _without_ts(record: dict[str, Any]) -> dict[str, Any]:
@@ -122,16 +122,16 @@ def test_native_exception_matches_structlog() -> None:
     except ValueError as err:
         exc = err
 
-    _native.configure(service="svc", target="memory", level="DEBUG")
+    _runtime.configure(service="svc", target="memory", level="DEBUG")
     try:
         structguru.logger.error("failed", code=1, exc_info=exc)
-        _native.flush_native()
-        native = json.loads(_native.drain_messages()[-1])
+        _runtime.flush_native()
+        native = json.loads(_runtime.drain_messages()[-1])
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     buf = io.StringIO()
-    configure(service="svc", level="DEBUG", json=True, stream=buf)
+    configure(service="svc", level="DEBUG", stream=buf)
     structguru.logger.error("failed", code=1, exc_info=exc)
     standard = json.loads(buf.getvalue().strip().splitlines()[-1])
 
@@ -141,29 +141,29 @@ def test_native_exception_matches_structlog() -> None:
 
 
 def test_malformed_exc_info_does_not_break_logging() -> None:
-    _native.configure(service="svc", target="memory", level="DEBUG")
+    _runtime.configure(service="svc", target="memory", level="DEBUG")
     try:
         structguru.logger.error("bad metadata", exc_info="invalid")
-        _native.flush_native()
-        record = json.loads(_native.drain_messages()[-1])
+        _runtime.flush_native()
+        record = json.loads(_runtime.drain_messages()[-1])
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert record["message"] == "bad metadata"
     assert "exception" not in record
 
 
 def test_native_level_filtering_drops_below_threshold() -> None:
-    _native.configure(service="svc", target="memory", level="WARNING")
+    _runtime.configure(service="svc", target="memory", level="WARNING")
     try:
         structguru.logger.info("dropped")
         structguru.logger.warning("kept")
-        _native.flush_native()
-        lines = _native.drain_messages()
+        _runtime.flush_native()
+        lines = _runtime.drain_messages()
         assert len(lines) == 1
         assert json.loads(lines[0])["message"] == "kept"
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_native_reserved_key_collision_matches_structlog() -> None:
@@ -177,12 +177,12 @@ def test_native_reserved_key_collision_matches_structlog() -> None:
 
 
 def test_native_custom_sensitive_keys() -> None:
-    _native.configure(service="svc", target="memory", sensitive_keys=["secret_sauce"])
+    _runtime.configure(service="svc", target="memory", sensitive_keys=["secret_sauce"])
     try:
         structguru.logger.info("m", secret_sauce="x", ssn="123")
-        _native.flush_native()
-        record = json.loads(_native.drain_messages()[-1])
+        _runtime.flush_native()
+        record = json.loads(_runtime.drain_messages()[-1])
         assert record["secret_sauce"] == "[REDACTED]"
         assert record["ssn"] == "123"  # default key, not in the custom set
     finally:
-        _native.shutdown()
+        _runtime.shutdown()

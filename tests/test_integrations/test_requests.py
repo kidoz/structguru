@@ -17,7 +17,7 @@ def _records(buf: io.StringIO) -> list[dict]:
 @responses.activate
 def test_requests_logging_session_success() -> None:
     buf = io.StringIO()
-    configure(service="test", level="DEBUG", json=True, stream=buf)
+    configure(service="test", level="DEBUG", stream=buf)
     responses.add(responses.GET, "http://test.local/api", json={"status": "ok"}, status=200)
 
     session = get_logging_session()
@@ -40,7 +40,7 @@ def test_requests_logging_session_success() -> None:
 @responses.activate
 def test_requests_logged_url_strips_query_and_credentials() -> None:
     buf = io.StringIO()
-    configure(service="test", level="DEBUG", json=True, stream=buf)
+    configure(service="test", level="DEBUG", stream=buf)
     responses.add(responses.GET, "http://user:pass@test.local/charge", json={}, status=200)
 
     session = get_logging_session()
@@ -57,7 +57,7 @@ def test_requests_logged_url_strips_query_and_credentials() -> None:
 @responses.activate
 def test_requests_logging_session_error() -> None:
     buf = io.StringIO()
-    configure(service="test", level="DEBUG", json=True, stream=buf)
+    configure(service="test", level="DEBUG", stream=buf)
     responses.add(responses.GET, "http://test.local/api/error", json={"error": "bad"}, status=500)
 
     session = get_logging_session()
@@ -75,7 +75,7 @@ def test_requests_logging_session_error() -> None:
 @responses.activate
 def test_requests_logging_session_transport_failure() -> None:
     buf = io.StringIO()
-    configure(service="test", level="DEBUG", json=True, stream=buf)
+    configure(service="test", level="DEBUG", stream=buf)
     # No matching response registered -> requests raises, which the session
     # must still log as a failure (without a status_code) and re-raise.
     session = get_logging_session()

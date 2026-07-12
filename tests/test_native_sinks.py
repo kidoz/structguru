@@ -17,10 +17,10 @@ from pathlib import Path
 import pytest
 
 import structguru
-from structguru import _native
+from structguru import _runtime
 
 pytestmark = pytest.mark.skipif(
-    not _native.is_available(),
+    not _runtime.is_available(),
     reason="native extension not built",
 )
 
@@ -33,12 +33,12 @@ def test_file_sink_writes_records_to_file() -> None:
         path = f.name
     os.unlink(path)  # let the sink create it
     try:
-        _native.configure(service="svc", target="memory", level="DEBUG", file_path=path)
+        _runtime.configure(service="svc", target="memory", level="DEBUG", file_path=path)
         try:
             structguru.logger.info("file sink test", request_id="r1")
-            _native.flush_native()
+            _runtime.flush_native()
         finally:
-            _native.shutdown()
+            _runtime.shutdown()
 
         with open(path) as f:
             content = f.read()
@@ -55,7 +55,7 @@ def test_file_sink_rotates_at_max_bytes() -> None:
     os.unlink(path)
     try:
         # Tiny max_bytes so rotation triggers quickly; backup_count=3.
-        _native.configure(
+        _runtime.configure(
             service="svc",
             target="memory",
             level="DEBUG",
@@ -67,9 +67,9 @@ def test_file_sink_rotates_at_max_bytes() -> None:
             # Each record is ~150 bytes of JSON; write enough to trigger rotations.
             for i in range(10):
                 structguru.logger.info("rotation test {n}", n=i)
-            _native.flush_native()
+            _runtime.flush_native()
         finally:
-            _native.shutdown()
+            _runtime.shutdown()
 
         # After rotation, .1 should exist (the first rotated file).
         assert os.path.exists(f"{path}.1"), "backup .1 should exist after rotation"
@@ -95,7 +95,7 @@ def test_file_sink_and_stdout_both_receive() -> None:
         path = f.name
     os.unlink(path)
     try:
-        _native.configure(
+        _runtime.configure(
             service="svc",
             target="memory",
             level="DEBUG",
@@ -104,9 +104,9 @@ def test_file_sink_and_stdout_both_receive() -> None:
         )
         try:
             structguru.logger.info("mirrored record")
-            _native.flush_native()
+            _runtime.flush_native()
         finally:
-            _native.shutdown()
+            _runtime.shutdown()
 
         with open(path) as f:
             assert "mirrored record" in f.read()
@@ -126,13 +126,13 @@ def test_callable_sink_receives_rendered_lines() -> None:
         with lock:
             received.append(line)
 
-    _native.configure(service="svc", target="memory", level="DEBUG", callable_sinks=[collector])
+    _runtime.configure(service="svc", target="memory", level="DEBUG", callable_sinks=[collector])
     try:
         for i in range(5):
             structguru.logger.info("callable {n}", n=i)
-        _native.flush_native()
+        _runtime.flush_native()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert len(received) == 5
     assert json.loads(received[0])["message"] == "callable 0"
@@ -149,7 +149,7 @@ def test_callable_sink_errors_are_swallowed() -> None:
         with lock:
             good.append(line)
 
-    _native.configure(
+    _runtime.configure(
         service="svc",
         target="memory",
         level="DEBUG",
@@ -157,9 +157,9 @@ def test_callable_sink_errors_are_swallowed() -> None:
     )
     try:
         structguru.logger.info("survives")
-        _native.flush_native()
+        _runtime.flush_native()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert len(good) == 1, "good sink must still receive despite bad_sink raising"
 
@@ -172,9 +172,9 @@ def test_callable_sink_stopped_on_disable() -> None:
         with lock:
             received.append(line)
 
-    _native.configure(service="svc", target="memory", level="DEBUG", callable_sinks=[collector])
+    _runtime.configure(service="svc", target="memory", level="DEBUG", callable_sinks=[collector])
     structguru.logger.info("before disable")
-    _native.shutdown()
+    _runtime.shutdown()
 
     count_before = len(received)
     assert count_before == 1, "shutdown must drain pending callable deliveries"
@@ -185,14 +185,14 @@ def test_callable_sink_stopped_on_disable() -> None:
 def test_reconfigure_drains_old_configured_sinks_before_replacing() -> None:
     first: list[str] = []
     second: list[str] = []
-    _native.configure(target="memory", callable_sinks=[first.append])
+    _runtime.configure(target="memory", callable_sinks=[first.append])
     structguru.logger.info("old configuration")
-    _native.configure(target="memory", callable_sinks=[second.append])
+    _runtime.configure(target="memory", callable_sinks=[second.append])
     try:
         structguru.logger.info("new configuration")
-        _native.flush_native()
+        _runtime.flush_native()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert any("old configuration" in line for line in first)
     assert not any("new configuration" in line for line in first)
@@ -200,39 +200,39 @@ def test_reconfigure_drains_old_configured_sinks_before_replacing() -> None:
 
 
 def test_failed_reconfigure_preserves_active_writer() -> None:
-    _native.configure(target="memory")
+    _runtime.configure(target="memory")
     structguru.logger.info("before failed reconfigure")
 
     with pytest.raises(ValueError, match="target"):
-        _native.configure(target="invalid")
+        _runtime.configure(target="invalid")
 
-    assert _native.is_native_enabled()
+    assert _runtime.is_native_enabled()
     structguru.logger.info("after failed reconfigure")
-    _native.flush_native()
-    lines = _native.drain_messages()
+    _runtime.flush_native()
+    lines = _runtime.drain_messages()
     assert any("before failed reconfigure" in line for line in lines)
     assert any("after failed reconfigure" in line for line in lines)
 
 
 def test_failed_writer_construction_preserves_active_writer(tmp_path: Path) -> None:
-    _native.configure(target="memory")
+    _runtime.configure(target="memory")
     structguru.logger.info("before invalid file")
 
     with pytest.raises(ValueError):
-        _native.configure(file_path=str(tmp_path))
+        _runtime.configure(file_path=str(tmp_path))
 
-    assert _native.is_native_enabled()
+    assert _runtime.is_native_enabled()
     structguru.logger.info("after invalid file")
-    _native.flush_native()
-    lines = _native.drain_messages()
+    _runtime.flush_native()
+    lines = _runtime.drain_messages()
     assert any("before invalid file" in line for line in lines)
     assert any("after invalid file" in line for line in lines)
 
 
 def test_default_output_queue_is_bounded() -> None:
-    _native.configure(target="memory")
+    _runtime.configure(target="memory")
 
-    metrics = _native.writer_metrics()
+    metrics = _runtime.writer_metrics()
 
     assert metrics is not None
     assert metrics["maxsize"] > 0
@@ -263,7 +263,7 @@ def test_callable_sink_queue_is_bounded_and_counts_drops() -> None:
         started.set()
         release.wait(timeout=2)
 
-    _native.configure(
+    _runtime.configure(
         target="memory",
         overflow="drop",
         callable_sinks=[blocking_sink],
@@ -275,18 +275,18 @@ def test_callable_sink_queue_is_bounded_and_counts_drops() -> None:
         structguru.logger.info("second")
         with pytest.warns(UserWarning, match="callable sinks dropped"):
             structguru.logger.info("third")
-        metrics = _native.writer_metrics()
+        metrics = _runtime.writer_metrics()
         assert metrics is not None
         assert metrics["callable_maxsize"] == 1
         assert metrics["callable_dropped"] == 1
     finally:
         release.set()
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 def test_invalid_callable_queue_maxsize_raises() -> None:
     with pytest.raises(ValueError, match="callable_queue_maxsize"):
-        _native.configure(callable_queue_maxsize=0)
+        _runtime.configure(callable_queue_maxsize=0)
 
 
 @pytest.mark.parametrize(
@@ -298,30 +298,32 @@ def test_invalid_callable_queue_maxsize_raises() -> None:
 )
 def test_invalid_structured_exception_limits_raise(kwargs: dict[str, int]) -> None:
     with pytest.raises(ValueError, match="exception_max"):
-        _native.configure(structured_exceptions=True, **kwargs)
+        _runtime.configure(structured_exceptions=True, **kwargs)
 
 
 def test_non_callable_sink_raises() -> None:
     with pytest.raises(TypeError, match="callable_sinks"):
-        _native.configure(callable_sinks=["not callable"])  # type: ignore[list-item]
-    assert not _native.is_native_enabled()
+        _runtime.configure(callable_sinks=["not callable"])  # type: ignore[list-item]
+    assert not _runtime.is_native_enabled()
 
 
 # -- console renderer -------------------------------------------------------
 
 
 def _drain_last_line() -> str:
-    _native.flush_native()
-    return _native.drain_messages()[-1].rstrip("\n")
+    _runtime.flush_native()
+    return _runtime.drain_messages()[-1].rstrip("\n")
 
 
 def test_console_renderer_human_readable_no_colors() -> None:
-    _native.configure(service="svc", target="memory", level="DEBUG", json=False, colors=False)
+    _runtime.configure(
+        service="svc", target="memory", level="DEBUG", format="console", colors=False
+    )
     try:
         structguru.logger.info("hello {name}", name="world", count=3)
         line = _drain_last_line()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     # Format: <timestamp> [<LEVEL>] <message>  k=v ...
     assert "[INFO    ]" in line
@@ -331,12 +333,14 @@ def test_console_renderer_human_readable_no_colors() -> None:
 
 
 def test_console_renderer_applies_colors() -> None:
-    _native.configure(service="svc", target="memory", level="DEBUG", json=False, colors=True)
+    _runtime.configure(
+        service="svc", target="memory", level="DEBUG", format="console", colors=True
+    )
     try:
         structguru.logger.error("boom")
         line = _drain_last_line()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert "\x1b[31m" in line  # ANSI red
     assert "\x1b[0m" in line  # ANSI reset
@@ -344,12 +348,14 @@ def test_console_renderer_applies_colors() -> None:
 
 
 def test_console_renderer_redacts_sensitive_keys() -> None:
-    _native.configure(service="svc", target="memory", level="DEBUG", json=False, colors=False)
+    _runtime.configure(
+        service="svc", target="memory", level="DEBUG", format="console", colors=False
+    )
     try:
         structguru.logger.info("login", password="hunter2", user="alice")
         line = _drain_last_line()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert 'password="[REDACTED]"' in line
     assert "hunter2" not in line
@@ -357,12 +363,14 @@ def test_console_renderer_redacts_sensitive_keys() -> None:
 
 
 def test_console_renderer_warn_level_uses_yellow() -> None:
-    _native.configure(service="svc", target="memory", level="DEBUG", json=False, colors=True)
+    _runtime.configure(
+        service="svc", target="memory", level="DEBUG", format="console", colors=True
+    )
     try:
         structguru.logger.warning("careful")
         line = _drain_last_line()
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
     assert "\x1b[33m" in line  # ANSI yellow
     assert "[WARN    ]" in line

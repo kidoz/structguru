@@ -102,7 +102,7 @@ class TestSetupQueryLogging:
 
     def test_logs_slow_queries(self) -> None:
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
 
         listeners: dict[str, Any] = {}
 

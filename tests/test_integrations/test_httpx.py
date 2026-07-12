@@ -18,7 +18,7 @@ def _records(buf: io.StringIO) -> list[dict]:
 
 def test_httpx_logging_hooks_success(httpserver: HTTPServer) -> None:
     buf = io.StringIO()
-    configure(service="test", level="DEBUG", json=True, stream=buf)
+    configure(service="test", level="DEBUG", stream=buf)
     httpserver.expect_request("/test").respond_with_data("OK", status=200)
 
     client = httpx.Client(event_hooks=StructguruHTTPXLoggingHooks.get_hooks())
@@ -37,7 +37,7 @@ def test_httpx_logging_hooks_success(httpserver: HTTPServer) -> None:
 
 def test_httpx_logging_hooks_error(httpserver: HTTPServer) -> None:
     buf = io.StringIO()
-    configure(service="test", level="DEBUG", json=True, stream=buf)
+    configure(service="test", level="DEBUG", stream=buf)
     httpserver.expect_request("/error").respond_with_data("Error", status=500)
 
     client = httpx.Client(event_hooks=StructguruHTTPXLoggingHooks.get_hooks())
@@ -54,7 +54,7 @@ def test_httpx_logging_hooks_error(httpserver: HTTPServer) -> None:
 
 def test_httpx_logged_url_strips_query_and_credentials(httpserver: HTTPServer) -> None:
     buf = io.StringIO()
-    configure(service="test", level="DEBUG", json=True, stream=buf)
+    configure(service="test", level="DEBUG", stream=buf)
     httpserver.expect_request("/charge").respond_with_data("OK", status=200)
 
     client = httpx.Client(event_hooks=StructguruHTTPXLoggingHooks.get_hooks())
@@ -76,7 +76,7 @@ def test_get_hooks_returns_fresh_lists() -> None:
 
 async def test_httpx_async_logging_hooks_success() -> None:
     buf = io.StringIO()
-    configure(service="test", level="DEBUG", json=True, stream=buf)
+    configure(service="test", level="DEBUG", stream=buf)
 
     async def respond(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, request=request)

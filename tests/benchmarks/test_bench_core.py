@@ -11,7 +11,7 @@ import structlog
 from loguru import logger as loguru_logger
 from structlog.stdlib import ProcessorFormatter
 
-from structguru import _native, configure, logger
+from structguru import _runtime, configure, logger
 
 
 def _build_structlog_baseline(stream: Any) -> Any:
@@ -61,7 +61,7 @@ def benchmark_stream() -> io.StringIO:
 
 def test_bench_structguru_simple(benchmark: Any, benchmark_stream: io.StringIO) -> None:
     """Benchmark structguru simple info log."""
-    configure(json=True, target="null", stream_sink=benchmark_stream)
+    configure(format="json", target="null", stream_sink=benchmark_stream)
 
     @benchmark
     def _() -> None:
@@ -94,7 +94,7 @@ def test_bench_loguru_simple(benchmark: Any, benchmark_stream: io.StringIO) -> N
 
 def test_bench_structguru_formatting(benchmark: Any, benchmark_stream: io.StringIO) -> None:
     """Benchmark structguru brace formatting."""
-    configure(json=True, target="null", stream_sink=benchmark_stream)
+    configure(format="json", target="null", stream_sink=benchmark_stream)
 
     @benchmark
     def _() -> None:
@@ -127,7 +127,7 @@ def test_bench_loguru_formatting(benchmark: Any, benchmark_stream: io.StringIO) 
 
 def test_bench_structguru_bind(benchmark: Any, benchmark_stream: io.StringIO) -> None:
     """Benchmark structguru context binding via `bind()`."""
-    configure(json=True, target="null", stream_sink=benchmark_stream)
+    configure(format="json", target="null", stream_sink=benchmark_stream)
     bound_logger = logger.bind(request_id="12345", user_id=42)
 
     @benchmark
@@ -152,7 +152,7 @@ def test_bench_structlog_raw_bind(benchmark: Any, benchmark_stream: io.StringIO)
 # -- native end-to-end (the numbers the full-Rust cutover is judged against) --
 
 _needs_native = pytest.mark.skipif(
-    not _native.is_available(),
+    not _runtime.is_available(),
     reason="native extension not built",
 )
 
@@ -160,7 +160,7 @@ _needs_native = pytest.mark.skipif(
 @_needs_native
 def test_bench_structguru_native_simple(benchmark: Any) -> None:
     """Benchmark structguru simple info log on the native path (stdout sink)."""
-    _native.configure(service="app", target="stdout")
+    _runtime.configure(service="app", target="stdout")
     try:
 
         @benchmark
@@ -168,13 +168,13 @@ def test_bench_structguru_native_simple(benchmark: Any) -> None:
             logger.info("Hello world")
 
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 @_needs_native
 def test_bench_structguru_native_formatting(benchmark: Any) -> None:
     """Benchmark structguru brace formatting on the native path."""
-    _native.configure(service="app", target="stdout")
+    _runtime.configure(service="app", target="stdout")
     try:
 
         @benchmark
@@ -182,13 +182,13 @@ def test_bench_structguru_native_formatting(benchmark: Any) -> None:
             logger.info("Hello {name}, ID={id}", name="world", id=42)
 
     finally:
-        _native.shutdown()
+        _runtime.shutdown()
 
 
 @_needs_native
 def test_bench_structguru_native_bind(benchmark: Any) -> None:
     """Benchmark structguru context binding on the native path."""
-    _native.configure(service="app", target="stdout")
+    _runtime.configure(service="app", target="stdout")
     bound_logger = logger.bind(request_id="12345", user_id=42)
     try:
 
@@ -197,4 +197,4 @@ def test_bench_structguru_native_bind(benchmark: Any) -> None:
             bound_logger.info("With context")
 
     finally:
-        _native.shutdown()
+        _runtime.shutdown()

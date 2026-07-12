@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from conftest import configure
 
-from structguru import _native
+from structguru import _runtime
 from structguru.core import (
     Logger,
     _CallableHandler,
@@ -177,7 +177,7 @@ class TestLoggerOpt:
     def test_flag_persists_across_calls(self) -> None:
         """Matches loguru: opt() is sticky on the returned logger."""
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
 
         log = Logger()
         errlog = log.opt(exception=True)
@@ -203,7 +203,7 @@ class TestLoggerOpt:
 class TestLoggerLevelMethods:
     def _make_capturing_logger(self) -> tuple[Logger, io.StringIO]:
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
         return Logger(), buf
 
     def test_debug(self) -> None:
@@ -255,7 +255,7 @@ class TestLoggerLevelMethods:
 
 class TestLoggerAddRemove:
     def test_add_and_remove(self) -> None:
-        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
+        configure(service="test", level="DEBUG", stream=io.StringIO())
         log = Logger()
         messages: list[str] = []
         hid = log.add(messages.append, level="DEBUG")
@@ -264,7 +264,7 @@ class TestLoggerAddRemove:
         log.remove(hid)
 
     def test_remove_drains_records_queued_before_removal(self) -> None:
-        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
+        configure(service="test", level="DEBUG", stream=io.StringIO())
         log = Logger()
         messages: list[str] = []
         handler_id = log.add(messages.append)
@@ -273,7 +273,7 @@ class TestLoggerAddRemove:
         assert any("before removal" in message for message in messages)
 
     def test_remove_all(self) -> None:
-        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
+        configure(service="test", level="DEBUG", stream=io.StringIO())
         log = Logger()
         messages: list[str] = []
         log.add(messages.append, level="DEBUG")
@@ -284,19 +284,19 @@ class TestLoggerAddRemove:
     def test_add_callable_receives_messages(self) -> None:
         # Callable sinks route through the native dispatch thread and receive
         # rendered log lines.
-        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
+        configure(service="test", level="DEBUG", stream=io.StringIO())
         log = Logger()
         messages: list[str] = []
         hid = log.add(messages.append, level="DEBUG")
         try:
             log.info("captured")
-            _native.flush_native()
+            _runtime.flush_native()
         finally:
             log.remove(hid)
         assert any("captured" in m for m in messages), f"expected delivery, got {messages}"
 
     def test_duplicate_callable_registrations_are_removed_by_handler_id(self) -> None:
-        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
+        configure(service="test", level="DEBUG", stream=io.StringIO())
         log = Logger()
         messages: list[str] = []
         first = log.add(messages.append)
@@ -304,65 +304,65 @@ class TestLoggerAddRemove:
         log.remove(first)
         try:
             log.info("once")
-            _native.flush_native()
+            _runtime.flush_native()
         finally:
             log.remove(second)
         assert len(messages) == 1
 
     def test_callable_added_while_disabled_activates_on_configure(self) -> None:
-        _native.shutdown()
+        _runtime.shutdown()
         log = Logger()
         messages: list[str] = []
         handler_id = log.add(messages.append)
         try:
-            _native.configure(target="memory")
+            _runtime.configure(target="memory")
             log.info("activated")
-            _native.flush_native()
+            _runtime.flush_native()
         finally:
             log.remove(handler_id)
         assert any("activated" in message for message in messages)
 
     def test_runtime_callable_survives_reconfigure(self) -> None:
-        _native.configure(target="memory")
+        _runtime.configure(target="memory")
         log = Logger()
         messages: list[str] = []
         handler_id = log.add(messages.append)
         try:
-            _native.configure(target="memory", level="DEBUG")
+            _runtime.configure(target="memory", level="DEBUG")
             log.info("after reconfigure")
-            _native.flush_native()
+            _runtime.flush_native()
         finally:
             log.remove(handler_id)
         assert any("after reconfigure" in message for message in messages)
 
     def test_stream_sink_receives_native_records(self) -> None:
-        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
+        configure(service="test", level="DEBUG", stream=io.StringIO())
         log = Logger()
         stream = io.StringIO()
         handler_id = log.add(stream)
         try:
             log.info("native stream")
-            _native.flush_native()
+            _runtime.flush_native()
         finally:
             log.remove(handler_id)
         assert "native stream" in stream.getvalue()
 
     def test_remove_closes_handler(self, tmp_path: Path) -> None:
-        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
+        configure(service="test", level="DEBUG", stream=io.StringIO())
         log = Logger()
         hid = log.add(tmp_path / "test.log", level="DEBUG")
         handler = log._handlers[hid]
         stream = handler.stream  # type: ignore[attr-defined]
         assert stream is not None
         log.info("native file")
-        _native.flush_native()
+        _runtime.flush_native()
         log.remove(hid)
         assert stream.closed
         assert "native file" in (tmp_path / "test.log").read_text()
 
     @pytest.mark.skipif(os.name != "posix", reason="Unix permission bits only")
     def test_path_sink_is_created_owner_only(self, tmp_path: Path) -> None:
-        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
+        configure(service="test", level="DEBUG", stream=io.StringIO())
         log = Logger()
         path = tmp_path / "private.log"
         handler_id = log.add(path)
@@ -373,7 +373,7 @@ class TestLoggerAddRemove:
         assert mode == 0o600
 
     def test_remove_all_closes_handlers(self, tmp_path: Path) -> None:
-        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
+        configure(service="test", level="DEBUG", stream=io.StringIO())
         log = Logger()
         log.add(tmp_path / "a.log", level="DEBUG")
         log.add(tmp_path / "b.log", level="DEBUG")
@@ -381,7 +381,7 @@ class TestLoggerAddRemove:
         # handlers dict is cleared, no leaked file descriptors
 
     def test_unique_ids_across_instances(self) -> None:
-        configure(service="test", level="DEBUG", json=True, stream=io.StringIO())
+        configure(service="test", level="DEBUG", stream=io.StringIO())
         log1 = Logger()
         log2 = Logger()
         id1 = log1.add(io.StringIO(), level="DEBUG")
@@ -394,7 +394,7 @@ class TestLoggerAddRemove:
 class TestLoggerIntegration:
     def test_bind_with_output(self) -> None:
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
         log = Logger().bind(user="alice")
         log.info("action")
         output = buf.getvalue()
@@ -404,18 +404,18 @@ class TestLoggerIntegration:
     def test_clear_handlers_false_preserves_existing(self) -> None:
         # Native mode doesn't manage root handlers; reconfiguring doesn't change them.
         buf1 = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf1)
+        configure(service="test", level="DEBUG", stream=buf1)
         root = logging.getLogger()
         handler_count_before = len(root.handlers)
 
         buf2 = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf2)
+        configure(service="test", level="DEBUG", stream=buf2)
         # Handler count unchanged (native mode doesn't add/remove root handlers).
         assert len(root.handlers) == handler_count_before
 
     def test_contextualize_with_output(self) -> None:
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
         log = Logger()
         with log.contextualize(request_id="req-123"):
             log.info("in context")
@@ -427,7 +427,7 @@ class TestLoggerIntegration:
 class TestLoggerCatch:
     def test_catch_context_manager(self) -> None:
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
         log = Logger()
 
         with log.catch(ValueError, message="caught ValueError"):
@@ -439,7 +439,7 @@ class TestLoggerCatch:
 
     def test_catch_decorator(self) -> None:
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
         log = Logger()
 
         @log.catch(message="decorator error")
@@ -453,7 +453,7 @@ class TestLoggerCatch:
 
     def test_catch_reraise(self) -> None:
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
         log = Logger()
 
         with pytest.raises(ValueError):
@@ -465,7 +465,7 @@ class TestLoggerCatch:
 
     def test_catch_unmatched_exception_reraises_automatically(self) -> None:
         buf = io.StringIO()
-        configure(service="test", level="DEBUG", json=True, stream=buf)
+        configure(service="test", level="DEBUG", stream=buf)
         log = Logger()
 
         with pytest.raises(RuntimeError):

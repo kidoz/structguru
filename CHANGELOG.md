@@ -6,8 +6,17 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **`format=` renderer selector.** `configure(format="json" | "console")` is the
+  way to choose the output renderer. `"json"` remains the default. Additional
+  format names (e.g. `logfmt`) will be added under the same parameter in future
+  releases.
+
 ### Changed (breaking)
 
+- **Removed `configure(json=...)`.** The boolean output selector is gone; pass
+  `format="json"` (default) or `format="console"` instead.
 - **Removed `configure_structlog()`.** The deprecated pre-1.0 configuration
   wrapper is gone; use `configure()` (with `stream_sink=` for the synchronous
   stream behavior it provided).
