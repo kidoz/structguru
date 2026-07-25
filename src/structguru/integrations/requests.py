@@ -2,6 +2,12 @@
 
 Provides a wrapper for `requests.Session` (or monkey-patch) to automatically
 log outbound requests and their responses.
+
+Requires the ``requests`` extra. Unlike the other adapters this one imports its
+framework at module scope: :class:`StructguruRequestsSession` subclasses
+``requests.Session``, so the base class has to exist when the class is created.
+Importing this module is already an explicit opt-in — nothing in ``structguru``
+imports it for you — so the dependency is never pulled in implicitly.
 """
 
 from __future__ import annotations
