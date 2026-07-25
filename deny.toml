@@ -12,18 +12,15 @@ yanked = "deny"
 
 [licenses]
 # structguru ships MIT. Everything linked into the extension must be compatible
-# with redistribution under it; this is the permissive set the current graph
-# resolves to. Adding a crate under anything else is a deliberate decision, not
-# something that should slip through unnoticed.
+# with redistribution under it. This list is exactly what the current graph
+# resolves to across all targets — no speculative pre-approvals, since
+# cargo-deny warns on allowances it never encounters. A crate under anything
+# else fails the check, which is the point: adding one is a deliberate decision.
 allow = [
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
-    "BSD-2-Clause",
-    "BSD-3-Clause",
-    "ISC",
     "Unicode-3.0",
-    "Zlib",
 ]
 confidence-threshold = 0.93
 
@@ -33,6 +30,7 @@ confidence-threshold = 0.93
 # block a security release.
 multiple-versions = "warn"
 wildcards = "deny"
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

@@ -12,6 +12,12 @@ rust-version = "1.89"
 license = "MIT"
 authors = ["Aleksandr Pavlov <ckidoz@gmail.com>"]
 repository = "https://github.com/kidoz/structguru"
+# Neither crate is a crates.io package: `structguru-py` is an extension-module
+# cdylib (unusable as a Rust dependency) and `structguru-core` is its private
+# implementation. Distribution happens entirely through the maturin-built wheel
+# on PyPI. Declaring that blocks an accidental `cargo publish` and lets the
+# internal `path` dependency between them be exempted from the wildcard ban.
+publish = false
 
 [profile.release]
 # Optimize the shipped extension: whole-program LTO + single codegen unit for
