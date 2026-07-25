@@ -55,3 +55,19 @@ class TestAddOtelContext:
             ed: dict = {"event": "test"}
             result = add_otel_context(None, "info", ed)
         assert "trace_id" not in result
+
+    def test_sdk_failure_does_not_propagate(self) -> None:
+        # Trace correlation is enrichment: a provider that raises (broken context
+        # propagation, a half-initialized SDK) must cost the trace fields, not the
+        # log call. `add_otel_context` runs inline on the hot path, so anything
+        # escaping it would take down every `logger.*` call in the process.
+        mock_trace = MagicMock()
+        mock_trace.get_current_span.side_effect = RuntimeError("context broken")
+
+        mock_otel = MagicMock()
+        mock_otel.trace = mock_trace
+        modules = {"opentelemetry": mock_otel, "opentelemetry.trace": mock_trace}
+        with patch.dict("sys.modules", modules):
+            ed: dict = {"event": "test"}
+            result = add_otel_context(None, "info", ed)
+        assert result == {"event": "test"}
