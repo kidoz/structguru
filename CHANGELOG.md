@@ -4,6 +4,43 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **An OpenTelemetry failure no longer breaks logging.** `add_otel_context` only
+  caught `ImportError`, so any other exception from the installed SDK (broken
+  context propagation, a provider raising from `get_current_span`) escaped
+  `Logger._log` and took down every log call in the process. Trace enrichment now
+  degrades to dropping the trace fields, matching the metric and Sentry hooks.
+- **The stdlib bridge no longer delivers third-party records twice.**
+  `logger.add()` attaches its sink to the root logger so it also receives foreign
+  `logging` records raw, while the bridge routes those same records into the same
+  sink already rendered. With both active, every third-party record arrived twice
+  — once raw, once as JSON — breaking sinks that parse their input. Installing the
+  bridge now suspends the raw root delivery; `uninstall_stdlib_bridge()` restores
+  it. Previously the outcome also depended on call order, because
+  `install_stdlib_bridge(clear_handlers=True)` silently detached sinks registered
+  beforehand.
+- **`logger.add(sink)` without `level=` now really accepts all levels.** It
+  inherited the root logger's level for the stdlib delivery path, which is
+  `WARNING` on an unconfigured root — so `INFO` records were dropped there while
+  the native path still delivered them. Both paths now share one threshold.
+- **`Logger` is hashable again**, so it can be used as a dict key or set member.
+
+### Added
+
+- **`structguru.flush()`** — public API for blocking until buffered records have
+  been written. Previously only reachable as the private `_runtime.flush_native`.
+- **`bind_contextvars`, `bound_contextvars`, `clear_contextvars`** are exported
+  from the package root; custom middleware no longer has to import
+  `structguru._contextvars`.
+- **`uninstall_stdlib_bridge()`** for removing the bridge and restoring the
+  pre-install delivery behavior.
+- **`deny.toml`** — an explicit cargo-deny license/bans/sources policy, and a
+  `supply-chain` CI job so dependency advisories surface on every pull request
+  rather than only on the release path.
+
 ## [1.0.4] - 2026-07-12
 
 ### Added
