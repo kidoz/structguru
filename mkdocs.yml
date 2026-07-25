@@ -55,3 +55,4 @@ nav:
       - Requests: api/integrations/requests.md
       - Sentry: api/integrations/sentry.md
       - SQLAlchemy: api/integrations/sqlalchemy.md
+      - Standard Library: api/integrations/stdlib.md
