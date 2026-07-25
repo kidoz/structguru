@@ -292,16 +292,10 @@ pub fn render_line(
 }
 
 /// ANSI color codes for console rendering (applied only when `colors` is true).
-/// ANSI color codes for console rendering (applied only when `colors` is true).
-#[allow(dead_code)]
 const ANSI_DEBUG: &str = "\x1b[2m"; // dim
-#[allow(dead_code)]
 const ANSI_YELLOW: &str = "\x1b[33m";
-#[allow(dead_code)]
 const ANSI_RED: &str = "\x1b[31m";
-#[allow(dead_code)]
 const ANSI_BOLD_RED: &str = "\x1b[1;31m";
-#[allow(dead_code)]
 const ANSI_RESET: &str = "\x1b[0m";
 
 /// Append `s` with control characters escaped.
@@ -311,7 +305,6 @@ const ANSI_RESET: &str = "\x1b[0m";
 /// embed a newline (forging a separate log line) or an ANSI escape sequence
 /// (manipulating the operator's terminal). Escaping neutralizes both while
 /// keeping ordinary text readable.
-#[allow(dead_code)]
 fn push_escaped(buf: &mut String, s: &str) {
     use std::fmt::Write;
     for ch in s.chars() {
@@ -328,7 +321,6 @@ fn push_escaped(buf: &mut String, s: &str) {
 }
 
 /// Format a [`Value`] for the console renderer (human-readable, not JSON).
-#[allow(dead_code)]
 fn display_value(value: &Value, buf: &mut String) {
     match value {
         Value::Null => buf.push_str("None"),
@@ -453,7 +445,6 @@ pub fn render_line_console(
     out
 }
 
-#[allow(dead_code)]
 fn level_style(canonical_level: &str, colors: bool) -> (String, &'static str) {
     // Right-pad level to 8 chars inside the brackets: [INFO    ], [DEBUG   ], [CRITICAL].
     let pad = format!("{:<8}", canonical_level);
