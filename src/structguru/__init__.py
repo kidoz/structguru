@@ -1,7 +1,13 @@
 """structguru — ergonomic structured logging with a native Rust runtime."""
 
+from structguru._contextvars import (
+    bind_contextvars,
+    bound_contextvars,
+    clear_contextvars,
+)
 from structguru._runtime import (
     configure,
+    flush,
     is_available,
     set_level,
     shutdown,
@@ -19,7 +25,11 @@ __all__ = [
     "Logger",
     "MetricProcessor",
     "add_otel_context",
+    "bind_contextvars",
+    "bound_contextvars",
+    "clear_contextvars",
     "configure",
+    "flush",
     "is_available",
     "logger",
     "set_level",

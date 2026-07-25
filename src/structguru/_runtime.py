@@ -915,12 +915,26 @@ def _reset_drop_count() -> None:
     _callable_dispatcher.reset_drop_count()
 
 
-def flush_native() -> None:
-    """Block until native output and callable sinks have fully drained."""
+def flush() -> None:
+    """Block until every buffered record has been written out.
+
+    Rendering hands each record to a background writer thread (and, for callable
+    sinks, a bounded dispatch queue), so a returning ``logger.info()`` does not
+    mean the line has reached its destination yet. Call this when you need that
+    guarantee — before asserting on output in a test, or at a checkpoint where
+    losing buffered records would matter.
+
+    Not needed for normal shutdown: :func:`shutdown`, reconfiguration, fork, and
+    interpreter exit all drain automatically.
+    """
     state = current_runtime()
     if state is not None:
         state.writer.flush()
     _callable_dispatcher.flush()
+
+
+# Pre-1.0.5 name, kept as an alias: `flush` is the public spelling.
+flush_native = flush
 
 
 def drain_messages() -> list[str]:

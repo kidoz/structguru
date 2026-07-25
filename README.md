@@ -142,9 +142,19 @@ On Unix, new files created by either `logger.add(path)` or the native rotating
 file sink are owner-only (`0600`). Existing files retain their permissions.
 
 All sink forms receive structguru records. They are also registered with the
-stdlib root logger for third-party records. Native delivery uses the bounded
-callable queue and is drained on flush, reconfiguration, `shutdown()`, fork, and
-interpreter exit.
+stdlib root logger for third-party records.
+
+Native delivery uses the bounded callable queue and is drained on
+reconfiguration, `shutdown()`, fork, and interpreter exit. Call
+`structguru.flush()` when you need to block until buffered records have actually
+been written:
+
+```python
+import structguru
+
+logger.info("checkpoint")
+structguru.flush()   # returns once the line has reached its sink
+```
 
 ### Console vs JSON output
 
