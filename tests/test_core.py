@@ -393,6 +393,11 @@ class TestLoggerAddRemove:
         finally:
             log.remove(handler_id)
 
+    def test_logger_is_hashable(self) -> None:
+        # Loggers are identity-valued handles; users put them in dicts/sets.
+        log = Logger(name="svc")
+        assert len({log, log, Logger(name="svc")}) == 2
+
     def test_unique_ids_across_instances(self) -> None:
         configure(service="test", level="DEBUG", stream=io.StringIO())
         log1 = Logger()

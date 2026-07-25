@@ -258,7 +258,7 @@ class _Catcher(ContextDecorator):
         return False
 
 
-@dataclass
+@dataclass(eq=False)
 class Logger:
     """A Loguru-like facade for native structured logging.
 
@@ -282,7 +282,12 @@ class Logger:
     # -- context helpers ----------------------------------------------------
 
     def bind(self, **kwargs: Any) -> Logger:
-        """Return a *new* logger with permanently bound context."""
+        """Return a *new* logger with permanently bound context.
+
+        Only the bound fields are copied. Sinks are process-global, so the child
+        deliberately shares its parent's sink registry: ``add()`` on either is
+        visible to both, and ``remove()`` on either removes from both.
+        """
         merged = {**self._bound, **kwargs}
         return replace(self, _bound=merged)
 
