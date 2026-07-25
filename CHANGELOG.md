@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.0.5] - 2026-07-25
 
 ### Fixed
 
@@ -40,6 +40,13 @@ All notable changes to this project are documented here. The format is based on
 - **`deny.toml`** — an explicit cargo-deny license/bans/sources policy, and a
   `supply-chain` CI job so dependency advisories surface on every pull request
   rather than only on the release path.
+
+### Removed
+
+- **`make governance` and the `governance` dependency group.** The target
+  validated an agent-tooling tree that is not part of the source distribution, so
+  it could never run from a clean clone. Removing it also drops `jsonschema` from
+  the development dependencies.
 
 ## [1.0.4] - 2026-07-12
 

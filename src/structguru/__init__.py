@@ -18,7 +18,7 @@ from structguru.metrics import MetricProcessor
 from structguru.otel import add_otel_context
 from structguru.redaction import DEFAULT_SENSITIVE_KEYS
 
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 
 __all__ = [
     "DEFAULT_SENSITIVE_KEYS",
