@@ -54,12 +54,34 @@ jobs:
           components: rustfmt, clippy
       - name: Format
         run: cargo fmt --all --check
+      - name: Check
+        run: cargo check --workspace
       # --lib only: the extension-module cdylib cannot link a standalone test
       # binary (no libpython), so lint the library and run core tests separately.
       - name: Clippy
         run: cargo clippy --workspace --lib -- -D warnings
       - name: Core tests
         run: cargo test -p structguru-core
+
+  # Advisories are also re-checked in wheels.yml before a publish, but waiting
+  # for release day to learn about a vulnerable dependency is too late — run the
+  # same audit on every pull request.
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: true
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Audit locked Python dependencies
+        run: uv audit --locked
+      - name: Install pinned cargo-deny
+        run: cargo install cargo-deny --version 0.19.9 --locked
+      - name: Audit locked Rust dependencies
+        run: cargo deny --locked check advisories bans licenses
 
   msrv:
     runs-on: ubuntu-latest

@@ -1,0 +1,40 @@
+# cargo-deny policy for the structguru Rust workspace.
+#
+# Without this file cargo-deny runs on built-in defaults, which check advisories
+# but say nothing about which licenses may ship inside the wheel or how many
+# copies of a crate the dependency graph may pull in. The extension is
+# distributed as a binary artifact, so its transitive licenses are ours to
+# account for.
+
+[advisories]
+# Fail on any RUSTSEC advisory affecting the locked graph.
+yanked = "deny"
+
+[licenses]
+# structguru ships MIT. Everything linked into the extension must be compatible
+# with redistribution under it; this is the permissive set the current graph
+# resolves to. Adding a crate under anything else is a deliberate decision, not
+# something that should slip through unnoticed.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Duplicate major versions of a crate bloat the shipped wheel and usually mean a
+# dependency needs bumping. Warn rather than deny: an upstream lag should not
+# block a security release.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

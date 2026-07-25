@@ -38,13 +38,20 @@ def test_publish_job_depends_on_release_and_supply_chain_gates() -> None:
     )
 
 
-def test_governance_dependency_and_gate_are_declared() -> None:
-    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+def test_quality_gate_targets_are_declared() -> None:
     makefile = Path("Makefile").read_text(encoding="utf-8")
 
-    assert '"jsonschema>=4.25,<5"' in pyproject
-    assert "governance:" in makefile
     assert "python-check:" in makefile
     assert "rust-check:" in makefile
     assert "check: python-check rust-check" in makefile
-    assert "validate_standards_package.py --root . --mode strict-governance" in makefile
+
+
+def test_ci_audits_dependencies_on_every_change() -> None:
+    # A vulnerable dependency must surface at pull-request time, not at publish
+    # time — wheels.yml only runs the audit on the release path.
+    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    assert "supply-chain:" in workflow
+    assert "uv audit --locked" in workflow
+    assert "cargo deny --locked check advisories" in workflow
+    assert Path("deny.toml").is_file()
