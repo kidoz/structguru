@@ -8,8 +8,9 @@ help: ## Show this help
 install: ## Install dev dependencies and all integration extras
 	uv sync --locked --all-extras
 
-test: ## Run tests
-	uv run python -m pytest --ignore=tests/benchmarks
+test: ## Run tests with the coverage floor enforced
+	uv run python -m pytest --ignore=tests/benchmarks \
+		--cov=structguru --cov-report=term-missing --cov-fail-under=90
 
 bench: ## Run benchmarks
 	uv run python -m pytest tests/benchmarks/ --benchmark-only
@@ -38,7 +39,10 @@ python-check: lint typecheck test ## Run all required Python source quality gate
 rust-check: ## Run all required Rust source quality gates
 	cargo fmt --all -- --check
 	cargo check --workspace
-	cargo test --workspace
+	# -p structguru-core, not --workspace: the extension-module cdylib cannot link
+	# a standalone test binary where libpython is not linkable (the CI Linux
+	# runners). Keep this identical to the `rust` CI job so the gates agree.
+	cargo test -p structguru-core
 	cargo clippy --workspace --lib -- -D warnings
 
 check: python-check rust-check ## Run the complete Python and Rust quality gate

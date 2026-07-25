@@ -52,7 +52,6 @@ dev = [
     { include-group = "lint" },
     { include-group = "docs" },
     { include-group = "bench" },
-    { include-group = "governance" },
 ]
 test = [
     "pytest>=8.0",
@@ -80,9 +79,6 @@ docs = [
 bench = [
     "pytest-benchmark>=5.2.3",
     "loguru>=0.7.3",
-]
-governance = [
-    "jsonschema>=4.25,<5",
 ]
 free-threaded = [
     "pytest>=8.0",
