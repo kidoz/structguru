@@ -142,7 +142,10 @@ On Unix, new files created by either `logger.add(path)` or the native rotating
 file sink are owner-only (`0600`). Existing files retain their permissions.
 
 All sink forms receive structguru records. They are also registered with the
-stdlib root logger for third-party records.
+stdlib root logger for third-party records, which arrive raw (unrendered) on
+that path. Install the [stdlib bridge](#stdlib-bridge) to receive them rendered
+and redacted instead — while it is installed the raw delivery is suspended, so a
+sink never sees the same record twice.
 
 Native delivery uses the bounded callable queue and is drained on
 reconfiguration, `shutdown()`, fork, and interpreter exit. Call
@@ -387,6 +390,26 @@ from structguru.integrations.sentry import SentryProcessor
 sentry = SentryProcessor(event_level=logging.ERROR, tag_keys=frozenset({"service"}))
 configure(sentry_processor=sentry)
 ```
+
+### Stdlib bridge
+
+Third-party libraries log through the standard `logging` module. Installing the
+bridge re-emits those records through structguru, so they share the same JSON /
+console formatting, redaction, and output stream as your own logs:
+
+```python
+from structguru.integrations.stdlib import install_stdlib_bridge
+
+bridge = install_stdlib_bridge(level="INFO", suppress_loggers=("urllib3", "botocore"))
+
+import logging
+logging.getLogger("sqlalchemy.engine").info("SELECT 1")
+# → {"logger":"sqlalchemy.engine","level":"INFO",...,"message":"SELECT 1"}
+```
+
+While the bridge is installed, `logger.add()` sinks receive third-party records
+only through it — rendered once, never also raw. Pass the returned handler to
+`uninstall_stdlib_bridge()` to restore the previous behavior.
 
 ## Requirements
 

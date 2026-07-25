@@ -64,6 +64,12 @@ logging.getLogger("sqlalchemy.engine").info("SELECT 1")
 # -> {"logger":"sqlalchemy.engine","level":"INFO",...,"message":"SELECT 1"}
 ```
 
+While the bridge is installed, sinks registered with `logger.add()` receive
+third-party records only through the native path — rendered and redacted, once.
+Without it those sinks also see the same records raw, straight off the root
+logger. `uninstall_stdlib_bridge(bridge)` detaches the bridge and restores that
+raw delivery.
+
 `install_stdlib_bridge` attaches a `StructguruHandler` to the root logger, sets
 the root and handler levels, and raises `suppress_loggers` to `suppress_level`
 (default `WARNING`). The record's logger name becomes the `logger` field,

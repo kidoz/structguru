@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from structguru import _runtime
+from structguru import _runtime, core
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +26,9 @@ def _reset_logging() -> None:  # type: ignore[misc]
     root.setLevel(original_level)
     logging.setLogRecordFactory(original_factory)
     sys.excepthook = original_excepthook
+    # A test that installs the stdlib bridge without uninstalling would
+    # otherwise leave root attachment suspended for every later test.
+    core._set_stdlib_bridge_active(False)
     _runtime.shutdown()
 
 

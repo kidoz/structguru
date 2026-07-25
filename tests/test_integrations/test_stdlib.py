@@ -9,10 +9,12 @@ from collections.abc import Iterator
 import pytest
 
 from structguru import _runtime
+from structguru.core import Logger
 from structguru.integrations.stdlib import (
     StructguruHandler,
     install_stdlib_bridge,
     suppress_loggers,
+    uninstall_stdlib_bridge,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -175,3 +177,59 @@ def test_suppress_loggers_sets_level() -> None:
 def test_install_suppresses_named_loggers(clean_root: None) -> None:
     install_stdlib_bridge(suppress_loggers=("chatty",), suppress_level="WARNING")
     assert logging.getLogger("chatty").level == logging.WARNING
+
+
+def test_bridge_delivers_third_party_records_to_add_sinks_exactly_once(
+    native_memory: None, clean_root: None
+) -> None:
+    # `logger.add()` attaches its sink to the root logger so it also receives
+    # third-party records raw. The bridge renders those same records through the
+    # native path into the same sink, so both paths together would deliver each
+    # record twice — once raw, once rendered.
+    seen: list[str] = []
+    log = Logger()
+    install_stdlib_bridge(level="DEBUG")
+    log.add(seen.append)
+    try:
+        logging.getLogger("thirdparty.svc").info("only once")
+        _runtime.flush()
+    finally:
+        log.remove()
+
+    assert len(seen) == 1
+    assert json.loads(seen[0])["message"] == "only once"
+
+
+def test_bridge_installed_after_add_also_delivers_exactly_once(
+    native_memory: None, clean_root: None
+) -> None:
+    # Same invariant, opposite ordering: installing the bridge must suspend the
+    # root attachment of a sink that was registered before it.
+    seen: list[str] = []
+    log = Logger()
+    log.add(seen.append)
+    install_stdlib_bridge(level="DEBUG")
+    try:
+        logging.getLogger("thirdparty.svc").info("still once")
+        _runtime.flush()
+    finally:
+        log.remove()
+
+    assert len(seen) == 1
+    assert json.loads(seen[0])["message"] == "still once"
+
+
+def test_uninstall_restores_raw_root_delivery(native_memory: None, clean_root: None) -> None:
+    seen: list[str] = []
+    log = Logger()
+    log.add(seen.append)
+    bridge = install_stdlib_bridge(level="DEBUG")
+    uninstall_stdlib_bridge(bridge)
+    try:
+        logging.getLogger("thirdparty.svc").info("raw again")
+        _runtime.flush()
+    finally:
+        log.remove()
+
+    # Back to the pre-bridge contract: the sink sees the unrendered message.
+    assert seen == ["raw again"]

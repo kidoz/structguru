@@ -380,6 +380,19 @@ class TestLoggerAddRemove:
         log.remove()
         # handlers dict is cleared, no leaked file descriptors
 
+    def test_sink_without_level_accepts_all_levels_on_both_paths(self) -> None:
+        # `level=None` documents "all levels". Inheriting the root logger's level
+        # instead would gate the stdlib delivery path at WARNING (the default on
+        # an unconfigured root) while native delivery still passed everything.
+        logging.getLogger().setLevel(logging.WARNING)
+        configure(service="test", level="DEBUG", stream=io.StringIO())
+        log = Logger()
+        handler_id = log.add(io.StringIO())
+        try:
+            assert log._handlers[handler_id].level == logging.NOTSET
+        finally:
+            log.remove(handler_id)
+
     def test_unique_ids_across_instances(self) -> None:
         configure(service="test", level="DEBUG", stream=io.StringIO())
         log1 = Logger()

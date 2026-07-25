@@ -26,7 +26,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from structguru.config import _to_logging_level
-from structguru.core import Logger
+from structguru.core import Logger, _set_stdlib_bridge_active
 
 # Attributes present on a vanilla LogRecord (plus the two the Formatter adds).
 # Anything else in ``record.__dict__`` came from a user ``extra=`` mapping and is
@@ -147,9 +147,15 @@ def install_stdlib_bridge(
     """Route root stdlib logging through structguru and quiet noisy loggers.
 
     Installs a :class:`StructguruHandler` on the root logger so any library
-    logging through :mod:`logging` renders through structguru's native path. The
-    returned handler can be passed to ``logging.getLogger().removeHandler(...)``
-    to uninstall.
+    logging through :mod:`logging` renders through structguru's native path.
+    Pass the returned handler to :func:`uninstall_stdlib_bridge` to undo it.
+
+    Sinks registered with ``logger.add()`` already receive third-party records
+    directly from the root logger, unrendered. The bridge delivers those same
+    records to those same sinks through the native renderer, so installing it
+    suspends the raw root-logger delivery; uninstalling restores it. Without
+    that, every third-party record would reach each sink twice — once raw, once
+    rendered.
 
     Parameters
     ----------
@@ -169,6 +175,9 @@ def install_stdlib_bridge(
     if clear_handlers:
         for handler in list(root.handlers):
             root.removeHandler(handler)
+    # Suspend raw root delivery for `logger.add()` sinks before the bridge goes
+    # live, so no record is ever delivered through both paths.
+    _set_stdlib_bridge_active(True)
     threshold = _to_logging_level(level)
     bridge = StructguruHandler()
     bridge.setLevel(threshold)
@@ -176,3 +185,16 @@ def install_stdlib_bridge(
     root.setLevel(threshold)
     _apply_suppression(suppress_loggers, suppress_level)
     return bridge
+
+
+def uninstall_stdlib_bridge(bridge: StructguruHandler) -> None:
+    """Detach *bridge* from the root logger and restore direct sink delivery.
+
+    Reverses :func:`install_stdlib_bridge`: third-party records stop flowing
+    through the native renderer, and ``logger.add()`` sinks are re-attached to
+    the root logger so they keep receiving them (raw, as before the install).
+    Root handlers removed by ``clear_handlers=True`` are not restored.
+    """
+    logging.getLogger().removeHandler(bridge)
+    bridge.close()
+    _set_stdlib_bridge_active(False)

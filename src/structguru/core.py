@@ -22,6 +22,7 @@ import string
 import sys
 import threading
 import warnings
+import weakref
 from collections.abc import Callable, Iterator
 from contextlib import ContextDecorator, contextmanager
 from dataclasses import dataclass, field, replace
@@ -174,6 +175,55 @@ def _safe_format(
 
 _id_counter = itertools.count(1)
 _id_counter_lock = threading.Lock()
+
+
+# Sinks registered through `Logger.add()` are attached to the stdlib root logger
+# so they also receive third-party `logging` records. The stdlib bridge
+# (`structguru.integrations.stdlib`) routes those same records through the
+# native renderer instead, which delivers them to the very same sinks — already
+# formatted and redacted. Leaving the root attachment in place while the bridge
+# is installed therefore delivers every third-party record twice: once raw, once
+# rendered. Track what we attached so the bridge can suspend it and restore it
+# on uninstall.
+_root_sinks: weakref.WeakSet[logging.Handler] = weakref.WeakSet()
+_root_attach_lock = threading.Lock()
+_stdlib_bridge_active = False
+
+
+def _attach_to_root(handler: logging.Handler) -> None:
+    """Register *handler* for third-party records, unless the bridge supersedes it."""
+    with _root_attach_lock:
+        _root_sinks.add(handler)
+        if _stdlib_bridge_active:
+            return
+        logging.getLogger().addHandler(handler)
+
+
+def _detach_from_root(handler: logging.Handler) -> None:
+    """Undo :func:`_attach_to_root` (a no-op when the handler is not attached)."""
+    with _root_attach_lock:
+        _root_sinks.discard(handler)
+    logging.getLogger().removeHandler(handler)
+
+
+def _set_stdlib_bridge_active(active: bool) -> None:
+    """Suspend or restore root attachment for ``add()`` sinks.
+
+    Called by :mod:`structguru.integrations.stdlib` on install/uninstall. While
+    the bridge is active, third-party records reach ``add()`` sinks through the
+    native path, so the direct root attachment is dropped; uninstalling restores
+    it for every sink still registered.
+    """
+    global _stdlib_bridge_active
+    root = logging.getLogger()
+    with _root_attach_lock:
+        _stdlib_bridge_active = active
+        affected = list(_root_sinks)
+    for handler in affected:
+        if active:
+            root.removeHandler(handler)
+        else:
+            root.addHandler(handler)
 
 
 class _Catcher(ContextDecorator):
@@ -396,7 +446,8 @@ class Logger:
             a file path (``str``/``Path``), a stream-like object with ``.write``,
             or a :class:`logging.Handler` (for third-party stdlib interop).
         level:
-            Minimum level for this sink (callable sinks only). Defaults to all levels.
+            Minimum level for this sink. Applies to every sink type — it gates
+            native delivery at the dispatcher. Defaults to all levels.
 
         Returns
         -------
@@ -408,11 +459,20 @@ class Logger:
         Every sink receives both structguru records and third-party stdlib records.
         Native records are delivered via the bounded callable dispatch queue;
         configured backpressure and flush semantics therefore apply uniformly.
+
+        Third-party records arrive raw (unrendered) via the stdlib root logger.
+        Install the bridge (``structguru.integrations.stdlib``) to receive them
+        rendered and redacted through the native path instead; while it is
+        installed the raw root-logger delivery is suspended, so a sink never
+        sees the same record twice.
         """
         handler = _make_handler(sink)
-        log_level = _to_logging_level(level) if level else logging.getLogger().level
-        native_level = _to_logging_level(level) if level else 0
-        handler.setLevel(log_level)
+        # One threshold for both delivery paths. Unset means NOTSET (0) — "all
+        # levels", as documented. Inheriting the root logger's level here instead
+        # would silently gate the stdlib path at WARNING (the default on an
+        # unconfigured root) while the native path still delivered everything.
+        threshold = _to_logging_level(level) if level else logging.NOTSET
+        handler.setLevel(threshold)
         handler.setFormatter(logging.Formatter("%(message)s"))
 
         native_callback = (
@@ -420,10 +480,9 @@ class Logger:
             if callable(sink) and not isinstance(sink, logging.Handler)
             else functools.partial(_emit_rendered, handler)
         )
-        native_token = _runtime.add_callable_sink(native_callback, min_level=native_level)
+        native_token = _runtime.add_callable_sink(native_callback, min_level=threshold)
 
-        root = logging.getLogger()
-        root.addHandler(handler)
+        _attach_to_root(handler)
 
         with _id_counter_lock:
             handler_id = next(_id_counter)
@@ -438,7 +497,6 @@ class Logger:
         If *handler_id* is ``None``, all sinks added via this logger
         instance are removed.
         """
-        root = logging.getLogger()
         with self._lock:
             if handler_id is None:
                 registrations = [
@@ -458,7 +516,7 @@ class Logger:
             if token is not None:
                 _runtime.remove_callable_sink(token)
             if handler is not None:
-                root.removeHandler(handler)
+                _detach_from_root(handler)
                 handler.close()
 
 
