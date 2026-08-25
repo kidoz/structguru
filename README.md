@@ -415,6 +415,20 @@ While the bridge is installed, `logger.add()` sinks receive third-party records
 only through it — rendered once, never also raw. Pass the returned handler to
 `uninstall_stdlib_bridge()` to restore the previous behavior.
 
+Installing a second bridge while one is active raises `RuntimeError`. When
+logging setup legitimately runs more than once per process (a Django
+`manage.py` that imports a Celery app module, repeated setup in test suites),
+pass `replace=True` to release the previous bridge first — last call wins:
+
+```python
+bridge = install_stdlib_bridge(level="INFO", replace=True)
+```
+
+The swap is atomic for callers: a record logged by another thread during it is
+delivered at most once (rendered, raw, or dropped — never twice). Suppression
+levels applied by the earlier install are not reverted, and calling
+`uninstall_stdlib_bridge()` on the replaced handler is a no-op.
+
 `disable_existing_loggers=True` disables named stdlib loggers that already
 exist at installation time; `False` re-enables them, following `dictConfig`
 semantics. When the option is omitted, `install_stdlib_bridge()` reads
@@ -450,7 +464,7 @@ bridge = install_stdlib_bridge_from_env()
 
 - **[Integrations Guide](docs/integrations.md)** — Detailed instructions for setting up frameworks.
 - **[Full-stack Example](examples/full_stack_fastapi/main.py)** — FastAPI + Celery + SQLAlchemy in action.
-- **[Existing-loggers Example](examples/stdlib_existing_loggers/main.py)** — Configure the stdlib policy from code or environment.
+- **[Existing-loggers Example](examples/stdlib_existing_loggers/main.py)** — Configure the stdlib policy and bridge replacement from code or environment.
 
 ## Development
 

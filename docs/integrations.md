@@ -76,7 +76,23 @@ the root and handler levels, and raises `suppress_loggers` to `suppress_level`
 `extra=` fields are forwarded as structured fields, `exc_info` and `stack_info`
 render like native structguru fields, and numeric levels are normalized into
 structguru's canonical severity bands. Only one managed bridge may be installed
-at a time.
+at a time: a second install raises `RuntimeError` unless it passes
+`replace=True`.
+
+When logging setup legitimately runs more than once per process (multiple
+entrypoints, repeated setup in test suites), opt into last-call-wins semantics:
+
+```python
+bridge = install_stdlib_bridge(replace=True)
+```
+
+The previous bridge is released exactly as `uninstall_stdlib_bridge` would —
+detached, closed, its existing-loggers snapshot restored — before the new
+install applies its own policy. The swap runs in one critical section: a record
+logged by another thread during it is delivered at most once (rendered by the
+outgoing or incoming bridge, raw, or not at all — never twice) and never
+raises. Suppression levels from the earlier install are not reverted, and
+`uninstall_stdlib_bridge` on the replaced handler is a no-op.
 
 Use `disable_existing_loggers` to control loggers registered before bridge
 installation:
@@ -114,6 +130,7 @@ bridge = install_stdlib_bridge_from_env()
 | `STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS` | preserve existing states |
 | `STRUCTGURU_STDLIB_SUPPRESS_LOGGERS` | empty comma-separated list |
 | `STRUCTGURU_STDLIB_SUPPRESS_LEVEL` | `WARNING` |
+| `STRUCTGURU_STDLIB_REPLACE` | `false` |
 
 Boolean values accept `1/0`, `true/false`, `yes/no`, and `on/off`; empty values
 are treated as unset. Other values raise `ValueError` before the bridge changes
