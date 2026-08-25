@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- The stdlib bridge now supports a reversible `disable_existing_loggers`
+  policy and explicit environment configuration through
+  `install_stdlib_bridge_from_env()`. The regular bridge installer and Django's
+  `build_logging_config()` also read
+  `STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS` when the code option is omitted.
+- Added a runnable code/environment example for existing stdlib logger policy.
+
+### Changed
+
+- Managed stdlib bridge installation now rejects a second active bridge rather
+  than allowing duplicate record delivery.
+
 ## [1.0.5] - 2026-07-25
 
 ### Fixed
