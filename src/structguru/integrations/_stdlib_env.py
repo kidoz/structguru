@@ -18,6 +18,7 @@ class StdlibBridgeEnvConfig:
     suppress_level: str
     clear_handlers: bool
     disable_existing_loggers: bool | None
+    replace: bool
 
 
 def optional_bool_from_env(environ: Mapping[str, str], name: str) -> bool | None:
@@ -38,6 +39,7 @@ def optional_bool_from_env(environ: Mapping[str, str], name: str) -> bool | None
 def stdlib_bridge_config_from_env(environ: Mapping[str, str]) -> StdlibBridgeEnvConfig:
     """Parse stdlib bridge configuration from an environment mapping."""
     clear_handlers = optional_bool_from_env(environ, "STRUCTGURU_STDLIB_CLEAR_HANDLERS")
+    replace = optional_bool_from_env(environ, "STRUCTGURU_STDLIB_REPLACE")
     logger_names = (
         name.strip() for name in environ.get("STRUCTGURU_STDLIB_SUPPRESS_LOGGERS", "").split(",")
     )
@@ -49,4 +51,5 @@ def stdlib_bridge_config_from_env(environ: Mapping[str, str]) -> StdlibBridgeEnv
         disable_existing_loggers=optional_bool_from_env(
             environ, "STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS"
         ),
+        replace=False if replace is None else replace,
     )

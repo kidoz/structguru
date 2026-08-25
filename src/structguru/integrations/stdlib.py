@@ -195,6 +195,7 @@ def _install_stdlib_bridge_resolved(
     suppress_level: str,
     clear_handlers: bool,
     disable_existing_loggers: bool | None,
+    replace: bool,
 ) -> StructguruHandler:
     """Install a bridge after all environment-backed options are resolved."""
     global _active_bridge
@@ -205,11 +206,13 @@ def _install_stdlib_bridge_resolved(
 
     with _bridge_lock:
         if _active_bridge is not None:
-            if _active_bridge in root.handlers:
+            if not replace and _active_bridge in root.handlers:
                 msg = "the structguru stdlib bridge is already installed"
                 raise RuntimeError(msg)
-            # A caller may have detached the handler directly. Clean up its
-            # policy snapshot before allowing a replacement installation.
+            # The caller opted into replacement, or detached the handler
+            # directly. Release the old bridge — restoring its policy snapshot
+            # — before the new install applies its own policy and (with
+            # ``clear_handlers``) sweeps the root handlers.
             _release_bridge(_active_bridge)
 
         bridge = StructguruHandler(threshold)
@@ -235,6 +238,7 @@ def install_stdlib_bridge(
     suppress_level: str = "WARNING",
     clear_handlers: bool = True,
     disable_existing_loggers: bool | None = None,
+    replace: bool = False,
 ) -> StructguruHandler:
     """Route root stdlib logging through structguru and quiet noisy loggers.
 
@@ -269,6 +273,18 @@ def install_stdlib_bridge(
         ``STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS`` and leaves existing logger
         states unchanged when the variable is unset. Loggers created later are
         unaffected.
+    replace:
+        ``True`` releases an already-installed managed bridge first — with full
+        :func:`uninstall_stdlib_bridge` semantics, including restoring its
+        existing-loggers snapshot — and then installs the new one, so the last
+        call wins. With the default ``False``, installing while a bridge is
+        still attached raises :class:`RuntimeError`. With no active bridge,
+        ``replace=True`` behaves exactly like a plain install. The swap runs in
+        one critical section: a record logged by another thread during it is
+        delivered at most once — rendered by the outgoing or incoming bridge,
+        raw, or not at all — never twice, and never by raising. Suppression
+        levels applied by the previous install are not reverted, and calling
+        :func:`uninstall_stdlib_bridge` on the replaced handler is a no-op.
     """
     if disable_existing_loggers is None:
         disable_existing_loggers = optional_bool_from_env(
@@ -280,6 +296,7 @@ def install_stdlib_bridge(
         suppress_level=suppress_level,
         clear_handlers=clear_handlers,
         disable_existing_loggers=disable_existing_loggers,
+        replace=replace,
     )
 
 
@@ -299,6 +316,7 @@ def install_stdlib_bridge_from_env(
         suppress_level=config.suppress_level,
         clear_handlers=config.clear_handlers,
         disable_existing_loggers=config.disable_existing_loggers,
+        replace=config.replace,
     )
 
 
@@ -309,6 +327,11 @@ def uninstall_stdlib_bridge(bridge: StructguruHandler) -> None:
     through the native renderer, and ``logger.add()`` sinks are re-attached to
     the root logger so they keep receiving them (raw, as before the install).
     Root handlers removed by ``clear_handlers=True`` are not restored.
+    Suppression levels applied via ``suppress_loggers`` are not reverted.
+
+    Calling this with a handler that has already been released — uninstalled
+    earlier, or superseded by ``install_stdlib_bridge(replace=True)`` — is a
+    no-op that never disturbs the currently active bridge.
     """
     with _bridge_lock:
         _release_bridge(bridge)

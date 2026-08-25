@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from collections.abc import Iterator
 
 import pytest
@@ -303,10 +304,190 @@ def test_uninstall_preserves_change_when_bridge_did_not_change_logger(clean_root
 def test_install_rejects_duplicate_active_bridge(clean_root: None) -> None:
     bridge = install_stdlib_bridge()
     try:
-        with pytest.raises(RuntimeError, match="already installed"):
-            install_stdlib_bridge()
+        with pytest.raises(RuntimeError) as excinfo:
+            install_stdlib_bridge(replace=False)
+        assert str(excinfo.value) == "the structguru stdlib bridge is already installed"
     finally:
         uninstall_stdlib_bridge(bridge)
+
+
+def test_replace_swaps_active_bridge(native_memory: None, clean_root: None) -> None:
+    root = logging.getLogger()
+    old = install_stdlib_bridge(level="DEBUG")
+
+    new = install_stdlib_bridge(level="DEBUG", replace=True)
+    try:
+        assert new is not old
+        assert old not in root.handlers
+        assert root.handlers.count(new) == 1
+        logging.getLogger("thirdparty.svc").info("after swap")
+        assert [rec["message"] for rec in _records()] == ["after swap"]
+    finally:
+        uninstall_stdlib_bridge(new)
+
+
+def test_replace_without_active_bridge_is_plain_install(clean_root: None) -> None:
+    bridge = install_stdlib_bridge(replace=True)
+    try:
+        assert bridge in logging.getLogger().handlers
+    finally:
+        uninstall_stdlib_bridge(bridge)
+
+
+def test_replace_with_detached_bridge_releases_stale_state(clean_root: None) -> None:
+    existing = logging.getLogger("structguru_test_replace_detached")
+    existing.disabled = False
+    stale = install_stdlib_bridge(disable_existing_loggers=True)
+    logging.getLogger().removeHandler(stale)
+
+    bridge = install_stdlib_bridge(replace=True)
+    try:
+        assert not existing.disabled
+        assert stale not in logging.getLogger().handlers
+    finally:
+        uninstall_stdlib_bridge(bridge)
+
+
+def test_replace_restores_old_policy_before_applying_new(clean_root: None) -> None:
+    existing = logging.getLogger("structguru_test_replace_policy_true_false")
+    existing.disabled = False
+    install_stdlib_bridge(disable_existing_loggers=True)
+
+    bridge = install_stdlib_bridge(disable_existing_loggers=False, replace=True)
+    assert not existing.disabled
+
+    # Restore-then-apply: the replacing bridge saw the logger already enabled
+    # (the old snapshot restored it), so uninstalling must not flip it back.
+    uninstall_stdlib_bridge(bridge)
+    assert not existing.disabled
+
+
+def test_replace_policy_false_to_true(clean_root: None) -> None:
+    existing = logging.getLogger("structguru_test_replace_policy_false_true")
+    existing.disabled = True
+    install_stdlib_bridge(disable_existing_loggers=False)
+    assert not existing.disabled
+
+    bridge = install_stdlib_bridge(disable_existing_loggers=True, replace=True)
+    assert existing.disabled
+
+    uninstall_stdlib_bridge(bridge)
+    assert existing.disabled
+
+
+def test_replace_rereads_policy_environment(
+    clean_root: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    existing = logging.getLogger("structguru_test_replace_policy_env")
+    existing.disabled = False
+    install_stdlib_bridge()
+
+    monkeypatch.setenv("STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS", "true")
+    bridge = install_stdlib_bridge(replace=True)
+    try:
+        assert existing.disabled
+    finally:
+        uninstall_stdlib_bridge(bridge)
+
+
+def test_replace_keeps_previous_suppression_levels(clean_root: None) -> None:
+    install_stdlib_bridge(suppress_loggers=("noisy_replaced",), suppress_level="ERROR")
+
+    bridge = install_stdlib_bridge(replace=True)
+    try:
+        assert logging.getLogger("noisy_replaced").level == logging.ERROR
+    finally:
+        uninstall_stdlib_bridge(bridge)
+
+
+def test_uninstall_of_replaced_bridge_is_a_noop(native_memory: None, clean_root: None) -> None:
+    seen: list[str] = []
+    log = Logger()
+    log.add(seen.append)
+    old = install_stdlib_bridge(level="DEBUG")
+    new = install_stdlib_bridge(level="DEBUG", replace=True)
+
+    # Releasing the stale handler must not detach the new bridge or restore
+    # raw root delivery for `add()` sinks.
+    uninstall_stdlib_bridge(old)
+    try:
+        assert new in logging.getLogger().handlers
+        logging.getLogger("thirdparty.svc").info("still bridged once")
+        _runtime.flush()
+    finally:
+        log.remove()
+        uninstall_stdlib_bridge(new)
+
+    assert len(seen) == 1
+    assert json.loads(seen[0])["message"] == "still bridged once"
+
+
+def test_replace_under_concurrent_stdlib_logging(native_memory: None, clean_root: None) -> None:
+    # A record logged by another thread during a swap may arrive rendered, raw,
+    # or not at all — but never twice, and never by raising into the caller.
+    seen: list[str] = []
+    log = Logger()
+    log.add(seen.append)
+    bridge = install_stdlib_bridge(level="DEBUG")
+    stop = threading.Event()
+    failures: list[BaseException] = []
+
+    def emit() -> None:
+        source = logging.getLogger("thirdparty.concurrent")
+        seq = 0
+        try:
+            while not stop.is_set() and seq < 20000:
+                source.info("seq=%d", seq)
+                seq += 1
+        except BaseException as exc:  # noqa: BLE001 - asserted empty below
+            failures.append(exc)
+
+    worker = threading.Thread(target=emit)
+    worker.start()
+    try:
+        for _ in range(25):
+            bridge = install_stdlib_bridge(level="DEBUG", replace=True)
+    finally:
+        stop.set()
+        worker.join(timeout=10)
+        _runtime.flush()
+        log.remove()
+        uninstall_stdlib_bridge(bridge)
+
+    assert failures == []
+    delivered = [json.loads(line)["message"] if line.startswith("{") else line for line in seen]
+    assert len(delivered) == len(set(delivered))
+
+
+def test_install_from_env_replace_swaps_active_bridge(clean_root: None) -> None:
+    old = install_stdlib_bridge()
+
+    bridge = install_stdlib_bridge_from_env({"STRUCTGURU_STDLIB_REPLACE": "true"})
+    try:
+        assert old not in logging.getLogger().handlers
+        assert bridge in logging.getLogger().handlers
+    finally:
+        uninstall_stdlib_bridge(bridge)
+
+
+def test_install_from_env_without_replace_rejects_duplicate(clean_root: None) -> None:
+    bridge = install_stdlib_bridge()
+    try:
+        with pytest.raises(RuntimeError, match="already installed"):
+            install_stdlib_bridge_from_env({})
+    finally:
+        uninstall_stdlib_bridge(bridge)
+
+
+def test_invalid_replace_env_does_not_change_logging_state(clean_root: None) -> None:
+    root = logging.getLogger()
+    sentinel = logging.NullHandler()
+    root.addHandler(sentinel)
+
+    with pytest.raises(ValueError, match="STRUCTGURU_STDLIB_REPLACE"):
+        install_stdlib_bridge_from_env({"STRUCTGURU_STDLIB_REPLACE": "maybe"})
+
+    assert root.handlers[-1] is sentinel
 
 
 def test_install_from_env_applies_all_options(clean_root: None) -> None:

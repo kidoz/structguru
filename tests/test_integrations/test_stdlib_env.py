@@ -43,6 +43,7 @@ def test_stdlib_env_defaults() -> None:
     assert config.suppress_level == "WARNING"
     assert config.clear_handlers
     assert config.disable_existing_loggers is None
+    assert not config.replace
 
 
 def test_stdlib_env_uses_log_level_fallback() -> None:
@@ -74,6 +75,7 @@ def test_stdlib_env_parses_all_options() -> None:
             "STRUCTGURU_STDLIB_SUPPRESS_LEVEL": "ERROR",
             "STRUCTGURU_STDLIB_CLEAR_HANDLERS": "off",
             "STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS": "on",
+            "STRUCTGURU_STDLIB_REPLACE": "1",
         }
     )
 
@@ -81,3 +83,4 @@ def test_stdlib_env_parses_all_options() -> None:
     assert config.suppress_level == "ERROR"
     assert not config.clear_handlers
     assert config.disable_existing_loggers is True
+    assert config.replace
