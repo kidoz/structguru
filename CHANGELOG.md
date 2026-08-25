@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `install_stdlib_bridge(replace=True)` releases an already-installed managed
+  bridge — with full `uninstall_stdlib_bridge` semantics, including restoring
+  its existing-loggers snapshot — before installing the new one, so logging
+  setup that runs more than once per process gets last-call-wins behavior
+  instead of `RuntimeError`. `install_stdlib_bridge_from_env()` reads the same
+  option from `STRUCTGURU_STDLIB_REPLACE`. Uninstalling a replaced (stale)
+  handler is a documented no-op, and suppression levels from the previous
+  install are kept.
+
 ## [1.0.6] - 2026-08-25
 
 ### Added
