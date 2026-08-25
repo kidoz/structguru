@@ -40,7 +40,9 @@ def _run_example(
 def _assert_policy_output(result: subprocess.CompletedProcess[str]) -> None:
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "CREATED_AFTER_RECORD" in result.stdout
+    assert "AFTER_REPLACE_RECORD" in result.stdout
     assert "EXISTING_LOGGER_RECORD" not in result.stdout
+    assert "EXISTING_AT_REPLACE_RECORD" not in result.stdout
 
 
 def test_stdlib_existing_loggers_example_with_code_config() -> None:
@@ -51,4 +53,5 @@ def test_stdlib_existing_loggers_example_with_environment() -> None:
     env = os.environ.copy()
     env["STRUCTGURU_STDLIB_LEVEL"] = "DEBUG"
     env["STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS"] = "true"
+    env["STRUCTGURU_STDLIB_REPLACE"] = "true"
     _assert_policy_output(_run_example("--from-env", env=env))
