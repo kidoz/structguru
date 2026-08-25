@@ -400,7 +400,11 @@ console formatting, redaction, and output stream as your own logs:
 ```python
 from structguru.integrations.stdlib import install_stdlib_bridge
 
-bridge = install_stdlib_bridge(level="INFO", suppress_loggers=("urllib3", "botocore"))
+bridge = install_stdlib_bridge(
+    level="INFO",
+    suppress_loggers=("urllib3", "botocore"),
+    disable_existing_loggers=False,
+)
 
 import logging
 logging.getLogger("sqlalchemy.engine").info("SELECT 1")
@@ -411,6 +415,32 @@ While the bridge is installed, `logger.add()` sinks receive third-party records
 only through it — rendered once, never also raw. Pass the returned handler to
 `uninstall_stdlib_bridge()` to restore the previous behavior.
 
+`disable_existing_loggers=True` disables named stdlib loggers that already
+exist at installation time; `False` re-enables them, following `dictConfig`
+semantics. When the option is omitted, `install_stdlib_bridge()` reads
+`STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS`; if the variable is also unset,
+existing states are preserved. Explicit Python values override the environment.
+An empty environment value is treated as unset.
+
+```bash
+STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS=false python -m myapp
+```
+
+To configure all bridge options from environment variables at a controlled
+point in application startup:
+
+```bash
+STRUCTGURU_STDLIB_LEVEL=INFO \
+STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS=false \
+python -m myapp
+```
+
+```python
+from structguru.integrations.stdlib import install_stdlib_bridge_from_env
+
+bridge = install_stdlib_bridge_from_env()
+```
+
 ## Requirements
 
 - Python 3.11+
@@ -420,6 +450,7 @@ only through it — rendered once, never also raw. Pass the returned handler to
 
 - **[Integrations Guide](docs/integrations.md)** — Detailed instructions for setting up frameworks.
 - **[Full-stack Example](examples/full_stack_fastapi/main.py)** — FastAPI + Celery + SQLAlchemy in action.
+- **[Existing-loggers Example](examples/stdlib_existing_loggers/main.py)** — Configure the stdlib policy from code or environment.
 
 ## Development
 

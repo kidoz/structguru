@@ -75,8 +75,50 @@ the root and handler levels, and raises `suppress_loggers` to `suppress_level`
 (default `WARNING`). The record's logger name becomes the `logger` field,
 `extra=` fields are forwarded as structured fields, `exc_info` and `stack_info`
 render like native structguru fields, and numeric levels are normalized into
-structguru's canonical severity bands. It returns the handler so you can remove
-it later.
+structguru's canonical severity bands. Only one managed bridge may be installed
+at a time.
+
+Use `disable_existing_loggers` to control loggers registered before bridge
+installation:
+
+```python
+bridge = install_stdlib_bridge(disable_existing_loggers=True)
+```
+
+- `None` (default) reads `STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS`, preserving
+  current states when the variable is unset.
+- `False` re-enables them.
+- `True` disables them.
+
+An explicit `True` or `False` always overrides the environment.
+
+The root logger and loggers created later are unaffected. Uninstalling restores
+states changed by the bridge unless application code changed the state again in
+the meantime. This is intentionally time-of-configuration behavior, matching
+the standard library's `dictConfig` model.
+
+The regular installer reads only the existing-logger environment policy. To
+configure every bridge option from the environment, call the explicit installer
+after framework logging setup:
+
+```python
+from structguru.integrations.stdlib import install_stdlib_bridge_from_env
+
+bridge = install_stdlib_bridge_from_env()
+```
+
+| Variable | Default |
+|---|---|
+| `STRUCTGURU_STDLIB_LEVEL` | `LOG_LEVEL`, then `INFO` |
+| `STRUCTGURU_STDLIB_CLEAR_HANDLERS` | `true` |
+| `STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS` | preserve existing states |
+| `STRUCTGURU_STDLIB_SUPPRESS_LOGGERS` | empty comma-separated list |
+| `STRUCTGURU_STDLIB_SUPPRESS_LEVEL` | `WARNING` |
+
+Boolean values accept `1/0`, `true/false`, `yes/no`, and `on/off`; empty values
+are treated as unset. Other values raise `ValueError` before the bridge changes
+logging state. Environment installation is never triggered merely by importing
+`structguru`.
 
 For a logger with `propagate=False` (its records never reach the root logger),
 attach the handler directly:
@@ -210,6 +252,7 @@ LOGGING = build_logging_config(
     service="my-django-app",
     level="INFO",
     json_logs=True,
+    disable_existing_loggers=False,
 )
 
 # 2. Add the middleware
@@ -219,6 +262,10 @@ MIDDLEWARE = [
     # ...
 ]
 ```
+
+When `disable_existing_loggers` is omitted, the builder reads
+`STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS` and otherwise defaults to `False`.
+An explicit Python value always takes precedence.
 
 The middleware automatically:
 - Binds `request_id`, `method`, `path`, and `client_ip`.
