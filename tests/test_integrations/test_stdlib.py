@@ -13,6 +13,7 @@ from structguru.core import Logger
 from structguru.integrations.stdlib import (
     StructguruHandler,
     install_stdlib_bridge,
+    install_stdlib_bridge_from_env,
     suppress_loggers,
     uninstall_stdlib_bridge,
 )
@@ -166,6 +167,7 @@ def test_install_returns_removable_handler(clean_root: None) -> None:
     handler = install_stdlib_bridge()
     logging.getLogger().removeHandler(handler)
     assert handler not in logging.getLogger().handlers
+    uninstall_stdlib_bridge(handler)
 
 
 def test_suppress_loggers_sets_level() -> None:
@@ -177,6 +179,190 @@ def test_suppress_loggers_sets_level() -> None:
 def test_install_suppresses_named_loggers(clean_root: None) -> None:
     install_stdlib_bridge(suppress_loggers=("chatty",), suppress_level="WARNING")
     assert logging.getLogger("chatty").level == logging.WARNING
+
+
+def test_existing_logger_policy_none_preserves_states(clean_root: None) -> None:
+    enabled = logging.getLogger("structguru_test_policy_none_enabled")
+    disabled = logging.getLogger("structguru_test_policy_none_disabled")
+    enabled.disabled = False
+    disabled.disabled = True
+
+    bridge = install_stdlib_bridge(disable_existing_loggers=None)
+    try:
+        assert not enabled.disabled
+        assert disabled.disabled
+    finally:
+        uninstall_stdlib_bridge(bridge)
+
+
+def test_install_reads_existing_logger_policy_from_environment(
+    clean_root: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    existing = logging.getLogger("structguru_test_policy_default_env")
+    existing.disabled = False
+    monkeypatch.setenv("STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS", "true")
+
+    bridge = install_stdlib_bridge()
+    try:
+        assert existing.disabled
+    finally:
+        uninstall_stdlib_bridge(bridge)
+
+
+def test_explicit_existing_logger_policy_overrides_environment(
+    clean_root: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    existing = logging.getLogger("structguru_test_policy_explicit_override")
+    existing.disabled = False
+    monkeypatch.setenv("STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS", "true")
+
+    bridge = install_stdlib_bridge(disable_existing_loggers=False)
+    try:
+        assert not existing.disabled
+    finally:
+        uninstall_stdlib_bridge(bridge)
+
+
+def test_regular_install_rejects_invalid_existing_logger_environment(
+    clean_root: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = logging.getLogger()
+    sentinel = logging.NullHandler()
+    root.addHandler(sentinel)
+    monkeypatch.setenv("STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS", "maybe")
+
+    with pytest.raises(ValueError, match="STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS"):
+        install_stdlib_bridge()
+
+    assert root.handlers[-1] is sentinel
+
+
+def test_existing_logger_policy_true_disables_and_restores(clean_root: None) -> None:
+    existing = logging.getLogger("structguru_test_policy_disable")
+    existing.disabled = False
+
+    bridge = install_stdlib_bridge(disable_existing_loggers=True)
+    assert existing.disabled
+
+    uninstall_stdlib_bridge(bridge)
+    assert not existing.disabled
+
+
+def test_existing_logger_policy_false_enables_and_restores(clean_root: None) -> None:
+    existing = logging.getLogger("structguru_test_policy_enable")
+    existing.disabled = True
+
+    bridge = install_stdlib_bridge(disable_existing_loggers=False)
+    assert not existing.disabled
+
+    uninstall_stdlib_bridge(bridge)
+    assert existing.disabled
+
+
+def test_existing_logger_policy_does_not_disable_root_or_later_logger(
+    clean_root: None,
+) -> None:
+    root = logging.getLogger()
+    root.disabled = False
+    existing = logging.getLogger("structguru_test_policy_before")
+    existing.disabled = False
+
+    bridge = install_stdlib_bridge(disable_existing_loggers=True)
+    try:
+        later = logging.getLogger("structguru_test_policy_after")
+        assert existing.disabled
+        assert not root.disabled
+        assert not later.disabled
+    finally:
+        uninstall_stdlib_bridge(bridge)
+
+
+def test_existing_logger_policy_ignores_placeholders(clean_root: None) -> None:
+    logging.getLogger("structguru_test_placeholder.child")
+    placeholder = logging.root.manager.loggerDict["structguru_test_placeholder"]
+    assert isinstance(placeholder, logging.PlaceHolder)
+
+    bridge = install_stdlib_bridge(disable_existing_loggers=True)
+    try:
+        assert logging.root.manager.loggerDict["structguru_test_placeholder"] is placeholder
+    finally:
+        uninstall_stdlib_bridge(bridge)
+
+
+def test_uninstall_preserves_change_when_bridge_did_not_change_logger(clean_root: None) -> None:
+    existing = logging.getLogger("structguru_test_policy_later_change")
+    existing.disabled = True
+    bridge = install_stdlib_bridge(disable_existing_loggers=True)
+    assert existing.disabled
+
+    existing.disabled = False
+    uninstall_stdlib_bridge(bridge)
+    assert not existing.disabled
+
+
+def test_install_rejects_duplicate_active_bridge(clean_root: None) -> None:
+    bridge = install_stdlib_bridge()
+    try:
+        with pytest.raises(RuntimeError, match="already installed"):
+            install_stdlib_bridge()
+    finally:
+        uninstall_stdlib_bridge(bridge)
+
+
+def test_install_from_env_applies_all_options(clean_root: None) -> None:
+    root = logging.getLogger()
+    sentinel = logging.NullHandler()
+    root.addHandler(sentinel)
+    existing = logging.getLogger("structguru_test_env_existing")
+    existing.disabled = False
+
+    bridge = install_stdlib_bridge_from_env(
+        {
+            "LOG_LEVEL": "ERROR",
+            "STRUCTGURU_STDLIB_LEVEL": "DEBUG",
+            "STRUCTGURU_STDLIB_CLEAR_HANDLERS": "false",
+            "STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS": "true",
+            "STRUCTGURU_STDLIB_SUPPRESS_LOGGERS": " noisy_a, noisy_b ",
+            "STRUCTGURU_STDLIB_SUPPRESS_LEVEL": "ERROR",
+        }
+    )
+    try:
+        assert sentinel in root.handlers
+        assert bridge.level == logging.DEBUG
+        assert root.level == logging.DEBUG
+        assert existing.disabled
+        assert logging.getLogger("noisy_a").level == logging.ERROR
+        assert logging.getLogger("noisy_b").level == logging.ERROR
+    finally:
+        uninstall_stdlib_bridge(bridge)
+
+
+def test_install_from_injected_env_does_not_fall_back_to_process_env(
+    clean_root: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    existing = logging.getLogger("structguru_test_injected_env_isolation")
+    existing.disabled = False
+    monkeypatch.setenv("STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS", "true")
+
+    bridge = install_stdlib_bridge_from_env({})
+    try:
+        assert not existing.disabled
+    finally:
+        uninstall_stdlib_bridge(bridge)
+
+
+def test_invalid_env_does_not_change_logging_state(clean_root: None) -> None:
+    root = logging.getLogger()
+    sentinel = logging.NullHandler()
+    root.addHandler(sentinel)
+    existing = logging.getLogger("structguru_test_env_invalid")
+    existing.disabled = False
+
+    with pytest.raises(ValueError, match="STRUCTGURU_STDLIB_CLEAR_HANDLERS"):
+        install_stdlib_bridge_from_env({"STRUCTGURU_STDLIB_CLEAR_HANDLERS": "maybe"})
+
+    assert root.handlers[-1] is sentinel
+    assert not existing.disabled
 
 
 def test_bridge_delivers_third_party_records_to_add_sinks_exactly_once(

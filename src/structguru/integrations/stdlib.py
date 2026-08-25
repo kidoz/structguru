@@ -22,11 +22,17 @@ from __future__ import annotations
 
 import functools
 import logging
-from collections.abc import Iterable
+import os
+import threading
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from structguru.config import _to_logging_level
 from structguru.core import Logger, _set_stdlib_bridge_active
+from structguru.integrations._stdlib_env import (
+    optional_bool_from_env,
+    stdlib_bridge_config_from_env,
+)
 
 # Attributes present on a vanilla LogRecord (plus the two the Formatter adds).
 # Anything else in ``record.__dict__`` came from a user ``extra=`` mapping and is
@@ -100,6 +106,10 @@ class StructguruHandler(logging.Handler):
     a message is never misinterpreted.
     """
 
+    def __init__(self, level: int = logging.NOTSET) -> None:
+        super().__init__(level)
+        self._existing_logger_states: list[tuple[logging.Logger, bool, bool]] = []
+
     def emit(self, record: logging.LogRecord) -> None:
         # Never intercept structguru's own records: it keeps the bridge from
         # looping and stops native output being wrapped a second time.
@@ -137,12 +147,94 @@ def suppress_loggers(*names: str, level: str = "WARNING") -> None:
     _apply_suppression(names, level)
 
 
+_bridge_lock = threading.RLock()
+_active_bridge: StructguruHandler | None = None
+
+
+def _apply_existing_logger_policy(
+    disable_existing_loggers: bool | None,
+) -> list[tuple[logging.Logger, bool, bool]]:
+    """Apply a dictConfig-like policy to currently registered named loggers."""
+    if disable_existing_loggers is None:
+        return []
+
+    states: list[tuple[logging.Logger, bool, bool]] = []
+    for candidate in list(logging.root.manager.loggerDict.values()):
+        if not isinstance(candidate, logging.Logger):
+            continue
+        previous = candidate.disabled
+        if previous != disable_existing_loggers:
+            states.append((candidate, previous, disable_existing_loggers))
+            candidate.disabled = disable_existing_loggers
+    return states
+
+
+def _restore_existing_logger_states(bridge: StructguruHandler) -> None:
+    """Restore logger states that have not changed since bridge installation."""
+    for logger, previous, applied in bridge._existing_logger_states:
+        if logger.disabled == applied:
+            logger.disabled = previous
+    bridge._existing_logger_states.clear()
+
+
+def _release_bridge(bridge: StructguruHandler) -> None:
+    """Release bridge-owned state; caller must hold ``_bridge_lock``."""
+    global _active_bridge
+    logging.getLogger().removeHandler(bridge)
+    bridge.close()
+    _restore_existing_logger_states(bridge)
+    if _active_bridge is bridge:
+        _active_bridge = None
+        _set_stdlib_bridge_active(False)
+
+
+def _install_stdlib_bridge_resolved(
+    *,
+    level: str,
+    suppress_loggers: Iterable[str],
+    suppress_level: str,
+    clear_handlers: bool,
+    disable_existing_loggers: bool | None,
+) -> StructguruHandler:
+    """Install a bridge after all environment-backed options are resolved."""
+    global _active_bridge
+    root = logging.getLogger()
+    threshold = _to_logging_level(level)
+    suppression_threshold = _to_logging_level(suppress_level)
+    suppressed_names = tuple(suppress_loggers)
+
+    with _bridge_lock:
+        if _active_bridge is not None:
+            if _active_bridge in root.handlers:
+                msg = "the structguru stdlib bridge is already installed"
+                raise RuntimeError(msg)
+            # A caller may have detached the handler directly. Clean up its
+            # policy snapshot before allowing a replacement installation.
+            _release_bridge(_active_bridge)
+
+        bridge = StructguruHandler(threshold)
+        bridge._existing_logger_states = _apply_existing_logger_policy(disable_existing_loggers)
+        if clear_handlers:
+            for handler in list(root.handlers):
+                root.removeHandler(handler)
+        # Suspend raw root delivery for `logger.add()` sinks before the bridge
+        # goes live, so no record is ever delivered through both paths.
+        _set_stdlib_bridge_active(True)
+        root.addHandler(bridge)
+        root.setLevel(threshold)
+        for name in suppressed_names:
+            logging.getLogger(name).setLevel(suppression_threshold)
+        _active_bridge = bridge
+        return bridge
+
+
 def install_stdlib_bridge(
     *,
     level: str = "INFO",
     suppress_loggers: Iterable[str] = (),
     suppress_level: str = "WARNING",
     clear_handlers: bool = True,
+    disable_existing_loggers: bool | None = None,
 ) -> StructguruHandler:
     """Route root stdlib logging through structguru and quiet noisy loggers.
 
@@ -170,21 +262,44 @@ def install_stdlib_bridge(
     clear_handlers:
         Remove existing root handlers first (default ``True``), so records are
         not also emitted by a previously configured stdlib handler.
+    disable_existing_loggers:
+        ``True`` disables named loggers that already exist when the bridge is
+        installed, and ``False`` re-enables them, matching the corresponding
+        :func:`logging.config.dictConfig` policy. ``None`` (the default) reads
+        ``STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS`` and leaves existing logger
+        states unchanged when the variable is unset. Loggers created later are
+        unaffected.
     """
-    root = logging.getLogger()
-    if clear_handlers:
-        for handler in list(root.handlers):
-            root.removeHandler(handler)
-    # Suspend raw root delivery for `logger.add()` sinks before the bridge goes
-    # live, so no record is ever delivered through both paths.
-    _set_stdlib_bridge_active(True)
-    threshold = _to_logging_level(level)
-    bridge = StructguruHandler()
-    bridge.setLevel(threshold)
-    root.addHandler(bridge)
-    root.setLevel(threshold)
-    _apply_suppression(suppress_loggers, suppress_level)
-    return bridge
+    if disable_existing_loggers is None:
+        disable_existing_loggers = optional_bool_from_env(
+            os.environ, "STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS"
+        )
+    return _install_stdlib_bridge_resolved(
+        level=level,
+        suppress_loggers=suppress_loggers,
+        suppress_level=suppress_level,
+        clear_handlers=clear_handlers,
+        disable_existing_loggers=disable_existing_loggers,
+    )
+
+
+def install_stdlib_bridge_from_env(
+    environ: Mapping[str, str] | None = None,
+) -> StructguruHandler:
+    """Install the stdlib bridge using environment configuration.
+
+    Reading the environment is explicit so importing :mod:`structguru` never
+    mutates the application's root logger. ``environ`` is injectable for tests;
+    normal applications should omit it to use :data:`os.environ`.
+    """
+    config = stdlib_bridge_config_from_env(os.environ if environ is None else environ)
+    return _install_stdlib_bridge_resolved(
+        level=config.level,
+        suppress_loggers=config.suppress_loggers,
+        suppress_level=config.suppress_level,
+        clear_handlers=config.clear_handlers,
+        disable_existing_loggers=config.disable_existing_loggers,
+    )
 
 
 def uninstall_stdlib_bridge(bridge: StructguruHandler) -> None:
@@ -195,6 +310,5 @@ def uninstall_stdlib_bridge(bridge: StructguruHandler) -> None:
     the root logger so they keep receiving them (raw, as before the install).
     Root handlers removed by ``clear_handlers=True`` are not restored.
     """
-    logging.getLogger().removeHandler(bridge)
-    bridge.close()
-    _set_stdlib_bridge_active(False)
+    with _bridge_lock:
+        _release_bridge(bridge)
