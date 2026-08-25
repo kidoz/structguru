@@ -21,11 +21,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from typing import Any
 
 from structguru._contextvars import bind_contextvars, clear_contextvars
 from structguru.core import Logger
+from structguru.integrations._stdlib_env import optional_bool_from_env
 from structguru.integrations._util import coerce_request_id
 
 
@@ -57,6 +59,7 @@ def build_logging_config(
     service: str = "app",
     level: str = "INFO",
     json_logs: bool = True,
+    disable_existing_loggers: bool | None = None,
 ) -> dict[str, Any]:
     """Generate a minimal Django ``LOGGING`` dict using the stdlib logging module.
 
@@ -73,11 +76,19 @@ def build_logging_config(
     json_logs:
         ``True`` for a JSON-style line format, ``False`` for a plain
         human-readable console format.
+    disable_existing_loggers:
+        Value for Django's ``LOGGING`` dictionary. When omitted, read
+        ``STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS`` and fall back to ``False``.
     """
     formatter = "json" if json_logs else "console"
+    if disable_existing_loggers is None:
+        env_value = optional_bool_from_env(
+            os.environ, "STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS"
+        )
+        disable_existing_loggers = False if env_value is None else env_value
     return {
         "version": 1,
-        "disable_existing_loggers": False,
+        "disable_existing_loggers": disable_existing_loggers,
         "formatters": {
             "json": {
                 # Custom factory (dictConfig "()" key) so message/name are

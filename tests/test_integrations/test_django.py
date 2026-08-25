@@ -8,6 +8,7 @@ import logging.config
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 from conftest import configure
 
 from structguru.integrations.django import StructguruMiddleware, build_logging_config
@@ -28,6 +29,39 @@ class TestBuildLoggingConfig:
     def test_root_level(self) -> None:
         config = build_logging_config(level="WARNING")
         assert config["root"]["level"] == "WARNING"
+
+    def test_disable_existing_loggers_defaults_to_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS", raising=False)
+        config = build_logging_config()
+        assert config["disable_existing_loggers"] is False
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_disable_existing_loggers_explicit_value(self, value: bool) -> None:
+        config = build_logging_config(disable_existing_loggers=value)
+        assert config["disable_existing_loggers"] is value
+
+    def test_disable_existing_loggers_reads_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS", "true")
+        config = build_logging_config()
+        assert config["disable_existing_loggers"] is True
+
+    def test_disable_existing_loggers_explicit_value_overrides_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS", "true")
+        config = build_logging_config(disable_existing_loggers=False)
+        assert config["disable_existing_loggers"] is False
+
+    def test_disable_existing_loggers_rejects_invalid_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS", "maybe")
+        with pytest.raises(ValueError, match="STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS"):
+            build_logging_config()
 
     def test_json_formatter_escapes_message(self) -> None:
         # A message with quotes/newlines must not break the JSON or forge fields.
