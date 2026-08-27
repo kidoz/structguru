@@ -34,7 +34,9 @@ async with httpx.AsyncClient(
     response = await client.get("https://example.com")
 ```
 
-The hooks will automatically log request completion and failure, and capture the `X-Request-ID` header if it's set.
+The hooks log every request that receives a response, and capture the `X-Request-ID` header if it's set. Responses with an HTTP error status (4xx/5xx) are logged at `ERROR`, everything else at `INFO`.
+
+Note that logging happens in the `response` hook, so *transport-level* failures — connection refused, DNS failures, timeouts — are not logged here. Those raise before a response exists, and httpx never invokes the hook. Wrap the call site (or use `logger.catch()`) if you need those recorded.
 
 ## Requests
 
@@ -181,7 +183,7 @@ async def root():
 ```python
 app.add_middleware(
     StructguruMiddleware,
-    request_id_header="x-correlation-id",  # Custom header to read (must be lowercase)
+    request_id_header="X-Correlation-ID",  # Custom header to read (case-insensitive)
     logger_name="api.http",                # Custom logger name
     log_request=True,                      # Log a summary line on completion
     extract_headers=["x-tenant-id", "x-device-id"], # Additional headers to extract and bind
@@ -335,7 +337,9 @@ server = grpc.server(
 
 ## Sentry
 
-`SentryProcessor` forwards log events as Sentry breadcrumbs or captured events based on severity.
+`SentryProcessor` forwards log events to Sentry as breadcrumbs and, for the more severe ones, as captured events.
+
+Two thresholds control this. Every event at or above `breadcrumb_level` is added as a breadcrumb. Events at or above `event_level` are additionally considered for capture — but by default only those carrying exception info (`logger.exception(...)`, or `exc_info=`) actually become Sentry *events*, via `capture_exception`. This matches `logging.LoggingIntegration` semantics: a plain `logger.error("...")` with no exception stays a breadcrumb. Set `capture_messages=True` to also send those through `capture_message`.
 
 ### Usage
 
@@ -345,9 +349,10 @@ from structguru import configure
 from structguru.integrations.sentry import SentryProcessor
 
 sentry_processor = SentryProcessor(
-    event_level=logging.ERROR,       # Logs ERROR+ as Sentry events
-    breadcrumb_level=logging.INFO,   # Logs INFO+ as Sentry breadcrumbs
+    event_level=logging.ERROR,       # ERROR+ is eligible for capture as an event
+    breadcrumb_level=logging.INFO,   # INFO+ is recorded as a breadcrumb
     tag_keys=frozenset({"service"}), # Keys to set as Sentry tags
+    capture_messages=True,           # Also capture ERROR+ logs without an exception
 )
 
 configure(sentry_processor=sentry_processor)
