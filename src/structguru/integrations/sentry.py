@@ -40,12 +40,10 @@ _METHOD_TO_LEVEL: dict[str, int] = {
 class SentryProcessor:
     """Forward events to Sentry as breadcrumbs and/or captured exceptions.
 
-    .. important::
-        When *require_redaction* is ``True`` (the default),
-        :class:`SentryProcessor` refuses to upload the event dict as Sentry
-        extras unless the redaction marker is present — turning the ordering
-        convention into a runtime guard. The native hook always supplies an
-        already-redacted event and marker.
+    When *require_redaction* is ``True`` (the default), this processor refuses
+    to upload the event dict as Sentry extras unless the redaction marker is
+    present — turning the ordering convention into a runtime guard. The native
+    hook always supplies an already-redacted event and marker.
 
     Parameters
     ----------
@@ -66,11 +64,12 @@ class SentryProcessor:
         only called when :data:`~structguru.redaction.REDACTED_MARKER_KEY`
         is present on the event dict.
 
-    .. tip:: Pass this processor via
-        ``configure(sentry_processor=SentryProcessor(...))``.
-        It runs per kept record on the caller's thread with the same contract.
-        The native hook supplies an already-redacted event and injects
-        ``REDACTED_MARKER_KEY`` so the guard recognizes the completed redaction.
+    Notes
+    -----
+    Pass this processor via ``configure(sentry_processor=SentryProcessor(...))``.
+    It runs per kept record on the caller's thread with the same contract. The
+    native hook supplies an already-redacted event and injects
+    ``REDACTED_MARKER_KEY`` so the guard recognizes the completed redaction.
     """
 
     def __init__(
@@ -94,6 +93,13 @@ class SentryProcessor:
         method_name: str,
         event_dict: dict[str, Any],
     ) -> dict[str, Any]:
+        """Forward one event to Sentry and return *event_dict* unchanged.
+
+        Records a breadcrumb at or above *breadcrumb_level*. At or above
+        *event_level*, captures an exception when the event carries
+        ``exc_info``, or a message when *capture_messages* is enabled. Acts as
+        a no-op when ``sentry-sdk`` is not installed.
+        """
         if _sentry_sdk is None:
             return event_dict
 
