@@ -248,6 +248,78 @@ class TestStructguruInterceptor:
         # Context should be cleared.
         assert "grpc_method" not in get_contextvars()
 
+    def test_streaming_context_clean_before_iteration_starts(self) -> None:
+        """A response iterator that is never consumed must not leave context bound.
+
+        The handler returns a lazy iterator; gRPC may delay consuming it, or
+        never consume it at all if the client cancels.  Until iteration starts,
+        the thread must be free of gRPC context vars.
+        """
+        clear_contextvars()
+
+        interceptor = StructguruInterceptor()
+        details = _make_handler_details(
+            metadata=[("x-request-id", "lazy-req")],
+        )
+
+        def fake_unary_stream(request: object, context: object):  # type: ignore[no-untyped-def]
+            yield "item-0"
+
+        handler = _make_handler(unary_stream=fake_unary_stream)
+        continuation = MagicMock(return_value=handler)
+
+        result = interceptor.intercept_service(continuation, details)
+        stream = result.unary_stream("req", "ctx")
+
+        # Iterator created but not consumed: nothing may be bound yet.
+        ctx = get_contextvars()
+        assert "grpc_method" not in ctx
+        assert "request_id" not in ctx
+
+        # Iterating still binds the context for the handler.
+        it = iter(stream)
+        assert next(it) == "item-0"
+        assert get_contextvars()["request_id"] == "lazy-req"
+
+        # Close explicitly so cleanup runs here rather than at an arbitrary
+        # GC point in a later test.
+        it.close()  # type: ignore[union-attr]
+        assert "grpc_method" not in get_contextvars()
+
+    def test_streaming_restores_context_bound_by_non_generator_handler(self) -> None:
+        """A handler that returns a list (not a generator) runs eagerly.
+
+        Context it bound during that eager call must be restored for iteration
+        rather than dropped by the pre-return cleanup.
+        """
+        clear_contextvars()
+
+        interceptor = StructguruInterceptor()
+        details = _make_handler_details(
+            metadata=[("x-request-id", "eager-req")],
+        )
+
+        def eager_stream(request: object, context: object) -> list[str]:
+            bind_contextvars(user_id="u-7")
+            return ["a", "b"]
+
+        handler = _make_handler(unary_stream=eager_stream)
+        continuation = MagicMock(return_value=handler)
+
+        result = interceptor.intercept_service(continuation, details)
+        stream = result.unary_stream("req", "ctx")
+
+        assert "user_id" not in get_contextvars()
+
+        it = iter(stream)
+        assert next(it) == "a"
+        ctx = get_contextvars()
+        assert ctx["request_id"] == "eager-req"
+        assert ctx["user_id"] == "u-7"
+
+        it.close()  # type: ignore[union-attr]
+        assert "grpc_method" not in get_contextvars()
+
     def test_context_clean_after_intercept_before_handler(self) -> None:
         clear_contextvars()
 

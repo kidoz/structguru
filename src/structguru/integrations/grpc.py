@@ -19,7 +19,7 @@ import functools
 from collections.abc import Iterator
 from typing import Any
 
-from structguru._contextvars import bind_contextvars, clear_contextvars
+from structguru._contextvars import bind_contextvars, clear_contextvars, get_contextvars
 from structguru.core import Logger
 from structguru.integrations._util import coerce_request_id
 
@@ -99,15 +99,18 @@ def _wrap_rpc_handler(handler: Any, method: str, request_id: str) -> Any:
     return handler
 
 
-def _wrap_iterator(it: Iterator[Any], method: str, request_id: str) -> Iterator[Any]:
+def _wrap_iterator(it: Iterator[Any], snapshot: dict[str, Any]) -> Iterator[Any]:
     """Wrap a response iterator so context stays bound during iteration.
 
-    Context is bound once at entry and cleared once at exit.  We deliberately
-    do NOT rebind on every yielded item, because the handler may enrich the
-    context (e.g. bind ``user_id`` during auth) and we must not wipe those
-    additions between yields.
+    *snapshot* is the context captured when the handler returned the iterator,
+    so any enrichment the handler already performed (e.g. ``user_id`` bound
+    during auth) is restored here.  It is applied once at entry and cleared
+    once at exit.  We deliberately do NOT rebind on every yielded item, because
+    the handler may enrich the context further while streaming and we must not
+    wipe those additions between yields.
     """
-    bind_contextvars(grpc_method=method, request_id=request_id)
+    clear_contextvars()
+    bind_contextvars(**snapshot)
     try:
         yield from it
     finally:
@@ -129,8 +132,14 @@ def _replace_behavior(
             clear_contextvars()
             raise
         if streaming_response:
-            # Don't clear now — context must live through iteration.
-            return _wrap_iterator(result, method, request_id)
+            # The response iterator is lazy: gRPC may not begin consuming it
+            # for a while, or ever (the client cancels first).  Snapshot the
+            # context the handler produced, wipe it here so it cannot leak into
+            # unrelated logs on this thread in the meantime, and restore it
+            # when iteration actually starts.
+            snapshot = get_contextvars()
+            clear_contextvars()
+            return _wrap_iterator(result, snapshot)
         clear_contextvars()
         return result
 
