@@ -99,7 +99,23 @@ target-version = "py311"
 line-length = 99
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP"]
+select = ["E", "F", "W", "I", "UP", "D"]
+# The public API reference under docs/api/ is generated entirely from these
+# docstrings, so a missing one is an invisible hole in the published docs.
+ignore = [
+    # Boolean properties read better as "True when ..." than as an imperative.
+    "D401",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+# Docstrings are enforced on the published surface only; test names carry the
+# intent, and examples/scripts are read as whole files rather than via mkdocs.
+"tests/**" = ["D"]
+"examples/**" = ["D"]
+"scripts/**" = ["D"]
 
 [tool.mypy]
 strict = true

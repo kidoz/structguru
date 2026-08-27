@@ -49,6 +49,12 @@ class MetricProcessor:
         _method_name: str,
         event_dict: dict[str, Any],
     ) -> dict[str, Any]:
+        """Fire matching counter and histogram callbacks for one event.
+
+        A pattern matches when it appears anywhere in the event message.
+        Callback exceptions are swallowed so a faulty metrics sink cannot
+        break logging; *event_dict* is always returned unchanged.
+        """
         event = str(event_dict.get("event", ""))
 
         for pattern, callback in self._counters.items():

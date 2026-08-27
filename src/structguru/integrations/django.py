@@ -126,6 +126,11 @@ class StructguruMiddleware:
         self.log = Logger(name="structguru.django")
 
     def __call__(self, request: Any) -> Any:
+        """Bind request context for the duration of one Django request.
+
+        Context is cleared on entry and on every exit path, so a recycled
+        worker thread never inherits the previous request's fields.
+        """
         clear_contextvars()
 
         request_id = coerce_request_id(request.META.get("HTTP_X_REQUEST_ID", ""))

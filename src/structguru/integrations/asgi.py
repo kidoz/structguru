@@ -56,6 +56,11 @@ class StructguruMiddleware:
         )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Bind request context for the duration of one ASGI request.
+
+        Non-HTTP/WebSocket scopes (``lifespan``) pass straight through
+        untouched. Context is cleared on entry and on every exit path.
+        """
         if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return

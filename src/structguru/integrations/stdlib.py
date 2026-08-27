@@ -111,6 +111,11 @@ class StructguruHandler(logging.Handler):
         self._existing_logger_states: list[tuple[logging.Logger, bool, bool]] = []
 
     def emit(self, record: logging.LogRecord) -> None:
+        """Re-emit one stdlib record through the structguru pipeline.
+
+        structguru's own records are skipped, which keeps the bridge from
+        looping and stops native output being wrapped a second time.
+        """
         # Never intercept structguru's own records: it keeps the bridge from
         # looping and stops native output being wrapped a second time.
         if record.name == "structguru" or record.name.startswith("structguru."):
