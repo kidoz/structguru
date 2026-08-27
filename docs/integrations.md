@@ -28,10 +28,11 @@ response = client.get("https://example.com")
 `AsyncClient` requires awaitable hooks, exposed separately:
 
 ```python
-async with httpx.AsyncClient(
-    event_hooks=StructguruHTTPXLoggingHooks.get_async_hooks(),
-) as client:
-    response = await client.get("https://example.com")
+async def fetch() -> httpx.Response:
+    async with httpx.AsyncClient(
+        event_hooks=StructguruHTTPXLoggingHooks.get_async_hooks(),
+    ) as client:
+        return await client.get("https://example.com")
 ```
 
 The hooks log every request that receives a response, and capture the `X-Request-ID` header if it's set. Responses with an HTTP error status (4xx/5xx) are logged at `ERROR`, everything else at `INFO`.
