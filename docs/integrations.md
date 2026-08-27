@@ -37,7 +37,7 @@ async def fetch() -> httpx.Response:
 
 The hooks log every request that receives a response, and capture the `X-Request-ID` header if it's set. Responses with an HTTP error status (4xx/5xx) are logged at `ERROR`, everything else at `INFO`.
 
-Note that logging happens in the `response` hook, so *transport-level* failures — connection refused, DNS failures, timeouts — are not logged here. Those raise before a response exists, and httpx never invokes the hook. Wrap the call site (or use `logger.catch()`) if you need those recorded.
+Note that logging happens in the `response` hook, so *transport-level* failures — connection refused, DNS failures, timeouts — are not logged here. Those raise before a response exists, and httpx never invokes the hook. Wrap the call site if you need those recorded — and use `logger.catch(reraise=True)`, because `catch()` defaults to `reraise=False` and would otherwise swallow the transport error instead of letting the caller handle it.
 
 ## Requests
 
