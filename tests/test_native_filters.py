@@ -121,8 +121,8 @@ def test_multiple_patterns_apply_in_order() -> None:
 
 
 def test_pattern_replacement_expands_capture_groups() -> None:
-    """The look-behind rewrite: `(?<=password=)\\S+` becomes `password=(\\S+)`
-    with a group-preserving replacement — same output, linear-time engine."""
+    """The look-behind rewrite: `(?<=password=)\\S+` becomes `(password=)\\S+`
+    with a prefix-preserving replacement — same output, linear-time engine."""
     _runtime.configure(
         service="svc",
         target="memory",

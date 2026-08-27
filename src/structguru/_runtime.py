@@ -590,8 +590,10 @@ def configure(
                 msg = (
                     f"unsupported sensitive_patterns regex ({exc}). Rust's regex engine "
                     "guarantees linear-time matching and does not support backreferences "
-                    "or look-around. Rewrite the pattern with a capture group instead, "
-                    "e.g. lookbehind '(?<=password=)\\S+' becomes 'password=(\\S+)', or "
+                    "or look-around. Rewrite the pattern with a capture group around "
+                    "the prefix you want to keep, e.g. lookbehind "
+                    "'(?<=password=)\\S+' becomes '(password=)\\S+' with "
+                    "pattern_replacement='$1[REDACTED]', or "
                     "pass allow_backtracking_patterns=True to opt this pattern into a "
                     "bounded backtracking engine (loses the linear-time guarantee)."
                 )

@@ -157,8 +157,9 @@ fn redact(value: &mut Value, keys: &[impl AsRef<str>]) {
 ///
 /// `replacement` supports the regex crate's group expansion (`$1`, `${name}`;
 /// `$$` for a literal `$`), so look-behind-style patterns can be rewritten as
-/// capture groups that preserve their prefix, e.g. pattern `password=(\S+)`
-/// with replacement `password=[REDACTED]`.
+/// capture groups that preserve their prefix, e.g. pattern `(password=)\S+`
+/// with replacement `$1[REDACTED]`. The group must wrap the prefix, not the
+/// secret — `password=(\S+)` with `$1[REDACTED]` would re-emit the secret.
 fn redact_patterns(value: &mut Value, patterns: &[RedactionPattern], replacement: &str) {
     match value {
         Value::Map(entries) => {
@@ -755,8 +756,8 @@ mod tests {
 
     #[test]
     fn pattern_replacement_expands_capture_groups() {
-        // Lookbehind rewrite: `(?<=password=)\S+` becomes `password=(\S+)` with
-        // a replacement that re-emits the prefix.
+        // Lookbehind rewrite: `(?<=password=)\S+` becomes `(password=)\S+` with
+        // a replacement that re-emits the captured prefix.
         let patterns = vec![RedactionPattern::linear(r"(password=)\S+").unwrap()];
         let fields = vec![(
             "msg".to_owned(),

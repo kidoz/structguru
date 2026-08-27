@@ -192,8 +192,11 @@ configure(
 
 Patterns run on Rust's linear-time regex engine (no ReDoS), which rejects
 look-around and backreferences at `configure()` time. Most look-behinds rewrite
-as capture groups — `(?<=password=)\S+` becomes `password=(\S+)` with
-`pattern_replacement="$1[REDACTED]"`. For patterns that can't be rewritten,
+as capture groups — `(?<=password=)\S+` becomes `(password=)\S+` with
+`pattern_replacement="$1[REDACTED]"`, so the prefix is re-emitted and the
+secret is replaced (`password=hunter2` → `password=[REDACTED]`). Put the
+capture group around the part you want to *keep*, never around the secret.
+For patterns that can't be rewritten,
 `allow_backtracking_patterns=True` opts them into a bounded backtracking
 engine: look-around and backreferences then work as written, at the cost of
 the linear-time guarantee for those patterns. If a value ever exceeds the
