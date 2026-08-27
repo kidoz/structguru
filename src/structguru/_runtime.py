@@ -450,7 +450,7 @@ def configure(
     callable_queue_maxsize: int = 1024,
     stream_sink: Any = None,
 ) -> None:
-    """Configure the native renderer and background writer.
+    r"""Configure the native renderer and background writer.
 
     ``target`` selects the background writer's sink: ``"stdout"`` (default,
     12-factor) or ``"memory"`` (records lines for inspection/tests).
@@ -468,8 +468,9 @@ def configure(
     ``pattern_replacement`` is the substitution text for pattern matches and
     supports capture-group expansion (``$1``, ``${name}``; ``$$`` for a literal
     ``$``), so look-behind-style patterns can be rewritten to preserve their
-    prefix — e.g. pattern ``password=(\\S+)`` with replacement
-    ``password=[REDACTED]``.
+    prefix — e.g. pattern ``(password=)\S+`` with replacement
+    ``$1[REDACTED]``. The group must wrap the prefix you want to keep, never
+    the secret: ``password=(\S+)`` with ``$1[REDACTED]`` re-emits the secret.
 
     ``allow_backtracking_patterns=True`` opts patterns the linear engine
     rejects into a bounded backtracking engine instead, so look-around and
