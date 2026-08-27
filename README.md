@@ -171,7 +171,7 @@ configure(service="myapp", format="json")
 
 # Console (development) — colored, human-readable
 configure(service="myapp", format="console")
-# → 2025-01-15 12:00:00 [info     ] Hello world
+# → 2026-01-15T12:00:00.123456Z [INFO    ] Hello world
 ```
 
 ## Native processing
