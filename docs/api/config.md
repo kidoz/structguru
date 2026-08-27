@@ -23,3 +23,5 @@
 ::: structguru.bound_contextvars
 
 ::: structguru.clear_contextvars
+
+::: structguru.get_contextvars

@@ -4,6 +4,7 @@ from structguru._contextvars import (
     bind_contextvars,
     bound_contextvars,
     clear_contextvars,
+    get_contextvars,
 )
 from structguru._runtime import (
     configure,
@@ -30,6 +31,7 @@ __all__ = [
     "clear_contextvars",
     "configure",
     "flush",
+    "get_contextvars",
     "is_available",
     "logger",
     "set_level",
