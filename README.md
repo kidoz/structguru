@@ -167,7 +167,7 @@ structguru.flush()   # returns once the line has reached its sink
 ```python
 # JSON (production)
 configure(service="myapp", format="json")
-# → {"timestamp": "...", "service": "myapp", "level": "INFO", "message": "..."}
+# → {"logger":"...","level":"INFO","severity":6,"timestamp":"...","service":"myapp","message":"..."}
 
 # Console (development) — colored, human-readable
 configure(service="myapp", format="console")
