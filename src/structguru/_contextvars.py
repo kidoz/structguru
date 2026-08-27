@@ -33,7 +33,11 @@ def clear_contextvars() -> None:
 
 
 def get_contextvars() -> dict[str, Any]:
-    """Return a snapshot of the current context."""
+    """Return a shallow snapshot of the current context.
+
+    Mutating the returned dictionary does not change the bound context. Values
+    within the dictionary are not copied.
+    """
     return dict(_ctx.get())
 
 

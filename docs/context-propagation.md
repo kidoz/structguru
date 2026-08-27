@@ -33,6 +33,9 @@ get_contextvars()                      # snapshot of what is bound now
 clear_contextvars()                    # reset to empty
 ```
 
+`get_contextvars` returns a shallow snapshot: changing the returned dictionary
+does not change the bound context, but nested mutable values remain shared.
+
 `bound_contextvars` restores via a token and is the safest choice when the
 scope is a plain block. Adapters usually cannot use it, because bind and
 release happen in different callbacks.
