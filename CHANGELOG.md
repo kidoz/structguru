@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- The gRPC interceptor no longer leaves `grpc_method` / `request_id` bound
+  after a streaming handler returns its response iterator. The iterator is
+  lazy, so context stayed on the thread for the whole interval before
+  iteration began — and indefinitely if the client cancelled and it was never
+  consumed. The handler's context is now snapshotted and cleared on return,
+  then restored when iteration actually starts.
+- Corrected the documented look-behind rewrite for `sensitive_patterns`. The
+  README and the `configure()` error message recommended `password=(\S+)`
+  with `pattern_replacement="$1[REDACTED]"`, which captures the *secret* and
+  re-emits it (`password=hunter2` → `hunter2[REDACTED]`). The capture group
+  belongs around the prefix: `(password=)\S+`. Redaction behavior itself was
+  always correct; only the guidance was wrong.
+
 ## [1.1.0] - 2026-08-25
 
 ### Added
