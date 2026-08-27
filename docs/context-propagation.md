@@ -40,12 +40,13 @@ Every adapter must satisfy three rules:
 The shape that satisfies all three:
 
 ```python
-clear_contextvars()
-bind_contextvars(request_id=request_id, path=path)
-try:
-    return handler(...)
-finally:
+def middleware(request, handler):
     clear_contextvars()
+    bind_contextvars(request_id=request.id, path=request.path)
+    try:
+        return handler(request)
+    finally:
+        clear_contextvars()
 ```
 
 ## Lazy results defer the handler body
@@ -69,10 +70,12 @@ Snapshot, clear, then restore when iteration actually begins:
 ```python
 from structguru._contextvars import get_contextvars
 
-result = handler(...)
-snapshot = get_contextvars()   # includes anything the handler bound eagerly
-clear_contextvars()            # nothing leaks while the iterator sits unconsumed
-return _wrap_iterator(result, snapshot)
+
+def call_streaming_handler(handler, request):
+    result = handler(request)
+    snapshot = get_contextvars()  # includes anything the handler bound eagerly
+    clear_contextvars()           # nothing leaks while the iterator sits unconsumed
+    return _wrap_iterator(result, snapshot)
 
 
 def _wrap_iterator(it, snapshot):
