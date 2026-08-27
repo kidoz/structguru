@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- `get_contextvars()` is now exported from the package root. It returns a
+  snapshot of the currently bound context and completes the public set
+  alongside `bind_contextvars`, `bound_contextvars`, and `clear_contextvars`.
+  Adapters that must capture context and restore it later — the
+  snapshot/clear/restore pattern streaming handlers need — no longer have to
+  import it from the private `structguru._contextvars`.
+
 ### Fixed
 
 - The gRPC interceptor no longer leaves `grpc_method` / `request_id` bound
