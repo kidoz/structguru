@@ -333,30 +333,55 @@ class Logger:
     # -- logging methods ----------------------------------------------------
 
     def trace(self, message: Any, *args: Any, **kwargs: Any) -> None:
+        """Log at ``DEBUG`` level.
+
+        A loguru-compatible alias; structguru has no separate ``TRACE`` level,
+        so records emitted here render as ``DEBUG``.
+        """
         self._log("debug", message, args, kwargs)
 
     def debug(self, message: Any, *args: Any, **kwargs: Any) -> None:
+        """Log at ``DEBUG`` level.
+
+        *message* is brace-formatted with *args* / *kwargs*; keys consumed by
+        the format string are dropped, and the rest become structured fields.
+        """
         self._log("debug", message, args, kwargs)
 
     def info(self, message: Any, *args: Any, **kwargs: Any) -> None:
+        """Log at ``INFO`` level."""
         self._log("info", message, args, kwargs)
 
     def success(self, message: Any, *args: Any, **kwargs: Any) -> None:
+        """Log at ``INFO`` level.
+
+        A loguru-compatible alias; structguru has no separate ``SUCCESS``
+        level, so records emitted here render as ``INFO``.
+        """
         self._log("info", message, args, kwargs)
 
     def warning(self, message: Any, *args: Any, **kwargs: Any) -> None:
+        """Log at ``WARNING`` level."""
         self._log("warning", message, args, kwargs)
 
     def warn(self, message: Any, *args: Any, **kwargs: Any) -> None:
+        """Log at ``WARNING`` level — alias of :meth:`warning`."""
         self.warning(message, *args, **kwargs)
 
     def error(self, message: Any, *args: Any, **kwargs: Any) -> None:
+        """Log at ``ERROR`` level.
+
+        Pass ``exc_info=True`` (or use :meth:`exception`) to attach the active
+        exception.
+        """
         self._log("error", message, args, kwargs)
 
     def critical(self, message: Any, *args: Any, **kwargs: Any) -> None:
+        """Log at ``CRITICAL`` level."""
         self._log("critical", message, args, kwargs)
 
     def fatal(self, message: Any, *args: Any, **kwargs: Any) -> None:
+        """Log at ``CRITICAL`` level — alias of :meth:`critical`."""
         self.critical(message, *args, **kwargs)
 
     def exception(self, message: Any, *args: Any, **kwargs: Any) -> None:
