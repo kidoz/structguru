@@ -33,6 +33,7 @@ plugins:
 nav:
   - Home: index.md
   - Integrations Guide: integrations.md
+  - Context Propagation: context-propagation.md
   - API Reference:
     - Overview: api/index.md
     - Core: api/core.md
