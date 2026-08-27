@@ -4,8 +4,9 @@ A lightweight replacement for ``structlog.contextvars``, backed by a single
 ``contextvars.ContextVar[dict]``. Context is copy-on-write: ``bind_contextvars``
 merges into a new dict and sets a token; ``bound_contextvars`` restores on exit.
 
-This is request-scoped (via Python ``contextvars``), not thread-scoped —
-``asyncio`` tasks and threads each see their own copy automatically.
+This is request-scoped (via Python ``contextvars``), not thread-scoped. An
+``asyncio`` task inherits a copy of the context active when it was created; a
+new thread starts with an empty one and must propagate context explicitly.
 """
 
 from __future__ import annotations

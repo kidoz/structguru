@@ -9,14 +9,27 @@ adapter must hold, and the two ways they are most often broken.
 Context lives in a single `contextvars.ContextVar[dict]`, copy-on-write:
 `bind_contextvars` merges into a **new** dict, so a bind never mutates a dict
 another task can see. Because it is a `ContextVar`, scope follows Python's own
-rules — each `asyncio` task and each thread sees its own copy automatically.
+rules, and those rules differ between tasks and threads:
+
+- An `asyncio` task **inherits** a copy of the context that was active when it
+  was created, so bound fields flow into `create_task` / `gather` for free.
+- A new `threading.Thread` starts with an **empty** context. Nothing is
+  inherited. Code that hands work to a thread pool must propagate context
+  explicitly — pass a `contextvars.copy_context()` and `run()` inside it, or
+  re-bind the fields the worker needs.
 
 ```python
-from structguru import bind_contextvars, bound_contextvars, clear_contextvars
+from structguru import (
+    bind_contextvars,
+    bound_contextvars,
+    clear_contextvars,
+    get_contextvars,
+)
 
 bind_contextvars(request_id="req-1")   # merge, persists until cleared
 with bound_contextvars(user_id="u-1"): # merge, restored on exit
     ...
+get_contextvars()                      # snapshot of what is bound now
 clear_contextvars()                    # reset to empty
 ```
 
@@ -33,9 +46,12 @@ Every adapter must satisfy three rules:
    bound. Adapters call `clear_contextvars()` *before* binding, not after.
 2. **Clear on every exit path**, including exceptions. A handler that raises
    must not leave its context behind for whatever runs next on that thread.
-3. **Do not rebind mid-scope.** Application code may enrich the context after
+3. **Do not clear mid-scope.** Application code may enrich the context after
    the adapter runs (binding `user_id` during auth, for example). Re-binding
-   the adapter's own keys later would wipe those additions.
+   your own keys is safe — `bind_contextvars` merges, so the additions survive.
+   `clear_contextvars()` does not: it resets to empty, so a clear-then-rebind
+   in the middle of a request discards everything the application added. Bind
+   once at entry and leave it alone until the exit path.
 
 The shape that satisfies all three:
 
@@ -68,7 +84,7 @@ That splits one scope into two, and both halves need handling:
 Snapshot, clear, then restore when iteration actually begins:
 
 ```python
-from structguru._contextvars import get_contextvars
+from structguru import get_contextvars
 
 
 def call_streaming_handler(handler, request):
