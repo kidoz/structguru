@@ -716,7 +716,11 @@ fn enter_container(obj: &Bound<'_, PyAny>, containers: &mut ContainerStack) -> P
 }
 
 fn leave_container(container_id: usize, containers: &mut ContainerStack) {
-    debug_assert_eq!(containers.pop(), Some(container_id));
+    // Pop outside the assertion: release builds compile `debug_assert_eq!` out
+    // entirely, and a pop that never ran made every repeated reference — the
+    // same dict in two list slots — look like a cycle.
+    let popped = containers.pop();
+    debug_assert_eq!(popped, Some(container_id));
 }
 
 fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny>> {

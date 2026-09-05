@@ -169,6 +169,17 @@ def test_native_rejects_cycles() -> None:
         rust._convert_value_debug(values)
 
 
+def test_native_shared_references_are_not_cycles() -> None:
+    # The same object reachable twice on different paths is ordinary data.
+    shared = {"x": 1}
+
+    assert rust._convert_value_debug([shared, shared, {"n": [shared]}]) == [
+        {"x": 1},
+        {"x": 1},
+        {"n": [{"x": 1}]},
+    ]
+
+
 @pytest.mark.parametrize(
     "value",
     [
