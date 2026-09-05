@@ -242,3 +242,36 @@ def test_real_sentry_processor_never_receives_unredacted_extras() -> None:
     assert breadcrumb["data"]["password"] == "[REDACTED]"
     extras = scope.set_extra.call_args.args[1]
     assert extras["password"] == "[REDACTED]"
+
+
+@pytest.mark.parametrize("event_level", [40, 50])
+def test_raw_exception_is_only_used_for_sentry_capture(event_level: int) -> None:
+    from structguru.integrations import sentry as sentry_mod
+    from structguru.integrations.sentry import SentryProcessor
+
+    mock_sentry = MagicMock()
+    scope = mock_sentry.new_scope.return_value.__enter__.return_value
+    error = ValueError("REVIEW_SENTINEL")
+    _runtime.configure(
+        target="memory",
+        sensitive_patterns=["REVIEW_SENTINEL"],
+        sentry_processor=SentryProcessor(
+            event_level=event_level,
+            tag_keys=frozenset({"exc_info", "exception"}),
+        ),
+    )
+    with patch.object(sentry_mod, "_sentry_sdk", mock_sentry):
+        structguru.logger.opt(exception=error).error("failed")
+
+    data = mock_sentry.add_breadcrumb.call_args.kwargs["data"]
+    assert data["exception"] == "ValueError: [REDACTED]"
+    assert "exc_info" not in data
+    if event_level == 40:
+        mock_sentry.capture_exception.assert_called_once_with(error)
+        extras = scope.set_extra.call_args.args[1]
+        assert extras["exception"] == "ValueError: [REDACTED]"
+        assert "exc_info" not in extras
+        scope.set_tag.assert_called_once_with("exception", "ValueError: [REDACTED]")
+    else:
+        mock_sentry.capture_exception.assert_not_called()
+        mock_sentry.new_scope.assert_not_called()

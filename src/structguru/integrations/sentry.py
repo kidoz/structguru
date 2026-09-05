@@ -104,17 +104,18 @@ class SentryProcessor:
             return event_dict
 
         level = _METHOD_TO_LEVEL.get(method_name.lower(), logging.INFO)
+        # Raw exceptions are reserved for capture_exception. The SDK serializes
+        # arbitrary objects in breadcrumbs/extras, which would bypass redaction.
+        payload = {
+            k: v for k, v in event_dict.items() if k not in ("exc_info", REDACTED_MARKER_KEY)
+        }
 
         if level >= self._breadcrumb_level:
             _sentry_sdk.add_breadcrumb(
                 message=str(event_dict.get("event", "")),
                 category="structguru",
                 level=method_name,
-                data={
-                    k: v
-                    for k, v in event_dict.items()
-                    if k != "event" and k != REDACTED_MARKER_KEY
-                },
+                data={k: v for k, v in payload.items() if k != "event"},
             )
 
         if level < self._event_level:
@@ -122,12 +123,11 @@ class SentryProcessor:
 
         with _sentry_sdk.new_scope() as scope:
             for key in self._tag_keys:
-                if key in event_dict:
-                    scope.set_tag(key, str(event_dict[key]))
+                if key in payload:
+                    scope.set_tag(key, str(payload[key]))
 
             if not self._require_redaction or event_dict.get(REDACTED_MARKER_KEY):
-                extras = {k: v for k, v in event_dict.items() if k != REDACTED_MARKER_KEY}
-                scope.set_extra("structlog_event", extras)
+                scope.set_extra("structlog_event", payload)
 
             exc_info = event_dict.get("exc_info")
             if exc_info:
