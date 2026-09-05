@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.2] - 2026-09-06
+
+### Changed
+
+- The native sampling filter now draws from `fastrand`'s per-thread WyRand
+  generator instead of `rand`'s ChaCha-based thread RNG. Sampling behavior is
+  unchanged — one uniform draw in `[0, 1)` per record — but the wheel build
+  drops seven transitive crates (`rand`, `rand_core`, `chacha20`, `getrandom`,
+  `cpufeatures`, `cfg-if`, `r-efi`), including the yanked `chacha20` release
+  that delayed the 1.2.1 publish.
+
 ## [1.2.1] - 2026-09-05
 
 ### Fixed
