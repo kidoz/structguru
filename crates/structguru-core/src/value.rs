@@ -13,9 +13,9 @@ pub enum Value {
     Map(Vec<(String, Value)>),
     /// Pre-serialized, already-valid JSON emitted verbatim.
     ///
-    /// Used for exotic Python leaves (datetime/date/UUID/Enum/...) that the
-    /// boundary serializes via orjson for exact parity with the current
-    /// renderer, rather than reproducing orjson's formatting in Rust.
+    /// Used for integers outside the `i64` range: the boundary emits their
+    /// decimal digits as a JSON number so the value stays lossless, as
+    /// `json.dumps` does, instead of rejecting the record.
     Raw(String),
 }
 

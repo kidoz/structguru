@@ -151,9 +151,9 @@ fn redact(value: &mut Value, keys: &[impl AsRef<str>]) {
 /// `Value::Raw` are not pattern-matched.
 ///
 /// `Value::Raw` is deliberately left untouched: it holds pre-serialized JSON
-/// for exotic Python leaves (datetime/UUID/Enum/...). Descending into it would
-/// require re-parsing the JSON and would break the verbatim-output contract.
-/// Key-based redaction still applies to a `Raw` value's *key* in its parent map.
+/// (an integer outside the `i64` range). Descending into it would require
+/// re-parsing the JSON and would break the verbatim-output contract. Key-based
+/// redaction still applies to a `Raw` value's *key* in its parent map.
 ///
 /// `replacement` supports the regex crate's group expansion (`$1`, `${name}`;
 /// `$$` for a literal `$`), so look-behind-style patterns can be rewritten as

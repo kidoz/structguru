@@ -268,6 +268,13 @@ class Logger:
     *   ``contextualize()`` — add request-scoped context via *contextvars*.
     *   ``add()`` / ``remove()`` — manage logging handlers (sinks).
     *   ``opt()`` — include exception info or stack traces for one call.
+
+    Field values are rendered natively: JSON scalars, mappings, sequences,
+    ``datetime``/``date``, ``UUID``, ``Enum`` (by value), and dataclasses. A
+    value outside that set never fails the call; it is replaced by a marker
+    naming its type (``<unsupported: PosixPath>``), a self-referencing
+    container by ``<cycle: dict>``, and nesting beyond 64 levels by
+    ``<max depth exceeded>``.
     """
 
     name: str | None = None

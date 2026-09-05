@@ -186,3 +186,101 @@ def test_native_custom_sensitive_keys() -> None:
         assert record["ssn"] == "123"  # default key, not in the custom set
     finally:
         _runtime.shutdown()
+
+
+def _record_with_unsupported_fields(**configure_kwargs: Any) -> str:
+    """Log one record carrying unsupported values and return the rendered line."""
+    _runtime.configure(service="svc", target="memory", level="DEBUG", **configure_kwargs)
+    try:
+        structguru.logger.bind(request=object()).info(
+            "kept",
+            nested={"items": [1, object()]},
+            note="secret=hunter2 ok",
+            password=object(),
+        )
+        _runtime.flush_native()
+        return _runtime.drain_messages()[-1]
+    finally:
+        _runtime.shutdown()
+
+
+@pytest.mark.parametrize(
+    "sensitive_patterns",
+    [None, [r"secret=\w+"]],
+    ids=["render_line", "render_line_with_config"],
+)
+def test_native_unsupported_field_keeps_json_record(sensitive_patterns: list[str] | None) -> None:
+    # Both JSON branches: the standalone renderer and the one reusing a
+    # compiled RedactionConfig. The record ships with markers in place of the
+    # unsupported values, and redaction still applies around them.
+    record = json.loads(_record_with_unsupported_fields(sensitive_patterns=sensitive_patterns))
+
+    assert record["message"] == "kept"
+    assert record["request"] == "<unsupported: object>"
+    assert record["nested"] == {"items": [1, "<unsupported: object>"]}
+    assert record["password"] == "[REDACTED]"  # key redaction covers markers too
+    expected_note = "[REDACTED] ok" if sensitive_patterns else "secret=hunter2 ok"
+    assert record["note"] == expected_note
+
+
+@pytest.mark.parametrize(
+    "sensitive_patterns",
+    [None, [r"secret=\w+"]],
+    ids=["render_line_console", "render_console_with_config"],
+)
+def test_native_unsupported_field_keeps_console_record(
+    sensitive_patterns: list[str] | None,
+) -> None:
+    line = _record_with_unsupported_fields(
+        format="console", colors=False, sensitive_patterns=sensitive_patterns
+    )
+
+    assert "kept" in line
+    assert 'request="<unsupported: object>"' in line
+    assert 'password="[REDACTED]"' in line
+    expected_note = "[REDACTED] ok" if sensitive_patterns else "secret=hunter2 ok"
+    assert f'note="{expected_note}"' in line
+
+
+def test_native_unsupported_field_keeps_exception_traceback() -> None:
+    try:
+        raise RuntimeError("synthetic application failure")
+    except RuntimeError as err:
+        exc = err
+
+    _runtime.configure(service="svc", target="memory", level="DEBUG")
+    try:
+        structguru.logger.opt(exception=exc).error("failed", request=object(), status_code=500)
+        _runtime.flush_native()
+        record = json.loads(_runtime.drain_messages()[-1])
+    finally:
+        _runtime.shutdown()
+
+    assert record["level"] == "ERROR"
+    assert record["status_code"] == 500
+    assert record["request"] == "<unsupported: object>"
+    assert "RuntimeError: synthetic application failure" in record["exception"]
+
+
+def test_native_logging_call_never_raises_for_field_shape() -> None:
+    loop: dict[str, object] = {"n": 1}
+    loop["self"] = loop
+    deep: object = "leaf"
+    for _ in range(80):
+        deep = [deep]
+
+    _runtime.configure(service="svc", target="memory", level="DEBUG")
+    try:
+        structguru.logger.info("shape", loop=loop, deep=deep, counts={200: 3}, big=2**80)
+        _runtime.flush_native()
+        record = json.loads(_runtime.drain_messages()[-1])
+    finally:
+        _runtime.shutdown()
+
+    assert record["loop"] == {"n": 1, "self": "<cycle: dict>"}
+    assert record["counts"] == {"200": 3}
+    assert record["big"] == 2**80
+    innermost: object = record["deep"]
+    while isinstance(innermost, list):
+        innermost = innermost[0]
+    assert innermost == "<max depth exceeded>"

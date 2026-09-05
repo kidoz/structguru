@@ -1,5 +1,5 @@
 use pyo3::IntoPyObjectExt;
-use pyo3::exceptions::{PyOverflowError, PyRecursionError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyException, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{
     PyAny, PyBool, PyDict, PyDictMethods, PyFloat, PyInt, PyList, PyListMethods, PyString, PyTuple,
@@ -547,20 +547,29 @@ impl NativeFilter {
     }
 }
 
+/// Marker emitted in place of a value nested deeper than `MAX_VALUE_DEPTH`.
+const DEPTH_MARKER: &str = "<max depth exceeded>";
+
 fn convert_py_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     let mut containers = ContainerStack::with_capacity(8);
     convert_py_value_inner(obj, 1, &mut containers)
 }
 
+/// Convert one Python object into an owned [`Value`].
+///
+/// Conversion is total for value-shape problems: a value the renderer cannot
+/// represent becomes a marker string — `<unsupported: T>`, `<cycle: T>`, or
+/// `<max depth exceeded>` — instead of failing the whole record. A logging
+/// call therefore never raises, and a bridged stdlib record is never lost,
+/// because of one field. Only a `BaseException` that is not an `Exception`
+/// (`KeyboardInterrupt`, `SystemExit`) still propagates.
 fn convert_py_value_inner(
     obj: &Bound<'_, PyAny>,
     depth: usize,
     containers: &mut ContainerStack,
 ) -> PyResult<Value> {
     if depth > MAX_VALUE_DEPTH {
-        return Err(PyRecursionError::new_err(format!(
-            "maximum conversion depth {MAX_VALUE_DEPTH} exceeded"
-        )));
+        return Ok(Value::String(DEPTH_MARKER.to_owned()));
     }
 
     if obj.is_none() {
@@ -570,13 +579,12 @@ fn convert_py_value_inner(
         return Ok(Value::Bool(obj.extract()?));
     }
     if obj.is_exact_instance_of::<PyInt>() {
-        return obj.extract::<i64>().map(Value::Int).map_err(|err| {
-            if err.is_instance_of::<PyOverflowError>(obj.py()) {
-                PyOverflowError::new_err("integer is outside the supported i64 range")
-            } else {
-                err
-            }
-        });
+        return match obj.extract::<i64>() {
+            Ok(value) => Ok(Value::Int(value)),
+            // Outside i64: emit the decimal digits verbatim as a JSON number so
+            // the value stays lossless, as `json.dumps` does.
+            Err(_) => recover(obj, convert_big_int(obj)),
+        };
     }
     if obj.is_exact_instance_of::<PyFloat>() {
         let value: f64 = obj.extract()?;
@@ -588,62 +596,149 @@ fn convert_py_value_inner(
         });
     }
     if let Ok(value) = obj.cast::<PyString>() {
-        return Ok(Value::String(value.to_str()?.to_owned()));
+        return Ok(Value::String(string_to_owned(value)));
     }
     if let Ok(dict) = obj.cast::<PyDict>() {
-        let container_id = enter_container(obj, containers)?;
-        let mut entries = Vec::with_capacity(dict.len());
-        for (key, value) in dict.iter() {
-            let key = key
-                .cast::<PyString>()
-                .map_err(|_| PyTypeError::new_err("map keys must be strings"))?
-                .to_str()?
-                .to_owned();
-            entries.push((key, convert_py_value_inner(&value, depth + 1, containers)?));
-        }
+        let Some(container_id) = enter_container(obj, containers) else {
+            return Ok(marker("cycle", obj));
+        };
+        let result = convert_dict(dict, depth, containers);
         leave_container(container_id, containers);
-        return Ok(Value::Map(entries));
+        return result;
     }
     if let Ok(list) = obj.cast::<PyList>() {
-        let container_id = enter_container(obj, containers)?;
-        let mut values = Vec::with_capacity(list.len());
-        for item in list.iter() {
-            values.push(convert_py_value_inner(&item, depth + 1, containers)?);
-        }
+        let Some(container_id) = enter_container(obj, containers) else {
+            return Ok(marker("cycle", obj));
+        };
+        let result = convert_items(list.iter(), list.len(), depth, containers);
         leave_container(container_id, containers);
-        return Ok(Value::List(values));
+        return result;
     }
     if let Ok(tuple) = obj.cast::<PyTuple>() {
-        let container_id = enter_container(obj, containers)?;
-        let mut values = Vec::with_capacity(tuple.len());
-        for item in tuple.iter() {
-            values.push(convert_py_value_inner(&item, depth + 1, containers)?);
-        }
+        let Some(container_id) = enter_container(obj, containers) else {
+            return Ok(marker("cycle", obj));
+        };
+        let result = convert_items(tuple.iter(), tuple.len(), depth, containers);
         leave_container(container_id, containers);
-        return Ok(Value::List(values));
+        return result;
     }
 
-    // Exotic leaves: handle datetime/date/UUID/Enum/dataclass natively by
-    // delegating to the Python object's own serialization methods, which
-    // produce byte-identical output to orjson for the parity-tested cases.
-    // Genuinely unsupported types (Decimal/bytes/set/timedelta/Path) raise
-    // TypeError, matching the orjson rejection contract.
-    convert_exotic_leaf(obj, depth, containers)
+    // Exotic leaves (datetime/date/UUID/Enum/dataclass) delegate to the
+    // object's own Python conversion. A conversion that raises — a duck-typed
+    // `isoformat()` that fails, a dataclass field whose access raises — must
+    // not lose the record either, so it collapses to the unsupported marker.
+    recover(obj, convert_exotic_leaf(obj, depth, containers))
+}
+
+/// Map a Python `Exception` raised while converting `obj` to the
+/// `<unsupported: T>` marker. Anything that is not an `Exception`
+/// (`KeyboardInterrupt`, `SystemExit`) propagates untouched.
+fn recover(obj: &Bound<'_, PyAny>, result: PyResult<Value>) -> PyResult<Value> {
+    match result {
+        Err(err) if err.is_instance_of::<PyException>(obj.py()) => Ok(marker("unsupported", obj)),
+        other => other,
+    }
+}
+
+/// `<kind: TypeName>` — the text of a fallback marker for `obj`.
+fn marker_text(kind: &str, obj: &Bound<'_, PyAny>) -> String {
+    format!("<{kind}: {}>", type_name(obj))
+}
+
+fn marker(kind: &str, obj: &Bound<'_, PyAny>) -> Value {
+    Value::String(marker_text(kind, obj))
+}
+
+fn type_name(obj: &Bound<'_, PyAny>) -> String {
+    obj.get_type()
+        .name()
+        .map(|name| name.to_string())
+        .unwrap_or_else(|_| "unknown".to_owned())
+}
+
+/// Copy a Python string, replacing unpaired surrogates (not representable in
+/// UTF-8, so `to_str` rejects them) with U+FFFD instead of failing the record.
+fn string_to_owned(value: &Bound<'_, PyString>) -> String {
+    match value.to_str() {
+        Ok(text) => text.to_owned(),
+        Err(_) => value.to_string_lossy().into_owned(),
+    }
+}
+
+fn convert_big_int(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
+    // `str()` of an exact int is `-?[0-9]+`, which is valid JSON. It can still
+    // raise `ValueError` past `sys.get_int_max_str_digits()`; `recover` turns
+    // that into the marker.
+    let digits = obj.str()?;
+    Ok(Value::Raw(string_to_owned(&digits)))
+}
+
+fn convert_dict(
+    dict: &Bound<'_, PyDict>,
+    depth: usize,
+    containers: &mut ContainerStack,
+) -> PyResult<Value> {
+    let mut entries = Vec::with_capacity(dict.len());
+    for (key, value) in dict.iter() {
+        let key = convert_map_key(&key, depth, containers)?;
+        entries.push((key, convert_py_value_inner(&value, depth + 1, containers)?));
+    }
+    Ok(Value::Map(entries))
+}
+
+/// Render a mapping key as the string JSON requires.
+///
+/// Strings are used as-is. Any other key goes through the value conversion: a
+/// string result (Enum, datetime, UUID) is used directly, a scalar result uses
+/// its JSON text (`1`, `1.5`, `true`, `null`), and a container result — a
+/// tuple, a dataclass — becomes `<unsupported: T>`.
+fn convert_map_key(
+    key: &Bound<'_, PyAny>,
+    depth: usize,
+    containers: &mut ContainerStack,
+) -> PyResult<String> {
+    if let Ok(text) = key.cast::<PyString>() {
+        return Ok(string_to_owned(text));
+    }
+    Ok(match convert_py_value_inner(key, depth + 1, containers)? {
+        Value::String(text) => text,
+        Value::List(_) | Value::Map(_) => marker_text("unsupported", key),
+        scalar => scalar
+            .to_json_string()
+            .unwrap_or_else(|_| marker_text("unsupported", key)),
+    })
+}
+
+fn convert_items<'py>(
+    items: impl Iterator<Item = Bound<'py, PyAny>>,
+    capacity: usize,
+    depth: usize,
+    containers: &mut ContainerStack,
+) -> PyResult<Value> {
+    let mut values = Vec::with_capacity(capacity);
+    for item in items {
+        values.push(convert_py_value_inner(&item, depth + 1, containers)?);
+    }
+    Ok(Value::List(values))
 }
 
 /// Handle exotic Python leaves (datetime, date, UUID, Enum, dataclass) natively
-/// without crossing into orjson. Falls back to `TypeError` for unsupported types,
-/// matching orjson's default rejection behavior.
+/// without crossing into orjson. Anything else becomes `<unsupported: T>`.
+///
+/// Every probe looks at the object's *type*, never the instance: an instance
+/// lookup would run an arbitrary `__getattr__` — Django's `LazyObject`
+/// evaluates itself, an ORM proxy may hit the database — for every unsupported
+/// object that reaches the renderer.
 fn convert_exotic_leaf(
     obj: &Bound<'_, PyAny>,
     depth: usize,
     containers: &mut ContainerStack,
 ) -> PyResult<Value> {
-    // Enum: has a `.value` attribute and its type's `__class__` has `__members__`.
-    // Detect via getattr("value") + checking the *type* has __members__ (Enum
-    // metaclass marker). This avoids misdetecting objects that happen to have a
-    // `value` attribute but aren't enums.
-    if obj.hasattr("value")? && obj.get_type().hasattr("__members__")? {
+    let type_object = obj.get_type();
+
+    // Enum: the EnumType metaclass exposes `__members__` on the class; the
+    // member's payload is its `.value`.
+    if type_object.hasattr("__members__")? {
         let value = obj.getattr("value")?;
         // Recurse with depth + 1 like every other container path: an enum whose
         // `.value` cycles back (e.g. a member whose `_value_` is itself) would
@@ -652,67 +747,65 @@ fn convert_exotic_leaf(
         return convert_py_value_inner(&value, depth + 1, containers);
     }
 
-    // datetime.datetime / datetime.date: have an .isoformat() method.
-    // (datetime is a subclass of date, so both are covered.)
-    if obj.hasattr("isoformat")? {
+    // datetime.datetime / datetime.date / datetime.time: `isoformat()` gives
+    // the ISO 8601 text. (datetime is a subclass of date, so both are covered.)
+    if type_object.hasattr("isoformat")? {
         let iso = obj.call_method0("isoformat")?;
-        let s = iso.extract::<&str>()?.to_owned();
-        return Ok(Value::String(s));
+        return Ok(Value::String(string_to_owned(iso.cast::<PyString>()?)));
     }
 
     // uuid.UUID: has both .hex and .int attributes; str() gives canonical form.
-    if obj.hasattr("hex")? && obj.hasattr("int")? {
-        // Verify it's actually from the uuid module to avoid misdetecting objects
-        // that happen to have both attributes.
-        let type_name = obj
-            .get_type()
-            .name()
-            .map(|n| n.to_string())
-            .unwrap_or_default();
-        if type_name == "UUID" {
-            let s = obj.str()?.to_str()?.to_owned();
-            return Ok(Value::String(s));
-        }
+    // The type name check avoids misdetecting objects that happen to have both.
+    if type_object.hasattr("hex")? && type_object.hasattr("int")? && type_name(obj) == "UUID" {
+        return Ok(Value::String(string_to_owned(&obj.str()?)));
     }
 
     // dataclass: use dataclasses.fields() rather than __dict__, so slots=True
     // dataclasses and inherited fields follow Python's canonical field order.
-    if obj.hasattr("__dataclass_fields__")? {
-        let dataclasses = obj.py().import("dataclasses")?;
-        let fields = dataclasses.call_method1("fields", (obj,))?;
-        let fields = fields.cast::<PyTuple>()?;
-        let container_id = enter_container(obj, containers)?;
-        let mut entries = Vec::with_capacity(fields.len());
-        for field in fields.iter() {
-            let key = field.getattr("name")?.extract::<String>()?;
-            let value = obj.getattr(key.as_str())?;
-            entries.push((key, convert_py_value_inner(&value, depth + 1, containers)?));
-        }
+    if type_object.hasattr("__dataclass_fields__")? {
+        let Some(container_id) = enter_container(obj, containers) else {
+            return Ok(marker("cycle", obj));
+        };
+        let result = convert_dataclass(obj, depth, containers);
         leave_container(container_id, containers);
-        return Ok(Value::Map(entries));
+        return result;
     }
 
-    // Unsupported type — raise TypeError, matching orjson's rejection of
-    // Decimal/bytes/bytearray/set/frozenset/timedelta/Path/etc.
-    let type_name = obj
-        .get_type()
-        .name()
-        .map(|n| n.to_string())
-        .unwrap_or_else(|_| "unknown".to_owned());
-    Err(PyTypeError::new_err(format!(
-        "Object of type {type_name} is not serializable"
-    )))
+    // Unsupported type (Decimal/bytes/set/timedelta/Path/request objects/...):
+    // a type marker, never `str()`/`repr()`, so nothing the object holds —
+    // headers, cookies, bodies — can leak into the log line.
+    Ok(marker("unsupported", obj))
 }
 
-fn enter_container(obj: &Bound<'_, PyAny>, containers: &mut ContainerStack) -> PyResult<usize> {
+fn convert_dataclass(
+    obj: &Bound<'_, PyAny>,
+    depth: usize,
+    containers: &mut ContainerStack,
+) -> PyResult<Value> {
+    let dataclasses = obj.py().import("dataclasses")?;
+    let fields = dataclasses.call_method1("fields", (obj,))?;
+    let fields = fields.cast::<PyTuple>()?;
+    let mut entries = Vec::with_capacity(fields.len());
+    for field in fields.iter() {
+        let key = field.getattr("name")?.extract::<String>()?;
+        let value = obj.getattr(key.as_str())?;
+        entries.push((key, convert_py_value_inner(&value, depth + 1, containers)?));
+    }
+    Ok(Value::Map(entries))
+}
+
+/// Push `obj` onto the container stack, or return `None` when it is already on
+/// the current path (a cycle). Every `Some` must be paired with
+/// [`leave_container`] before the caller returns, including on error paths,
+/// so a recovered failure cannot leave a stale entry that later reports a
+/// false cycle.
+fn enter_container(obj: &Bound<'_, PyAny>, containers: &mut ContainerStack) -> Option<usize> {
     let container_id = obj.as_ptr() as usize;
     if containers.contains(&container_id) {
-        return Err(PyValueError::new_err(
-            "cycle detected while converting Python value",
-        ));
+        return None;
     }
     containers.push(container_id);
-    Ok(container_id)
+    Some(container_id)
 }
 
 fn leave_container(container_id: usize, containers: &mut ContainerStack) {

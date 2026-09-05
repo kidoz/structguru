@@ -64,25 +64,95 @@ def test_native_conversion_stats_for_realistic_record() -> None:
     assert rust._conversion_stats(record) == {"nodes": 14, "max_depth": 4}
 
 
-def test_native_rejects_unsupported_objects() -> None:
-    # Genuinely unserializable types raise TypeError, matching the orjson
-    # rejection contract for bytes/set/Decimal/etc. (no orjson in the path now).
-    for unsupported in (object(), b"bytes", {1, 2}, frozenset({3})):
-        with pytest.raises(TypeError):
-            rust._convert_value_debug(unsupported)
+def test_native_replaces_unsupported_objects_with_marker() -> None:
+    # A value the renderer cannot represent becomes a type marker — never
+    # str()/repr(), which could leak what the object holds — instead of a
+    # TypeError that would lose the whole record.
+    import decimal
+    import pathlib
+
+    unsupported: tuple[object, ...] = (
+        object(),
+        b"bytes",
+        {1, 2},
+        frozenset({3}),
+        decimal.Decimal("1.5"),
+        pathlib.Path("/tmp/secret-name"),
+    )
+    for value in unsupported:
+        assert rust._convert_value_debug(value) == f"<unsupported: {type(value).__name__}>"
 
 
-def test_native_cyclic_enum_value_raises_not_aborts() -> None:
-    # An enum whose .value cycles back to itself must hit the recursion-depth
-    # guard and raise cleanly, not recurse forever into a process abort.
+def test_native_replaces_unsupported_objects_inside_containers() -> None:
+    value = {"a": [1, object(), {"b": (object(),)}], "c": {"d": b"x"}}
+
+    assert rust._convert_value_debug(value) == {
+        "a": [1, "<unsupported: object>", {"b": ["<unsupported: object>"]}],
+        "c": {"d": "<unsupported: bytes>"},
+    }
+
+
+def test_native_failing_conversion_collapses_to_marker() -> None:
+    # A duck-typed leaf whose own conversion raises must not surface as an
+    # exception from the log call; it falls back like any unsupported value.
+    class BrokenClock:
+        def isoformat(self) -> str:
+            raise RuntimeError("clock unavailable")
+
+    assert rust._convert_value_debug(BrokenClock()) == "<unsupported: BrokenClock>"
+
+
+def test_native_dataclass_field_failure_collapses_to_marker() -> None:
+    from dataclasses import dataclass
+
+    @dataclass
+    class Broken:
+        x: int
+
+        def __getattribute__(self, name: str) -> object:
+            if name == "x":
+                raise RuntimeError("no x")
+            return super().__getattribute__(name)
+
+    assert rust._convert_value_debug(Broken(1)) == "<unsupported: Broken>"
+
+
+def test_native_never_probes_instance_attributes() -> None:
+    # Type detection must look at the class only: an instance ``__getattr__``
+    # (Django's LazyObject, ORM proxies) could run arbitrary code — or a
+    # database query — for every unsupported object that reaches a log call.
+    probed: list[str] = []
+
+    class Lazy:
+        def __getattr__(self, name: str) -> object:
+            probed.append(name)
+            raise RuntimeError("must not be evaluated")
+
+    assert rust._convert_value_debug(Lazy()) == "<unsupported: Lazy>"
+    assert probed == []
+
+
+def test_native_propagates_non_exception_base_exceptions() -> None:
+    # Recovery is scoped to ``Exception``: a KeyboardInterrupt or SystemExit
+    # raised by a conversion still reaches the caller.
+    class Interrupting:
+        def isoformat(self) -> str:
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        rust._convert_value_debug(Interrupting())
+
+
+def test_native_cyclic_enum_value_hits_depth_marker_not_abort() -> None:
+    # An enum whose .value cycles back to itself must hit the depth guard and
+    # yield the bounded marker, not recurse forever into a process abort.
     import enum
 
     class Cyclic(enum.Enum):
         A = 1
 
     Cyclic.A._value_ = Cyclic.A  # .value now returns the member itself
-    with pytest.raises((RecursionError, ValueError)):
-        rust._convert_value_debug(Cyclic.A)
+    assert rust._convert_value_debug(Cyclic.A) == "<max depth exceeded>"
 
 
 def test_native_converts_datetime_without_orjson() -> None:
@@ -151,22 +221,60 @@ def test_native_converts_slots_dataclass_without_orjson() -> None:
     assert rust._convert_value_debug(Point(3, 4)) == {"x": 3, "y": 4}
 
 
-def test_native_rejects_non_string_map_keys() -> None:
-    with pytest.raises(TypeError, match="map keys must be strings"):
-        rust._convert_value_debug({1: "one"})
+def test_native_converts_non_string_map_keys() -> None:
+    import datetime as dt
+    import enum
+
+    class Color(enum.Enum):
+        RED = "red"
+
+    value = {
+        2: "int",
+        None: "none",
+        True: "bool",
+        1.5: "float",
+        2**70: "big",
+        Color.RED: "enum",
+        dt.date(2026, 1, 2): "date",
+        ("t",): "tuple",
+    }
+
+    assert rust._convert_value_debug(value) == {
+        "2": "int",
+        "null": "none",
+        "true": "bool",
+        "1.5": "float",
+        "1180591620717411303424": "big",
+        "red": "enum",
+        "2026-01-02": "date",
+        "<unsupported: tuple>": "tuple",
+    }
 
 
-def test_native_rejects_integer_overflow() -> None:
-    with pytest.raises(OverflowError, match="i64"):
-        rust._convert_value_debug(2**100)
+def test_native_converts_integer_overflow_losslessly() -> None:
+    assert rust._convert_value_debug(2**100) == 2**100
+    assert rust._convert_value_debug({"n": -(2**70)}) == {"n": -(2**70)}
 
 
-def test_native_rejects_cycles() -> None:
+def test_native_integer_over_str_digit_limit_falls_back_to_marker() -> None:
+    import sys
+
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(640)
+    try:
+        assert rust._convert_value_debug(10**5000) == "<unsupported: int>"
+    finally:
+        sys.set_int_max_str_digits(previous)
+
+
+def test_native_replaces_cycles_with_marker() -> None:
     values: list[object] = []
     values.append(values)
+    mapping: dict[str, object] = {"ok": 1}
+    mapping["self"] = mapping
 
-    with pytest.raises(ValueError, match="cycle detected"):
-        rust._convert_value_debug(values)
+    assert rust._convert_value_debug(values) == ["<cycle: list>"]
+    assert rust._convert_value_debug(mapping) == {"ok": 1, "self": "<cycle: dict>"}
 
 
 def test_native_shared_references_are_not_cycles() -> None:
@@ -178,6 +286,29 @@ def test_native_shared_references_are_not_cycles() -> None:
         {"x": 1},
         {"n": [{"x": 1}]},
     ]
+
+
+def test_native_depth_limit_yields_marker() -> None:
+    deep: object = "leaf"
+    for _ in range(70):
+        deep = [deep]
+
+    converted = rust._convert_value_debug(deep)
+    levels = 0
+    while isinstance(converted, list):
+        converted = converted[0]
+        levels += 1
+    assert levels == 64
+    assert converted == "<max depth exceeded>"
+
+
+def test_native_lone_surrogates_are_replaced_not_rejected() -> None:
+    converted = rust._convert_value_debug("a\udcffb")
+    assert converted.startswith("a") and converted.endswith("b")
+    assert "\udcff" not in converted and "\ufffd" in converted
+
+    key = next(iter(rust._convert_value_debug({"k\udcff": 1})))
+    assert key.startswith("k") and "\udcff" not in key
 
 
 @pytest.mark.parametrize(
@@ -206,24 +337,21 @@ def test_native_json_render_matches_orjson_serializer(value: object) -> None:
     assert rust._render_json_debug(value) == orjson_serializer(value)
 
 
-def test_native_json_render_rejects_unsupported_objects() -> None:
-    with pytest.raises(TypeError):
-        rust._render_json_debug(object())
+def test_native_json_render_replaces_unsupported_objects() -> None:
+    assert rust._render_json_debug({"o": object()}) == '{"o":"<unsupported: object>"}'
 
 
-def test_native_json_render_rejects_non_string_map_keys() -> None:
-    with pytest.raises(TypeError, match="map keys must be strings"):
-        rust._render_json_debug({1: "one"})
+def test_native_json_render_converts_non_string_map_keys() -> None:
+    assert rust._render_json_debug({1: "one", None: 2}) == '{"1":"one","null":2}'
 
 
-def test_native_json_render_rejects_integer_overflow() -> None:
-    with pytest.raises(OverflowError, match="i64"):
-        rust._render_json_debug(2**100)
+def test_native_json_render_emits_big_integers_as_numbers() -> None:
+    assert rust._render_json_debug(2**100) == str(2**100)
+    assert rust._render_json_debug({"n": -(2**70)}) == f'{{"n":{-(2**70)}}}'
 
 
-def test_native_json_render_rejects_cycles() -> None:
+def test_native_json_render_replaces_cycles() -> None:
     values: list[object] = []
     values.append(values)
 
-    with pytest.raises(ValueError, match="cycle detected"):
-        rust._render_json_debug(values)
+    assert rust._render_json_debug(values) == '["<cycle: list>"]'
