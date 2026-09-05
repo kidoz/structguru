@@ -144,3 +144,60 @@ class TestStructguruMiddleware:
 
         output = buf.getvalue()
         assert "42" in output
+
+
+class TestErrorLoggingThroughBridge:
+    def test_log_response_with_request_extra_is_kept(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # django.utils.log.log_response() attaches the raw request object as
+        # extra["request"] on every HTTP error. The stdlib bridge must keep the
+        # event — with a marker in the request's place — instead of falling
+        # back to a "--- Logging error ---" diagnostic.
+        pytest.importorskip("django")
+        from django.conf import settings
+        from django.core.handlers.wsgi import WSGIRequest
+        from django.http import HttpResponse
+        from django.utils.log import log_response
+
+        from structguru import _runtime
+        from structguru.integrations.stdlib import install_stdlib_bridge
+
+        if not settings.configured:
+            settings.configure(DEFAULT_CHARSET="utf-8")
+        _runtime.configure(service="repro", target="memory", level="INFO")
+        install_stdlib_bridge(level="INFO")
+        request = WSGIRequest(
+            {
+                "REQUEST_METHOD": "GET",
+                "PATH_INFO": "/repro",
+                "wsgi.input": io.BytesIO(),
+                "wsgi.url_scheme": "http",
+                "SERVER_NAME": "localhost",
+                "SERVER_PORT": "80",
+            }
+        )
+
+        try:
+            raise RuntimeError("synthetic application failure")
+        except RuntimeError as exc:
+            log_response(
+                "%s: %s",
+                "Internal Server Error",
+                request.path,
+                response=HttpResponse(status=500),
+                request=request,
+                exception=exc,
+            )
+        _runtime.flush_native()
+        lines = _runtime.drain_messages()
+
+        assert len(lines) == 1
+        rec = json.loads(lines[0])
+        assert rec["logger"] == "django.request"
+        assert rec["level"] == "ERROR"
+        assert rec["status_code"] == 500
+        assert rec["message"] == "Internal Server Error: /repro"
+        assert rec["request"] == "<unsupported: WSGIRequest>"
+        assert "RuntimeError: synthetic application failure" in rec["exception"]
+        assert "Logging error" not in capsys.readouterr().err

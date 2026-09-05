@@ -104,6 +104,12 @@ class StructguruHandler(logging.Handler):
     ``exc_info`` and ``stack_info`` are carried through. The already-formatted
     message is passed verbatim (no brace re-formatting), so literal ``{...}`` in
     a message is never misinterpreted.
+
+    An ``extra=`` value the native renderer cannot represent — Django's
+    ``log_response()`` attaches the raw request as ``extra["request"]``, for
+    example — is replaced by a ``<unsupported: WSGIRequest>`` marker rather than
+    failing the record, at any nesting depth. The record and its ``extra``
+    objects are never modified, so later handlers still see the originals.
     """
 
     def __init__(self, level: int = logging.NOTSET) -> None:

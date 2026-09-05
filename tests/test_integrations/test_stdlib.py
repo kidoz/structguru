@@ -600,3 +600,85 @@ def test_uninstall_restores_raw_root_delivery(native_memory: None, clean_root: N
 
     # Back to the pre-bridge contract: the sink sees the unrendered message.
     assert seen == ["raw again"]
+
+
+@pytest.mark.parametrize("raise_exceptions", [True, False])
+def test_bridge_keeps_record_with_unsupported_extra(
+    native_memory: None,
+    clean_root: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    raise_exceptions: bool,
+) -> None:
+    # Django's log_response() attaches the raw request as extra["request"].
+    # The event must ship with a marker in its place, not fall back to a
+    # "--- Logging error ---" diagnostic — regardless of logging.raiseExceptions.
+    monkeypatch.setattr(logging, "raiseExceptions", raise_exceptions)
+    install_stdlib_bridge(level="DEBUG")
+    try:
+        raise RuntimeError("synthetic application failure")
+    except RuntimeError:
+        logging.getLogger("web.request").error(
+            "%s: %s",
+            "Internal Server Error",
+            "/repro",
+            exc_info=True,
+            extra={"status_code": 500, "request": object()},
+        )
+
+    records = _records()
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["logger"] == "web.request"
+    assert rec["level"] == "ERROR"
+    assert rec["message"] == "Internal Server Error: /repro"
+    assert rec["status_code"] == 500
+    assert rec["request"] == "<unsupported: object>"
+    assert "RuntimeError: synthetic application failure" in rec["exception"]
+    assert "Logging error" not in capsys.readouterr().err
+
+
+def test_bridge_keeps_record_with_nested_and_cyclic_extras(
+    native_memory: None, clean_root: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install_stdlib_bridge(level="DEBUG")
+    loop: dict[str, object] = {"n": 1}
+    loop["self"] = loop
+    logging.getLogger("svc").warning(
+        "nested",
+        extra={
+            "ctx": {"obj": object(), "items": [1, (object(),)]},
+            "loop": loop,
+            "counts": {200: 3},
+        },
+    )
+
+    rec = _records()[-1]
+    assert rec["ctx"] == {"obj": "<unsupported: object>", "items": [1, ["<unsupported: object>"]]}
+    assert rec["loop"] == {"n": 1, "self": "<cycle: dict>"}
+    assert rec["counts"] == {"200": 3}
+    assert "Logging error" not in capsys.readouterr().err
+
+
+def test_bridge_leaves_record_and_extras_untouched(native_memory: None, clean_root: None) -> None:
+    # Other handlers may need the original objects: the bridge converts a copy
+    # and never rewrites the record or the caller's containers.
+    seen: list[logging.LogRecord] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            seen.append(record)
+
+    install_stdlib_bridge(level="DEBUG")
+    logging.getLogger().addHandler(Capture())  # runs after the bridge
+    request = object()
+    ctx: dict[str, object] = {"obj": request, "items": [request]}
+    logging.getLogger("svc").info("m", extra={"request": request, "ctx": ctx})
+
+    rec = _records()[-1]
+    assert rec["request"] == "<unsupported: object>"
+    assert rec["ctx"] == {"obj": "<unsupported: object>", "items": ["<unsupported: object>"]}
+    assert seen[0].request is request  # type: ignore[attr-defined]
+    assert seen[0].ctx is ctx  # type: ignore[attr-defined]
+    assert ctx["obj"] is request
+    assert ctx["items"] == [request]
