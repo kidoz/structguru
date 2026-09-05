@@ -4,6 +4,32 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] - 2026-09-05
+
+### Fixed
+
+- `stack_info` text is now redacted like every other field. The `stack` value
+  was written to JSON and console output verbatim, so anything sensitive in a
+  captured frame bypassed both `sensitive_patterns` and `sensitive_keys`.
+  Pattern redaction now runs over the stack text, and listing `stack` in
+  `sensitive_keys` replaces the whole value with `[REDACTED]`.
+- Callable-sink lifecycle operations no longer deadlock or return early. A sink
+  callback that called `shutdown()` or `disable()` while another thread was
+  inside `configure()`, `logger.remove()`, `stop()`, or `shutdown()` deadlocked
+  both threads; `flush()` or `disable()` racing such a callback returned before
+  it had finished; and `logger.remove()` returned while a record from a retired
+  queue generation was still being delivered to the removed sink. Retired
+  generations now stay tracked until drained, waiting happens outside the state
+  lock, and a callback never waits on its own worker.
+- The Celery hook binds the running task's `task_id` / `task_name` after the
+  propagated context instead of before it, so a task launched from inside
+  another task no longer reports the parent's identity. Correlation fields such
+  as `request_id` still propagate.
+- `SentryProcessor` no longer forwards the raw `exc_info` object in breadcrumb
+  data, the `structlog_event` extra, or tags. The SDK serializes arbitrary
+  objects, so an exception message containing a secret bypassed redaction on
+  those paths. The raw exception is now used only for `capture_exception`.
+
 ## [1.2.0] - 2026-08-27
 
 ### Added
