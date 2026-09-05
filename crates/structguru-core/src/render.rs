@@ -183,21 +183,22 @@ fn redact_patterns(value: &mut Value, patterns: &[RedactionPattern], replacement
     }
 }
 
-fn redact_message(
-    message: &str,
+fn redact_text(
+    key: &str,
+    text: &str,
     sensitive_keys: Option<&Vec<String>>,
     sensitive_patterns: Option<&[RedactionPattern]>,
     pattern_replacement: Option<&str>,
 ) -> String {
-    let message_is_sensitive = match sensitive_keys {
-        Some(custom) => is_sensitive("message", custom),
-        None => is_sensitive("message", DEFAULT_SENSITIVE_KEYS),
+    let key_is_sensitive = match sensitive_keys {
+        Some(custom) => is_sensitive(key, custom),
+        None => is_sensitive(key, DEFAULT_SENSITIVE_KEYS),
     };
-    if message_is_sensitive {
+    if key_is_sensitive {
         return REDACTED.to_owned();
     }
 
-    let mut value = Value::String(message.to_owned());
+    let mut value = Value::String(text.to_owned());
     if let Some(patterns) = sensitive_patterns {
         redact_patterns(
             &mut value,
@@ -206,7 +207,7 @@ fn redact_message(
         );
     }
     let Value::String(redacted) = value else {
-        unreachable!("message redaction preserves the string value variant");
+        unreachable!("text redaction preserves the string value variant");
     };
     redacted
 }
@@ -238,7 +239,8 @@ pub fn render_line(
     sensitive_patterns: Option<&[RedactionPattern]>,
     pattern_replacement: Option<&str>,
 ) -> Result<String, serde_json::Error> {
-    let redacted_message = redact_message(
+    let redacted_message = redact_text(
+        "message",
         message,
         sensitive_keys.as_ref(),
         sensitive_patterns,
@@ -285,7 +287,14 @@ pub fn render_line(
     // "stack" sits between "service" and "message": StackInfoRenderer runs
     // after add_service and before EventRenamer in the shared chain.
     if let Some(stack) = stack {
-        upsert(&mut entries, "stack", Value::String(stack.to_owned()));
+        let redacted_stack = redact_text(
+            "stack",
+            stack,
+            sensitive_keys.as_ref(),
+            sensitive_patterns,
+            pattern_replacement,
+        );
+        upsert(&mut entries, "stack", Value::String(redacted_stack));
     }
     upsert(&mut entries, "message", Value::String(redacted_message));
 
@@ -380,7 +389,8 @@ pub fn render_line_console(
     pattern_replacement: Option<&str>,
     stack: Option<&str>,
 ) -> String {
-    let redacted_message = redact_message(
+    let redacted_message = redact_text(
+        "message",
         message,
         sensitive_keys.as_ref(),
         sensitive_patterns,
@@ -440,8 +450,15 @@ pub fn render_line_console(
     let _ = (logger, service);
 
     if let Some(stack) = stack {
+        let redacted_stack = redact_text(
+            "stack",
+            stack,
+            sensitive_keys.as_ref(),
+            sensitive_patterns,
+            pattern_replacement,
+        );
         out.push('\n');
-        out.push_str(stack);
+        out.push_str(&redacted_stack);
     }
     out
 }
@@ -517,6 +534,47 @@ mod tests {
             line,
             r#"{"id":1,"logger":"l","level":"INFO","severity":6,"timestamp":"TS","service":"svc","stack":"Stack (most recent call last):\n  frame","message":"m"}"#,
         );
+    }
+
+    #[test]
+    fn stack_redaction_applies_patterns_and_custom_keys_in_both_formats() {
+        let patterns = vec![RedactionPattern::linear(r"(token=)\w+").unwrap()];
+        for keys in [None, Some(vec!["STACK".to_owned()])] {
+            let expected = if keys.is_some() {
+                "[REDACTED]"
+            } else {
+                "frame\ntoken=[MASKED]"
+            };
+            let json = render_line(
+                vec![],
+                "l",
+                "info",
+                "svc",
+                "trace",
+                "TS",
+                Some("frame\ntoken=REVIEW_SENTINEL"),
+                keys.clone(),
+                Some(&patterns),
+                Some("$1[MASKED]"),
+            )
+            .unwrap();
+            let record: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(record["stack"], expected);
+            let console = render_line_console(
+                vec![],
+                "l",
+                "info",
+                "svc",
+                "trace",
+                false,
+                "TS",
+                keys,
+                Some(&patterns),
+                Some("$1[MASKED]"),
+                Some("frame\ntoken=REVIEW_SENTINEL"),
+            );
+            assert_eq!(console, format!("TS [INFO    ] trace\n{expected}"));
+        }
     }
 
     #[test]

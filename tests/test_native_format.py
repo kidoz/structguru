@@ -27,6 +27,29 @@ def _drain_last_line() -> str:
     return _runtime.drain_messages()[-1].rstrip("\n")
 
 
+@pytest.mark.parametrize("fmt", ["json", "console"])
+@pytest.mark.parametrize("redact_key", [False, True])
+@pytest.mark.parametrize("backtracking", [False, True])
+def test_stack_is_redacted(fmt: str, redact_key: bool, backtracking: bool) -> None:
+    _runtime.configure(
+        target="memory",
+        format=fmt,
+        colors=False,
+        sensitive_keys=["STACK"] if redact_key else None,
+        sensitive_patterns=[r"(?<=token=)\w+" if backtracking else r"(token=)\w+"],
+        pattern_replacement="[MASKED]" if backtracking else "$1[MASKED]",
+        allow_backtracking_patterns=backtracking,
+    )
+    structguru.logger.info("trace", stack_info="frame\ntoken=REVIEW_SENTINEL")
+    line = _drain_last_line()
+    expected = "[REDACTED]" if redact_key else "frame\ntoken=[MASKED]"
+    assert "REVIEW_SENTINEL" not in line
+    if fmt == "json":
+        assert json.loads(line)["stack"] == expected
+    else:
+        assert line.endswith("\n" + expected)
+
+
 # -- acceptance --------------------------------------------------------------
 
 
