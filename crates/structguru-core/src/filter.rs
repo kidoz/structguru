@@ -8,8 +8,6 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use rand::random;
-
 /// Outcome of a pre-render filter check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
@@ -71,7 +69,7 @@ impl RecordFilter for Sampler {
         if self.rate <= 0.0 {
             return Decision::Drop;
         }
-        if random::<f64>() < self.rate {
+        if fastrand::f64() < self.rate {
             Decision::Keep
         } else {
             Decision::Drop

@@ -38,11 +38,8 @@ regex = { version = "1", default-features = false, features = ["std", "unicode"]
 # Backtracking engine for opt-in look-around/backreference redaction patterns
 # (`allow_backtracking_patterns=True`); never used unless explicitly requested.
 fancy-regex = { version = "0.19", default-features = false, features = ["std", "unicode"] }
-# Only `rand::random` is used (sampling filter); `thread_rng` pulls in the
-# std/sys_rng machinery it needs.
-rand = { version = "0.10", default-features = false, features = [
-    "std",
-    "std_rng",
-    "thread_rng",
-] }
+# Only a per-thread `f64` draw is needed (sampling filter). fastrand's WyRand
+# generator has no transitive dependencies on the wheel targets, unlike rand's
+# ChaCha-based thread RNG.
+fastrand = { version = "2.5" }
 structguru-core = { path = "crates/structguru-core" }
