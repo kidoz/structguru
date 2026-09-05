@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- A field value the native renderer cannot represent no longer loses the whole
+  record. `logger.info(..., path=Path("/tmp"))` raised `TypeError` from the
+  logging call, and a stdlib record carrying such a value in `extra=` — Django's
+  `log_response()` attaches the raw `WSGIRequest` as `extra["request"]` on every
+  HTTP error — went to `Handler.handleError()` as a `--- Logging error ---`
+  diagnostic instead of the JSON event. The value is now replaced at the
+  rendering boundary, at any nesting depth, by a marker that names the type
+  only (`<unsupported: WSGIRequest>`, `<cycle: dict>`, `<max depth exceeded>`),
+  so the message, level, other fields, and the exception traceback are kept.
+  `str()`/`repr()` are never called on an arbitrary object, and markers are
+  redacted like any other string. A conversion that raises — a duck-typed
+  `isoformat()`, a dataclass field access — falls back the same way; only
+  `KeyboardInterrupt` and `SystemExit` still propagate. Integers outside the
+  64-bit range are now written losslessly as JSON numbers, non-string mapping
+  keys are rendered as strings (`{200: 3}` becomes `{"200": 3}`), and text
+  with unpaired surrogates is written with U+FFFD instead of rejected.
+- `Enum`, `datetime`, `UUID`, and dataclass detection now inspects the class
+  rather than the instance, so an object with a lazy `__getattr__` (Django's
+  `LazyObject`, ORM proxies) is no longer evaluated as a side effect of being
+  logged.
+- A value reachable twice on different paths — the same dict in two list
+  slots — was reported as a cycle by release builds, because the cycle
+  tracker's pop lived inside a `debug_assert_eq!` that release builds compile
+  out. Repeated references now convert as ordinary data.
+
 ## [1.2.2] - 2026-09-06
 
 ### Changed

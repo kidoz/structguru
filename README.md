@@ -271,6 +271,23 @@ natively, off-thread. It is auto-enabled at import time. The runtime does not de
 exotic values (`datetime`, `UUID`, `Enum`, dataclasses) are converted natively
 in Rust.
 
+A field value the renderer cannot represent never fails the record. It is
+replaced by a marker so the message, level, remaining fields, and exception
+traceback still ship:
+
+- `<unsupported: WSGIRequest>` for any other object (`Decimal`, `bytes`, `set`,
+  `Path`, request objects, ...). The marker names the type only: structguru
+  never calls `str()`/`repr()` on an arbitrary object or reads its attributes,
+  so nothing it holds can leak into a log line.
+- `<cycle: dict>` for a container that refers back to itself.
+- `<max depth exceeded>` beyond 64 levels of nesting.
+
+Integers outside the 64-bit range are written as JSON numbers, non-string
+mapping keys are rendered as strings (`{200: 3}` becomes `{"200": 3}`), and
+unpaired surrogates in text become U+FFFD. Markers are redacted like any other
+string. The policy applies to native `logger` fields and to `extra=` fields
+bridged from the standard library alike.
+
 ```python
 import structguru
 
