@@ -92,7 +92,7 @@ class TestSetupCeleryLogging:
 
     def test_context_propagation_via_headers(self) -> None:
         clear_contextvars()
-        bind_contextvars(request_id="req-999")
+        bind_contextvars(request_id="req-999", task_id="parent-id", task_name="parent-task")
 
         handlers: dict[str, Any] = {}
 
@@ -129,3 +129,15 @@ class TestSetupCeleryLogging:
 
         assert "structguru_context" in task_headers
         assert task_headers["structguru_context"]["request_id"] == "req-999"
+
+        child = MagicMock()
+        child.name = "child-task"
+        child.request = task_headers
+        handlers["task_prerun"](task_id="child-id", task=child)
+        assert get_contextvars() == {
+            "request_id": "req-999",
+            "task_id": "child-id",
+            "task_name": "child-task",
+        }
+        handlers["task_postrun"]()
+        assert get_contextvars() == {}

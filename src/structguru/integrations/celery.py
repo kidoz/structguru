@@ -67,11 +67,6 @@ def setup_celery_logging(
     ) -> None:
         clear_contextvars()
 
-        if task_id:
-            bind_contextvars(task_id=task_id)
-        if task:
-            bind_contextvars(task_name=task.name)
-
         if propagate_context and task:
             request = task.request
             ctx: dict[str, Any] | None = None
@@ -81,6 +76,13 @@ def setup_celery_logging(
                 ctx = request.get(_HEADER_KEY)
             if isinstance(ctx, dict):
                 bind_contextvars(**ctx)
+
+        # A producer may itself be a task. Its propagated identity must never
+        # replace the consumer's identity; correlation fields still propagate.
+        if task_id:
+            bind_contextvars(task_id=task_id)
+        if task:
+            bind_contextvars(task_name=task.name)
 
     @task_postrun.connect(weak=False)  # type: ignore[untyped-decorator]
     def _clear_context(**_kw: Any) -> None:
