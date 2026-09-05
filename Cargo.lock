@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "structguru-core"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "fancy-regex",
  "fastrand",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "structguru-py"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "pyo3",
  "regex",
