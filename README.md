@@ -97,16 +97,16 @@ logger.info("User {user_id} logged in", user_id=42, ip="10.0.0.1")
 
 ```python
 log = logger.bind(request_id="abc-123", user="alice")
-log.info("Processing request")   # includes request_id and user
-log.info("Request complete")     # same context carried through
+log.info("Processing request")  # includes request_id and user
+log.info("Request complete")  # same context carried through
 ```
 
 ### Request-scoped context
 
 ```python
 with logger.contextualize(request_id="abc-123"):
-    logger.info("Handling request")   # includes request_id
-    do_work()                         # any logging inside also gets request_id
+    logger.info("Handling request")  # includes request_id
+    do_work()  # any logging inside also gets request_id
 # request_id removed automatically
 ```
 
@@ -156,7 +156,7 @@ been written:
 import structguru
 
 logger.info("checkpoint")
-structguru.flush()   # returns once the line has reached its sink
+structguru.flush()  # returns once the line has reached its sink
 ```
 
 ### Console vs JSON output
@@ -410,6 +410,7 @@ bridge = install_stdlib_bridge(
 )
 
 import logging
+
 logging.getLogger("sqlalchemy.engine").info("SELECT 1")
 # → {"logger":"sqlalchemy.engine","level":"INFO",...,"message":"SELECT 1"}
 ```

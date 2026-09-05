@@ -63,6 +63,7 @@ from structguru.integrations.stdlib import install_stdlib_bridge
 install_stdlib_bridge(level="INFO", suppress_loggers=("urllib3", "botocore"))
 
 import logging
+
 logging.getLogger("sqlalchemy.engine").info("SELECT 1")
 # -> {"logger":"sqlalchemy.engine","level":"INFO",...,"message":"SELECT 1"}
 ```
@@ -174,6 +175,7 @@ from structguru.integrations.asgi import StructguruMiddleware
 app = FastAPI()
 app.add_middleware(StructguruMiddleware)
 
+
 @app.get("/")
 async def root():
     return {"message": "Hello World"}
@@ -185,9 +187,9 @@ async def root():
 app.add_middleware(
     StructguruMiddleware,
     request_id_header="X-Correlation-ID",  # Custom header to read (case-insensitive)
-    logger_name="api.http",                # Custom logger name
-    log_request=True,                      # Log a summary line on completion
-    extract_headers=["x-tenant-id", "x-device-id"], # Additional headers to extract and bind
+    logger_name="api.http",  # Custom logger name
+    log_request=True,  # Log a summary line on completion
+    extract_headers=["x-tenant-id", "x-device-id"],  # Additional headers to extract and bind
 )
 ```
 
@@ -350,10 +352,10 @@ from structguru import configure
 from structguru.integrations.sentry import SentryProcessor
 
 sentry_processor = SentryProcessor(
-    event_level=logging.ERROR,       # ERROR+ is eligible for capture as an event
-    breadcrumb_level=logging.INFO,   # INFO+ is recorded as a breadcrumb
-    tag_keys=frozenset({"service"}), # Keys to set as Sentry tags
-    capture_messages=True,           # Also capture ERROR+ logs without an exception
+    event_level=logging.ERROR,  # ERROR+ is eligible for capture as an event
+    breadcrumb_level=logging.INFO,  # INFO+ is recorded as a breadcrumb
+    tag_keys=frozenset({"service"}),  # Keys to set as Sentry tags
+    capture_messages=True,  # Also capture ERROR+ logs without an exception
 )
 
 configure(sentry_processor=sentry_processor)

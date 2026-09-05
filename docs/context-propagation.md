@@ -26,11 +26,11 @@ from structguru import (
     get_contextvars,
 )
 
-bind_contextvars(request_id="req-1")   # merge, persists until cleared
-with bound_contextvars(user_id="u-1"): # merge, restored on exit
+bind_contextvars(request_id="req-1")  # merge, persists until cleared
+with bound_contextvars(user_id="u-1"):  # merge, restored on exit
     ...
-get_contextvars()                      # snapshot of what is bound now
-clear_contextvars()                    # reset to empty
+get_contextvars()  # snapshot of what is bound now
+clear_contextvars()  # reset to empty
 ```
 
 `get_contextvars` returns a shallow snapshot: changing the returned dictionary
@@ -93,7 +93,7 @@ from structguru import get_contextvars
 def call_streaming_handler(handler, request):
     result = handler(request)
     snapshot = get_contextvars()  # includes anything the handler bound eagerly
-    clear_contextvars()           # nothing leaks while the iterator sits unconsumed
+    clear_contextvars()  # nothing leaks while the iterator sits unconsumed
     return _wrap_iterator(result, snapshot)
 
 
@@ -132,10 +132,10 @@ shared fixture in `tests/conftest.py` restores logging state only.
 
 ```python
 stream = handler(...)
-assert "request_id" not in get_contextvars()   # not bound yet
+assert "request_id" not in get_contextvars()  # not bound yet
 it = iter(stream)
 assert next(it) == "item-0"
 assert get_contextvars()["request_id"] == "req-1"
-it.close()                                     # cleanup runs here, not at GC
+it.close()  # cleanup runs here, not at GC
 assert "request_id" not in get_contextvars()
 ```
