@@ -12,7 +12,6 @@ import atexit
 import importlib
 import io
 import json
-import math
 import os
 import sys
 import threading
@@ -21,10 +20,11 @@ import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from types import TracebackType
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, Unpack, cast
 
 from structguru._native_dispatch import CallableSinkDispatcher
-from structguru._native_env import native_config_from_env
+from structguru._native_env import autoconfigure_from_env
+from structguru.settings import Settings, SettingsChanges, _level_number
 
 # method name -> numeric level (mirrors logging levels; TRACE/SUCCESS folded)
 _LEVEL_NUM: dict[str, int] = {
@@ -39,10 +39,6 @@ _LEVEL_NUM: dict[str, int] = {
     "critical": 50,
     "fatal": 50,
 }
-
-# Supported output renderers. ``format=`` on configure() accepts these names;
-# the choice maps to the ``console`` runtime flag until more than two formats exist.
-_FORMATS: tuple[str, ...] = ("json", "console")
 
 
 class _NativeWriter(Protocol):
@@ -186,14 +182,13 @@ def is_available() -> bool:
 
 # -- native configuration ---------------------------------------------------
 
-_DEFAULT_QUEUE_MAXSIZE = 8192
-
 
 @dataclass(frozen=True)
 class _RuntimeState:
     """Coherent native configuration snapshot used for one complete log call."""
 
     writer: _NativeWriter
+    settings: Settings
     service: str
     maxsize: int
     target: str
@@ -253,14 +248,16 @@ def is_below_level(method: str, runtime: _RuntimeState | None = None) -> bool:
     return state is None or _LEVEL_NUM.get(method, _LEVEL_NUM["info"]) < state.level_threshold
 
 
-def set_level(level: str) -> None:
+def set_level(level: str | int) -> None:
     """Adjust the native level threshold at runtime (per-process)."""
     global _runtime, _lifecycle_generation
+    threshold = _level_number(level)
     with _state_lock:
         if _runtime is not None:
             _runtime = replace(
                 _runtime,
-                level_threshold=_LEVEL_NUM.get(level.lower(), _LEVEL_NUM["info"]),
+                level_threshold=threshold,
+                settings=replace(_runtime.settings, level=level),
             )
             _lifecycle_generation += 1
 
@@ -481,43 +478,19 @@ def _drop_positions(formatted: traceback.TracebackException) -> None:
         pending.extend(current.exceptions or ())
 
 
-def configure(
-    *,
-    service: str = "app",
-    maxsize: int = _DEFAULT_QUEUE_MAXSIZE,
-    target: str = "stdout",
-    overflow: str = "block",
-    level: str = "INFO",
-    otel: bool = False,
-    sensitive_keys: list[str] | None = None,
-    sensitive_patterns: list[str] | None = None,
-    pattern_replacement: str = "[REDACTED]",
-    allow_backtracking_patterns: bool = False,
-    sample_rate: float = 1.0,
-    sample_max_level: str | None = None,
-    rate_limit_max: int | None = None,
-    rate_limit_period: float = 60.0,
-    metric_processor: Any = None,
-    sentry_processor: Any = None,
-    structured_exceptions: bool = False,
-    exception_include_locals: bool = False,
-    exception_max_frames: int = 20,
-    exception_max_local_repr: int = 200,
-    exception_carets: bool = True,
-    format: str = "json",
-    colors: bool | None = None,
-    file_path: str | None = None,
-    file_max_bytes: int = 50 * 1024 * 1024,
-    file_backup_count: int = 5,
-    also_stdout: bool = False,
-    callable_sinks: list[Callable[[str], None]] | None = None,
-    callable_queue_maxsize: int = 1024,
-    stream_sink: Any = None,
-) -> None:
+def configure(settings: Settings | None = None, **changes: Unpack[SettingsChanges]) -> None:
     r"""Configure the native renderer and background writer.
 
+    Replace configuration using defaults, environment, then explicit keywords.
+    A supplied ``Settings`` object replaces the defaults/environment base. Keyword
+    overrides still win, including explicit ``None``. Omitted settings do not carry
+    over from a previous call; use :func:`update` for incremental changes.
+    Invalid settings leave the active runtime untouched. Reconfiguration replaces
+    writers and resets sampling/rate-limit state. Sinks added with ``logger.add()``
+    survive reconfiguration and are not included in :func:`get_config`.
+
     ``target`` selects the background writer's sink: ``"stdout"`` (default,
-    12-factor) or ``"memory"`` (records lines for inspection/tests).
+    12-factor), ``"null"`` (discard), or ``"memory"`` (inspection/tests).
 
     The output queue is bounded to 8192 records by default. ``overflow`` governs a
     full queue: ``"block"`` (default, no loss — the caller waits with the GIL
@@ -594,60 +567,91 @@ def configure(
     buffered records are flushed on exit and the background writer is respawned in
     forked children (gunicorn/celery prefork) instead of deadlocking.
     """
+    resolved = (
+        Settings.from_env(**changes)
+        if settings is None
+        else Settings.from_mapping({**settings.to_mapping(), **changes})
+    )
+    _apply_settings(resolved)
+
+
+def get_config() -> Settings | None:
+    """Return the active settings, or ``None`` when logging is shut down.
+
+    Collections are immutable snapshots; streams and callbacks retain their
+    identity. Settings describe configured options, not queue contents, filter
+    counters, stdlib bridge state, or sinks registered with ``logger.add()``.
+    """
+    state = current_runtime()
+    return state.settings if state is not None else None
+
+
+def update(**changes: Unpack[SettingsChanges]) -> None:
+    """Change active settings without rereading environment variables.
+
+    An empty update does nothing. A level-only update preserves writers, queues,
+    and rate-limit state. Other updates replace runtime resources as configure
+    does, retaining omitted options. Raise ``RuntimeError`` when unconfigured.
+    """
+    global _runtime, _lifecycle_generation
+    while True:
+        state = current_runtime()
+        if state is None:
+            msg = "logging is not configured; call configure() before update()"
+            raise RuntimeError(msg)
+        settings = Settings.from_mapping({**state.settings.to_mapping(), **changes})
+        if not changes:
+            return
+        if changes.keys() <= {"level"}:
+            with _state_lock:
+                if _runtime is not state:
+                    continue
+                _runtime = replace(
+                    state, settings=settings, level_threshold=_level_number(settings.level)
+                )
+                _lifecycle_generation += 1
+                return
+        if _apply_settings(settings, expected=state):
+            return
+
+
+def _apply_settings(settings: Settings, *, expected: _RuntimeState | None = None) -> bool:
+    """Build resources before publishing a snapshot; retry stale incremental updates."""
+    service = settings.service
+    maxsize = settings.maxsize
+    target = settings.target
+    overflow = settings.overflow
+    level = settings.level
+    otel = settings.otel
+    sensitive_keys = settings.sensitive_keys
+    sensitive_patterns = settings.sensitive_patterns
+    pattern_replacement = settings.pattern_replacement
+    allow_backtracking_patterns = settings.allow_backtracking_patterns
+    sample_rate = settings.sample_rate
+    sample_max_level = settings.sample_max_level
+    rate_limit_max = settings.rate_limit_max
+    rate_limit_period = settings.rate_limit_period
+    metric_processor = settings.metric_processor
+    sentry_processor = settings.sentry_processor
+    structured_exceptions = settings.structured_exceptions
+    exception_include_locals = settings.exception_include_locals
+    exception_max_frames = settings.exception_max_frames
+    exception_max_local_repr = settings.exception_max_local_repr
+    exception_carets = settings.exception_carets
+    format = settings.format
+    colors = settings.colors
+    file_path = settings.file_path
+    file_max_bytes = settings.file_max_bytes
+    file_backup_count = settings.file_backup_count
+    also_stdout = settings.also_stdout
+    callable_sinks = settings.callable_sinks
+    callable_queue_maxsize = settings.callable_queue_maxsize
+    stream_sink = settings.stream_sink
+
     global _runtime, _lifecycle_generation
     if _RUST is None:
         msg = "native extension is not available"
         raise RuntimeError(msg)
-    if maxsize < 0:
-        msg = f"maxsize must be >= 0, got {maxsize}"
-        raise ValueError(msg)
-    if target not in ("stdout", "null", "memory"):
-        msg = f"target must be 'stdout', 'null', or 'memory', not {target!r}"
-        raise ValueError(msg)
-    if overflow not in ("block", "drop"):
-        msg = f"overflow must be 'block' or 'drop', not {overflow!r}"
-        raise ValueError(msg)
-    if not math.isfinite(sample_rate) or not 0.0 <= sample_rate <= 1.0:
-        msg = f"sample_rate must be between 0.0 and 1.0, got {sample_rate}"
-        raise ValueError(msg)
-    if rate_limit_max is not None and rate_limit_max < 1:
-        msg = f"rate_limit_max must be >= 1, got {rate_limit_max}"
-        raise ValueError(msg)
-    if not math.isfinite(rate_limit_period) or rate_limit_period <= 0:
-        msg = f"rate_limit_period must be > 0, got {rate_limit_period}"
-        raise ValueError(msg)
-    if sample_max_level is not None and sample_max_level.lower() not in _LEVEL_NUM:
-        msg = f"sample_max_level must be a known level name, got {sample_max_level!r}"
-        raise ValueError(msg)
-    if metric_processor is not None and not callable(metric_processor):
-        msg = f"metric_processor must be callable, got {type(metric_processor)!r}"
-        raise TypeError(msg)
-    if sentry_processor is not None and not callable(sentry_processor):
-        msg = f"sentry_processor must be callable, got {type(sentry_processor)!r}"
-        raise TypeError(msg)
-    if callable_queue_maxsize < 1:
-        msg = f"callable_queue_maxsize must be >= 1, got {callable_queue_maxsize}"
-        raise ValueError(msg)
-    if file_max_bytes < 0:
-        msg = f"file_max_bytes must be >= 0, got {file_max_bytes}"
-        raise ValueError(msg)
-    if file_backup_count < 0:
-        msg = f"file_backup_count must be >= 0, got {file_backup_count}"
-        raise ValueError(msg)
-    if exception_max_frames < 0:
-        msg = f"exception_max_frames must be >= 0, got {exception_max_frames}"
-        raise ValueError(msg)
-    if exception_max_local_repr < 0:
-        msg = f"exception_max_local_repr must be >= 0, got {exception_max_local_repr}"
-        raise ValueError(msg)
-
-    # Resolve the output format. ``format=`` is the canonical selector
-    # ("json" | "console"); ``format="json"`` is the default.
-    resolved_format = format
-    if resolved_format not in _FORMATS:
-        msg = f"format must be one of {_FORMATS}, got {resolved_format!r}"
-        raise ValueError(msg)
-
     # Validate regex patterns against Rust's engine before enabling. Rust's
     # `regex` guarantees linear-time matching and therefore rejects
     # backreferences and look-around; fail loudly at setup time — redaction
@@ -706,15 +710,8 @@ def configure(
         if new_filter.is_empty():
             new_filter = None
 
-    # Validate callable sinks: each must be callable.
-    if callable_sinks is not None:
-        for i, fn in enumerate(callable_sinks):
-            if not callable(fn):
-                msg = f"callable_sinks[{i}] must be callable, got {type(fn)!r}"
-                raise TypeError(msg)
-
     # Resolve console/colors from the chosen format.
-    new_console = resolved_format == "console"
+    new_console = format == "console"
     new_colors = colors if colors is not None else (sys.stdout.isatty() if new_console else False)
 
     # Construct every fallible native resource before touching the active
@@ -729,6 +726,7 @@ def configure(
     )
     new_runtime = _RuntimeState(
         writer=new_writer,
+        settings=settings,
         service=service,
         maxsize=maxsize,
         target=target,
@@ -737,7 +735,7 @@ def configure(
         file_max_bytes=file_max_bytes,
         file_backup_count=file_backup_count,
         also_stdout=also_stdout,
-        level_threshold=_LEVEL_NUM.get(level.lower(), _LEVEL_NUM["info"]),
+        level_threshold=_level_number(level),
         otel=otel,
         sensitive_keys=list(sensitive_keys) if sensitive_keys is not None else None,
         sensitive_patterns=new_patterns,
@@ -755,9 +753,14 @@ def configure(
         fused_json=not new_console and sentry_processor is None and stream_sink is None,
     )
     with _state_lock:
+        stale = expected is not None and _runtime is not expected
         old_runtime = _runtime
-        _runtime = new_runtime
-        _lifecycle_generation += 1
+        if not stale:
+            _runtime = new_runtime
+            _lifecycle_generation += 1
+    if stale:
+        new_writer.close()
+        return False
 
     # Closing a retired writer is safe while an in-flight logger still owns its
     # snapshot: the Rust writer rejects a late enqueue instead of invalidating the
@@ -767,6 +770,7 @@ def configure(
     _sync_callable_dispatcher()
 
     _register_lifecycle_hooks()
+    return True
 
 
 def _sync_callable_dispatcher() -> None:
@@ -1059,22 +1063,19 @@ def writer_metrics() -> dict[str, Any] | None:
 def _maybe_configure_from_env() -> None:
     """Auto-configure native mode at import time (the default since v1.0).
 
-    Set ``STRUCTGURU_LEGACY=1`` to skip import-time configuration. Logging then
-    remains disabled until :func:`configure` is called.
+    Set ``STRUCTGURU_AUTOCONFIGURE=0`` to skip import-time configuration. Logging
+    then remains disabled until :func:`configure` is called. The legacy inverse
+    switch ``STRUCTGURU_LEGACY=1`` remains supported when the new switch is absent.
 
-    Honors ``LOG_LEVEL``, ``STRUCTGURU_SERVICE``, ``STRUCTGURU_NATIVE_TARGET``,
-    ``STRUCTGURU_NATIVE_SAMPLE_RATE`` (float 0.0–1.0), and
-    ``STRUCTGURU_NATIVE_RATE_LIMIT`` (``"MAX/PERIOD"`` seconds, e.g. ``"100/60"``).
+    :meth:`Settings.from_env` resolves native options and compatibility aliases.
     A missing extension or invalid environment value raises during import so the
     application cannot start with its only logging path silently disabled.
     """
     if _RUST is None:
         msg = "structguru requires its native extension, but structguru._rust is unavailable"
         raise RuntimeError(msg)
-    kwargs = native_config_from_env(os.environ)
-    if kwargs is None:
-        return
-    configure(**kwargs)
+    if autoconfigure_from_env(os.environ):
+        configure()
 
 
 _maybe_configure_from_env()
