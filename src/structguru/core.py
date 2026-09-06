@@ -218,7 +218,7 @@ def _detach_from_root(handler: logging.Handler) -> None:
     """Undo :func:`_attach_to_root` (a no-op when the handler is not attached)."""
     with _root_attach_lock:
         _root_sinks.discard(handler)
-    logging.getLogger().removeHandler(handler)
+        logging.getLogger().removeHandler(handler)
 
 
 def _set_stdlib_bridge_active(active: bool) -> None:
@@ -234,11 +234,11 @@ def _set_stdlib_bridge_active(active: bool) -> None:
     with _root_attach_lock:
         _stdlib_bridge_active = active
         affected = list(_root_sinks)
-    for handler in affected:
-        if active:
-            root.removeHandler(handler)
-        else:
-            root.addHandler(handler)
+        for handler in affected:
+            if active:
+                root.removeHandler(handler)
+            else:
+                root.addHandler(handler)
 
 
 class _SinkLock:

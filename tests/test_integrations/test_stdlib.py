@@ -53,6 +53,53 @@ def _records() -> list[dict]:
     return [json.loads(line) for line in _runtime.drain_messages()]
 
 
+def test_bridge_uninstall_cannot_reattach_removed_sink(
+    native_memory: None,
+    clean_root: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: list[str] = []
+    log = Logger()
+    token = log.add(received.append)
+    handler = log._handlers[token]
+    bridge = install_stdlib_bridge()
+    root = logging.getLogger()
+    original_add = root.addHandler
+    entered, release, removing = threading.Event(), threading.Event(), threading.Event()
+
+    def delayed_add(candidate: logging.Handler) -> None:
+        if candidate is handler:
+            entered.set()
+            assert release.wait(3)
+        original_add(candidate)
+
+    monkeypatch.setattr(root, "addHandler", delayed_add)
+    uninstall = threading.Thread(target=uninstall_stdlib_bridge, args=(bridge,))
+
+    def remove() -> None:
+        removing.set()
+        log.remove(token)
+
+    remover = threading.Thread(target=remove)
+    uninstall.start()
+    try:
+        assert entered.wait(2)
+        remover.start()
+        assert removing.wait(2)
+        # On the old implementation removal completes during the paused attach.
+        remover.join(0.1)
+    finally:
+        release.set()
+        uninstall.join(3)
+        if remover.ident is not None:
+            remover.join(3)
+    assert not uninstall.is_alive()
+    assert not remover.is_alive()
+    assert handler not in root.handlers
+    logging.getLogger("foreign").warning("after removal")
+    assert received == []
+
+
 def test_bridge_routes_stdlib_record(native_memory: None, clean_root: None) -> None:
     # Use a synthetic logger name, not a real library's (e.g. "sqlalchemy.engine"):
     # a library imported elsewhere in the session may set propagate=False on its
