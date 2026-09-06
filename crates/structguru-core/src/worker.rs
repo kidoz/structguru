@@ -830,8 +830,10 @@ fn worker_loop(shared: Arc<WorkerShared>, mut sink: Box<dyn StringSink>) {
         if result.is_ok() {
             state.counters.written += 1;
         }
-        state.in_flight -= 1;
-        let should_flush = state.queue.is_empty() && state.in_flight == 0;
+        let should_flush = state.queue.is_empty();
+        if !should_flush {
+            state.in_flight -= 1;
+        }
         drop(state);
 
         if should_flush {
@@ -842,6 +844,7 @@ fn worker_loop(shared: Arc<WorkerShared>, mut sink: Box<dyn StringSink>) {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.counters.sink_errors += errors;
+            state.in_flight -= 1;
             shared.drained.notify_all();
         }
     }
@@ -851,6 +854,60 @@ fn worker_loop(shared: Arc<WorkerShared>, mut sink: Box<dyn StringSink>) {
 mod tests {
     use super::*;
     use std::io::{Error, ErrorKind, Result as IoResult};
+
+    #[test]
+    fn flush_waits_for_sink_flush_and_error_accounting() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct BlockingFlush {
+            entered: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+            first: bool,
+        }
+        impl StringSink for BlockingFlush {
+            fn write(&mut self, _: String) -> Result<(), SinkError> {
+                Ok(())
+            }
+            fn flush(&mut self) -> Result<(), SinkError> {
+                if !self.first {
+                    return Ok(());
+                }
+                self.first = false;
+                self.entered.send(()).unwrap();
+                self.release.recv_timeout(Duration::from_secs(3)).unwrap();
+                Err(SinkError::new("flush failure"))
+            }
+        }
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let writer = Arc::new(StringWriter::with_boxed_sink(
+            8,
+            Box::new(BlockingFlush {
+                entered: entered_tx,
+                release: release_rx,
+                first: true,
+            }),
+        ));
+        writer.try_enqueue("record".into()).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let in_flight = writer.metrics().in_flight;
+        let (done_tx, done_rx) = mpsc::channel();
+        let flushing = Arc::clone(&writer);
+        let thread = thread::spawn(move || {
+            flushing.flush();
+            done_tx.send(()).unwrap();
+        });
+        let returned_early = done_rx.recv_timeout(Duration::from_millis(50)).is_ok();
+        release_tx.send(()).unwrap();
+        thread.join().unwrap();
+        let errors = writer.metrics().sink_errors;
+        writer.close();
+        assert!(!returned_early, "flush returned before the sink finished");
+        assert_eq!(in_flight, 1);
+        assert_eq!(errors, 1);
+    }
 
     #[derive(Clone, Default)]
     struct SharedWriter {
