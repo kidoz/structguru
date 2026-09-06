@@ -53,6 +53,17 @@ def _records() -> list[dict]:
     return [json.loads(line) for line in _runtime.drain_messages()]
 
 
+@pytest.mark.parametrize("message", ["literal {stack_info}", "literal {missing}", "{{json}}"])
+def test_bridge_preserves_braces_with_stack_info(native_memory: None, message: str) -> None:
+    record = logging.LogRecord(
+        "foreign", logging.ERROR, "", 1, message, (), None, sinfo="STACK CONTENT"
+    )
+    StructguruHandler().handle(record)
+    rendered = _records()[0]
+    assert rendered["message"] == message
+    assert rendered["stack"] == "STACK CONTENT"
+
+
 def test_bridge_uninstall_cannot_reattach_removed_sink(
     native_memory: None,
     clean_root: None,

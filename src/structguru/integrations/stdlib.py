@@ -135,7 +135,9 @@ class StructguruHandler(logging.Handler):
                 target = target.opt(exception=record.exc_info)
             emit_method = getattr(target, _method_for_level(record.levelno))
             if record.stack_info:
-                emit_method(record.getMessage(), stack_info=record.stack_info)
+                # A positional placeholder preserves the already-formatted text,
+                # even when stack_info introduces keyword arguments to _log().
+                emit_method("{}", record.getMessage(), stack_info=record.stack_info)
             else:
                 emit_method(record.getMessage())
         except Exception:  # noqa: BLE001 - a logging handler must never raise
