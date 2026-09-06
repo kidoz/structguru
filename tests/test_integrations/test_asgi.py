@@ -11,6 +11,53 @@ from conftest import configure
 from structguru.integrations.asgi import StructguruMiddleware
 
 
+@pytest.mark.parametrize("header", ["request_id", "method", "path", "client_ip"])
+async def test_extracted_headers_cannot_replace_request_metadata(header: str) -> None:
+    from structguru._contextvars import get_contextvars
+
+    contexts = []
+    sent = []
+
+    async def app(scope: dict, receive: Any, send: Any) -> None:
+        contexts.append(get_contextvars())
+        await _simple_app(scope, receive, send)
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b""}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    middleware = StructguruMiddleware(app, extract_headers=[header, "x-extra"])
+    await middleware(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/real",
+            "client": ("127.0.0.1", 1),
+            "headers": [
+                (b"x-request-id", b"real-id"),
+                (header.encode(), b"spoofed"),
+                (b"x-extra", b"retained"),
+            ],
+        },
+        receive,
+        send,
+    )
+    assert contexts == [
+        {
+            "request_id": "real-id",
+            "method": "GET",
+            "path": "/real",
+            "client_ip": "127.0.0.1",
+            "x-extra": "retained",
+        }
+    ]
+    assert sent[0]["status"] == 200
+    assert (b"x-request-id", b"real-id") in sent[0]["headers"]
+    assert get_contextvars() == {}
+
+
 async def _simple_app(scope: dict, receive: Any, send: Any) -> None:
     await send({"type": "http.response.start", "status": 200, "headers": []})
     await send({"type": "http.response.body", "body": b"OK"})

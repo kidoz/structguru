@@ -36,6 +36,8 @@ class StructguruMiddleware:
         If ``True``, log a summary line when each request completes.
     extract_headers:
         A list of additional header names to extract and bind to the context.
+        Request metadata takes precedence if an extracted name collides with
+        ``request_id``, ``method``, ``path``, or ``client_ip``.
     """
 
     def __init__(
@@ -89,13 +91,10 @@ class StructguruMiddleware:
                 except UnicodeDecodeError:
                     pass
 
-        bind_contextvars(
-            request_id=request_id,
-            method=method,
-            path=path,
-            client_ip=client_ip,
-            **extra_context,
-        )
+        # Request metadata takes precedence over extracted headers with the same
+        # name; headers must neither override it nor prevent request execution.
+        extra_context.update(request_id=request_id, method=method, path=path, client_ip=client_ip)
+        bind_contextvars(**extra_context)
 
         log = Logger(name=self.logger_name)
         start_time = time.perf_counter()
