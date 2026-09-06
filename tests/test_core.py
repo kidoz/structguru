@@ -63,7 +63,7 @@ class TestSafeFormat:
         assert consumed_keys == set()
 
     def test_type_error_returns_original(self) -> None:
-        with pytest.warns(UserWarning, match="Unknown conversion"):
+        with pytest.warns(UserWarning, match="ValueError"):
             msg, consumed_keys = _safe_format("{0!x}", (42,), {})
         assert msg == "{0!x}"
         assert consumed_keys == set()
@@ -489,3 +489,33 @@ class TestLoggerCatch:
         with pytest.raises(RuntimeError):
             with log.catch(ValueError):
                 raise RuntimeError("boom")
+
+
+@pytest.mark.parametrize("message", ["DEMO_VALUE {missing}", "DEMO_VALUE {unclosed"])
+def test_format_warning_omits_sensitive_template_and_source(message: str) -> None:
+    buf = io.StringIO()
+    _runtime.configure(stream_sink=buf, target="null", sensitive_patterns=["DEMO_VALUE"])
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        Logger().info(message, unused=True)
+    assert len(captured) == 1
+    warning = captured[0]
+    formatted = warnings.formatwarning(
+        warning.message,
+        warning.category,
+        warning.filename,
+        warning.lineno,
+    )
+    assert "DEMO_VALUE" not in formatted
+    assert "DEMO_VALUE" not in buf.getvalue()
+    assert "[REDACTED]" in buf.getvalue()
+
+
+def test_format_warning_omits_exception_details() -> None:
+    class BadFormat:
+        def __format__(self, spec: str) -> str:
+            raise ValueError("DEMO_VALUE")
+
+    with pytest.warns(UserWarning) as captured:
+        _safe_format("{}", (BadFormat(),), {})
+    assert "DEMO_VALUE" not in str(captured[0].message)

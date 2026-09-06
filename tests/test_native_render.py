@@ -409,3 +409,27 @@ def test_standalone_native_renderer_snapshots_top_level_fields() -> None:
     assert _runtime._RUST is not None
     record = json.loads(_runtime._RUST.render_line(fields, "test", "info", "svc", "message"))
     assert record["first"] == "converted" and record["second"] == "retained"
+
+
+@pytest.mark.parametrize(
+    "redaction",
+    [
+        {"sensitive_patterns": ["DEMO_VALUE"]},
+        {"sensitive_keys": ["LOGGER", "SERVICE"]},
+    ],
+)
+@pytest.mark.parametrize("bound_service", [False, True])
+def test_native_metadata_uses_same_redaction_as_user_fields(
+    redaction: dict[str, Any],
+    bound_service: bool,
+) -> None:
+    _runtime.configure(target="memory", service="DEMO_VALUE", **redaction)
+    log = structguru.Logger(name="DEMO_VALUE")
+    if bound_service:
+        log = log.bind(service="DEMO_VALUE")
+    log.info("metadata", value="ordinary")
+    _runtime.flush()
+    record = json.loads(_runtime.drain_messages()[0])
+    assert record["logger"] == "[REDACTED]"
+    assert record["service"] == "[REDACTED]"
+    assert record["message"] == "metadata" and record["level"] == "INFO"

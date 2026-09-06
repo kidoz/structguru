@@ -133,11 +133,14 @@ def _extract_format_keys(msg: str) -> frozenset[str] | Exception:
 
 
 @functools.lru_cache(maxsize=256)
-def _warn_format_failure(msg: str, exc_type_name: str, exc_msg: str) -> None:
+def _warn_format_failure(msg: str, exc_type_name: str) -> None:
     """Emit a ``UserWarning`` at most once per unique (template, error type)."""
     warnings.warn(
-        f"structguru: failed to format log message {msg!r}: {exc_type_name}: {exc_msg}",
-        stacklevel=4,
+        f"structguru: failed to format log message ({exc_type_name}); "
+        "using the unformatted template",
+        # Do not expose the user's source line either: it may contain literals
+        # covered by redaction. The normal record goes through native redaction.
+        stacklevel=2,
     )
 
 
@@ -161,7 +164,7 @@ def _safe_format(
     keys_or_exc = _extract_format_keys(msg)
     if isinstance(keys_or_exc, Exception):
         # Malformed brace syntax — surface it but don't break logging.
-        _warn_format_failure(msg, type(keys_or_exc).__name__, str(keys_or_exc))
+        _warn_format_failure(msg, type(keys_or_exc).__name__)
         return msg, frozenset()
 
     try:
@@ -169,7 +172,7 @@ def _safe_format(
     except (LookupError, AttributeError, TypeError, ValueError) as exc:
         # Template/arg mismatch from user code (missing key, bad attribute,
         # unknown conversion, etc.). Fall back to the raw message.
-        _warn_format_failure(msg, type(exc).__name__, str(exc))
+        _warn_format_failure(msg, type(exc).__name__)
         return msg, frozenset()
 
 

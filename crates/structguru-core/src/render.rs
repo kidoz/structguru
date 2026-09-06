@@ -273,7 +273,17 @@ pub fn render_line(
     // value at its original position — so upsert in place rather than
     // drop-and-append. "service" uses setdefault semantics — a user-provided
     // "service" wins — matching `add_service`.
-    upsert(&mut entries, "logger", Value::String(logger.to_owned()));
+    upsert(
+        &mut entries,
+        "logger",
+        Value::String(redact_text(
+            "logger",
+            logger,
+            sensitive_keys.as_ref(),
+            sensitive_patterns,
+            pattern_replacement,
+        )),
+    );
     upsert(&mut entries, "level", Value::String(canonical));
     upsert(&mut entries, "severity", Value::Int(i64::from(severity)));
     upsert(
@@ -282,7 +292,16 @@ pub fn render_line(
         Value::String(timestamp.to_owned()),
     );
     if !entries.iter().any(|(key, _)| key == "service") {
-        entries.push(("service".to_owned(), Value::String(service.to_owned())));
+        entries.push((
+            "service".to_owned(),
+            Value::String(redact_text(
+                "service",
+                service,
+                sensitive_keys.as_ref(),
+                sensitive_patterns,
+                pattern_replacement,
+            )),
+        ));
     }
     // "stack" sits between "service" and "message": StackInfoRenderer runs
     // after add_service and before EventRenamer in the shared chain.
