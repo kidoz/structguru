@@ -826,10 +826,7 @@ def _atexit_close() -> None:
 
 def _before_fork() -> None:
     """Flush buffered records in the parent before forking."""
-    state = current_runtime()
-    if state is not None:
-        state.writer.flush()
-    _callable_dispatcher.flush()
+    flush()
 
 
 def _after_in_child() -> None:
@@ -1039,10 +1036,12 @@ def flush() -> None:
     Not needed for normal shutdown: :func:`shutdown`, reconfiguration, fork, and
     interpreter exit all drain automatically.
     """
+    # Callbacks may log to the native writer or replace it by reconfiguring.
+    # Drain them first, then flush the resulting runtime's writer.
+    _callable_dispatcher.flush()
     state = current_runtime()
     if state is not None:
         state.writer.flush()
-    _callable_dispatcher.flush()
 
 
 # Pre-1.0.5 name, kept as an alias: `flush` is the public spelling.

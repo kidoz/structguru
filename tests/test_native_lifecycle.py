@@ -8,6 +8,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+from dataclasses import replace
 
 import pytest
 
@@ -18,6 +19,53 @@ pytestmark = pytest.mark.skipif(
     not _runtime.is_available(),
     reason="native extension not built",
 )
+
+
+@pytest.mark.parametrize("operation", ["flush", "before_fork"])
+def test_final_native_drain_includes_callback_logs(
+    operation: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered, release = threading.Event(), threading.Event()
+    order: list[str] = []
+
+    def callback(line: str) -> None:
+        entered.set()
+        assert release.wait(3)
+        structguru.logger.info("callback record")
+        order.append("callback")
+
+    _runtime.configure(target="memory", callable_sinks=[callback])
+    state = _runtime.current_runtime()
+    assert state is not None
+
+    class WriterProbe:
+        def __getattr__(self, name: str):
+            return getattr(state.writer, name)
+
+        def flush(self) -> None:
+            order.append("native flush")
+            state.writer.flush()
+
+    monkeypatch.setattr(_runtime, "_runtime", replace(state, writer=WriterProbe()))
+    structguru.logger.info("outer record")
+    assert entered.wait(2)
+    dispatcher = _runtime._callable_dispatcher
+    original_flush = dispatcher.flush
+
+    def release_and_drain() -> None:
+        release.set()
+        original_flush()
+
+    monkeypatch.setattr(dispatcher, "flush", release_and_drain)
+    try:
+        operation_fn = structguru.flush if operation == "flush" else _runtime._before_fork
+        operation_fn()
+        assert order == ["callback", "native flush"]
+        assert any("callback record" in line for line in state.writer.messages())
+    finally:
+        release.set()
+        _runtime.shutdown()
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
