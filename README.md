@@ -434,6 +434,13 @@ app = FastAPI()
 app.add_middleware(StructguruMiddleware, request_id_header="X-Request-ID")
 ```
 
+### Granian
+
+Route Granian's server logs through `StructguruHandler` using `--log-config`,
+and use `StructguruMiddleware` for ASGI request IDs and structured summaries.
+The [Granian integration guide](docs/integrations.md#granian) includes a complete
+logging dictionary, application and launcher examples, and access-log options.
+
 ### Celery
 
 ```python

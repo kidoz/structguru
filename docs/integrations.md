@@ -200,6 +200,154 @@ app.add_middleware(
 - `client_ip`: The client's IP address.
 - Any headers specified in `extract_headers` will be bound as context variables (e.g. `x-tenant-id`).
 
+## Granian
+
+[Granian](https://github.com/emmett-framework/granian) can route server and
+application logs through the existing `StructguruHandler`. For ASGI applications,
+use `StructguruMiddleware` to add request IDs and structured request summaries.
+This setup was verified with Granian 2.8.2, two workers, and CPython 3.14 on macOS.
+Install Granian and your application framework separately; no structguru extra
+is needed for these two integration modules.
+
+### Logging Configuration
+
+Granian's `_granian` and `granian.access` loggers normally disable propagation,
+so installing a root bridge alone does not capture them. Save the following as
+`logging.json` in your application directory:
+
+```json
+{
+  "version": 1,
+  "disable_existing_loggers": false,
+  "handlers": {
+    "structguru": {
+      "class": "structguru.integrations.stdlib.StructguruHandler"
+    }
+  },
+  "root": {"handlers": ["structguru"], "level": "INFO"},
+  "loggers": {
+    "_granian": {"handlers": [], "level": "INFO", "propagate": true},
+    "granian.access": {"handlers": [], "level": "INFO", "propagate": true}
+  }
+}
+```
+
+This replaces the server loggers' handlers with propagation to a single root
+handler. Structguru renders the records as JSON; no additional JSON formatter
+or `install_stdlib_bridge()` call is needed for this configuration.
+
+### ASGI Application
+
+For example, save this FastAPI application as `app.py`:
+
+```python
+from fastapi import FastAPI
+
+from structguru import logger
+from structguru.integrations.asgi import StructguruMiddleware
+
+api = FastAPI()
+
+
+@api.get("/health")
+async def health():
+    logger.info("Health checked")
+    return {"ok": True}
+
+
+app = StructguruMiddleware(api)
+```
+
+Run it from the directory containing `app.py` and `logging.json`:
+
+```bash
+STRUCTGURU_AUTOCONFIGURE=1 \
+STRUCTGURU_SERVICE=my-api \
+STRUCTGURU_LEVEL=INFO \
+STRUCTGURU_FORMAT=json \
+STRUCTGURU_TARGET=stdout \
+granian --interface asgi --workers 2 --log-level info \
+  --log-config logging.json --no-access-log app:app
+```
+
+Set these environment values before launching Granian so they apply when the
+handler imports structguru in the parent and worker processes. Granian configures
+logging before loading the application and its `--env-files`, so configuring only
+inside `app.py` or relying on those files is too late for initial server logs.
+Select `--interface asgi` explicitly: Granian's default interface is RSGI.
+
+### Request Summaries
+
+Choose which component writes your HTTP request summary:
+
+| Summary source | Granian option | Middleware option | Output |
+| --- | --- | --- | --- |
+| structguru (recommended) | `--no-access-log` | `log_request=True` (default) | Structured request ID, method, path, client IP, duration, status, and outcome |
+| Granian | `--access-log` | `log_request=False` | Access text in the JSON `message`; application logs still receive middleware context |
+
+For the second option, change the application wrapper to:
+
+```python
+app = StructguruMiddleware(api, log_request=False)
+```
+
+Enabling both summary producers yields two records per HTTP request. Granian
+passes its access fields as message-formatting arguments, so the generic handler
+does not turn them into separate `status` or `dt_ms` fields. A JSON access format
+would become a string inside the outer JSON message.
+
+Granian writes HTTP access logs after the middleware has cleared request context.
+Those records therefore do not inherit the middleware's request ID. Use middleware
+summaries for request correlation. Middleware only observes requests that reach
+the application; server-handled traffic, such as direct static-file serving,
+requires separate access-log consideration.
+
+### Python Launcher and Lifecycle
+
+The equivalent programmatic setup uses `log_dictconfig`:
+
+```python
+import json
+from pathlib import Path
+
+from granian import Granian
+from granian.constants import Interfaces
+from granian.log import LogLevels
+
+
+if __name__ == "__main__":
+    Granian(
+        "app:app",
+        interface=Interfaces.ASGI,
+        workers=2,
+        log_level=LogLevels.info,
+        log_dictconfig=json.loads(Path("logging.json").read_text()),
+        log_access=False,
+    ).serve()
+```
+
+Use the same environment settings when starting this launcher. For DEBUG logs,
+set both `STRUCTGURU_LEVEL=DEBUG` and Granian's log level to `debug`; also change
+the JSON root level to `DEBUG` for application stdlib loggers that inherit it.
+Granian applies its log-level option to `_granian` after reading the dictionary.
+Supply complete handler and logger mappings because its configuration merge
+replaces nested sections.
+
+Keep structguru active through server shutdown to capture late Granian messages.
+Use `flush()` for an explicit checkpoint; normal interpreter exit drains the
+writer. Calling `shutdown()` during application lifespan teardown disables
+logging before the server finishes its own shutdown messages.
+
+For additional destinations with this recipe, prefer `configure(file_path=...)`
+or `configure(callable_sinks=[...])`, applying the required settings in each
+process. Direct `StructguruHandler` configuration does not activate the managed
+bridge's suppression of raw `logger.add()` delivery, so combining this recipe
+with `logger.add()` can duplicate third-party records at those sinks. Remember
+that `configure()` replaces the full native configuration.
+
+The ASGI middleware does not support Granian's RSGI interface. For WSGI
+applications, use the existing Flask or Django integration for request context.
+
 ## Celery
 
 `setup_celery_logging` connects to Celery signals to ensure that task context (like `task_id` and `task_name`) is automatically bound to logs within Celery workers.
