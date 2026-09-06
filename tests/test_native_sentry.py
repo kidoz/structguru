@@ -7,6 +7,7 @@ processor invoked per kept record on the caller's thread, mirroring
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -307,3 +308,25 @@ def test_sentry_tags_include_redacted_native_metadata(format: str, override: boo
     assert extras["severity"] == 3
     assert "timestamp" in extras
     assert "DEMO_VALUE" not in str(extras)
+
+
+def test_event_field_does_not_replace_sentry_message() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def hook(_logger: Any, method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+        calls.append(event_dict)
+        return event_dict
+
+    _runtime.configure(service="svc", target="memory", level="DEBUG", sentry_processor=hook)
+    try:
+        structguru.logger.error("actual message", event="custom field", code=7)
+        lines = _drain_all()
+    finally:
+        _runtime.shutdown()
+
+    # The hook's "event" slot is the message; the user's field stays native-only.
+    assert calls[0]["event"] == "actual message"
+    assert calls[0]["code"] == 7
+    rendered = json.loads(lines[0])
+    assert rendered["message"] == "actual message"
+    assert rendered["event"] == "custom field"

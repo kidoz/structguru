@@ -368,7 +368,9 @@ def notify_sentry(
         return
     event_dict: dict[str, Any] = {"event": rendered.get("message", "")}
     for key in (*field_names, "service", "logger", "level", "severity", "timestamp"):
-        if key in rendered:
+        # "event" is the hook's message slot. A user field by that name renders
+        # natively as a field but must not replace the message exported here.
+        if key != "event" and key in rendered:
             event_dict[key] = rendered[key]
     if exc_info is not None:
         event_dict["exc_info"] = exc_info

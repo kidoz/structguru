@@ -19,6 +19,7 @@ All notable changes to this project are documented here. The format is based on
 - `logger.add(level=...)` and the stdlib bridge accept `TRACE`, `SUCCESS`,
   `EXCEPTION`, and `FATAL` like the rest of the library instead of warning and
   falling back to `INFO`.
+- A field named `event` no longer replaces the message exported to Sentry.
 - Structured exception logging tolerates failing exception messages and snapshots
   locals before calling `repr()`. Exception groups preserve nested members,
   frames, and causes, with bounded traversal and native redaction.
