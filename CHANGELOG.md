@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- Frozen `Settings` with mapping/environment constructors, `get_config()`, and
+  incremental `update()`. Existing `configure()` keywords remain accepted through
+  a typed keyword wrapper; a Settings object can also be supplied as the base.
+  Level-only updates preserve writers, buffered records and rate-limit state.
+- `STRUCTGURU_LEVEL`, `STRUCTGURU_TARGET`, `STRUCTGURU_FORMAT`,
+  `STRUCTGURU_SAMPLE_RATE`, `STRUCTGURU_RATE_LIMIT`, and
+  `STRUCTGURU_AUTOCONFIGURE`; existing environment names remain supported.
+
 - `configure(exception_carets=False)` omits the PEP 657 position markers (the
   `~~~^^^` lines under each frame) from formatted tracebacks. CPython computes
   them per frame while formatting, and on 3.11+ they are most of the cost of
@@ -18,6 +26,14 @@ All notable changes to this project are documented here. The format is based on
   the markers.
 
 ### Changed
+
+- Explicit `configure()` calls now layer defaults, supported environment variables,
+  then explicit keywords. Pass `configure(Settings(...))` to ignore the environment.
+  `configure()` still replaces prior settings; `update()` retains omitted options.
+- Native configuration and `set_level()` reject unknown level names, booleans and
+  negative integers with `ValueError`, and accept non-negative integer thresholds.
+  Invalid selected environment values fail import unless autoconfiguration is disabled.
+  Settings also reject invalid scalar types instead of allowing coercion downstream.
 
 - The rotating file sink no longer closes, reopens, and stats the log file
   before every record to detect a rotation by another process. It stats the
