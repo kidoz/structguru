@@ -241,6 +241,36 @@ def _set_stdlib_bridge_active(active: bool) -> None:
             root.addHandler(handler)
 
 
+class _SinkLock:
+    """Shared by logger clones, with synchronization replaced after fork."""
+
+    _instances: weakref.WeakSet[_SinkLock] = weakref.WeakSet()
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        with _root_attach_lock:
+            self._instances.add(self)
+
+    def __enter__(self) -> None:
+        self.lock.acquire()
+
+    def __exit__(self, *args: object) -> None:
+        self.lock.release()
+
+
+def _after_fork() -> None:
+    """Replace locks owned by vanished threads, preserving clone sharing."""
+    global _root_attach_lock, _id_counter_lock
+    _root_attach_lock = threading.Lock()
+    _id_counter_lock = threading.Lock()
+    for owner in list(_SinkLock._instances):
+        owner.lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork)
+
+
 class _Catcher(ContextDecorator):
     """Context manager / decorator returned by :meth:`Logger.catch`."""
 
@@ -312,7 +342,7 @@ class Logger:
 
     _handlers: dict[HandlerId, logging.Handler] = field(default_factory=dict)
     _native_sink_tokens: dict[HandlerId, int] = field(default_factory=dict)
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _lock: _SinkLock = field(default_factory=_SinkLock, repr=False)
 
     # -- context helpers ----------------------------------------------------
 

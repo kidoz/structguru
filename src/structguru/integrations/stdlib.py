@@ -162,6 +162,16 @@ _bridge_lock = threading.RLock()
 _active_bridge: StructguruHandler | None = None
 
 
+def _after_fork() -> None:
+    """Replace bridge synchronization inherited from vanished threads."""
+    global _bridge_lock
+    _bridge_lock = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork)
+
+
 def _apply_existing_logger_policy(
     disable_existing_loggers: bool | None,
 ) -> list[tuple[logging.Logger, bool, bool]]:

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import os
 import select
+import subprocess
+import sys
+import textwrap
 import threading
 
 import pytest
@@ -15,6 +18,68 @@ pytestmark = pytest.mark.skipif(
     not _runtime.is_available(),
     reason="native extension not built",
 )
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+@pytest.mark.parametrize("held", ["root", "ids", "logger", "bridge"])
+def test_child_sink_operations_replace_inherited_locks(held: str) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent(f"""
+            import io, os, signal, threading, warnings
+            from structguru import configure, flush, shutdown, core
+            from structguru.integrations import stdlib
+            configure(target='null')
+            log = core.Logger()
+            token = log.add(io.StringIO())
+            clone = log.bind(child=True)
+            bridge = stdlib.install_stdlib_bridge()
+            locks = {{'root': core._root_attach_lock, 'ids': core._id_counter_lock,
+                     'logger': log._lock, 'bridge': stdlib._bridge_lock}}
+            entered, release = threading.Event(), threading.Event()
+            def hold():
+                with locks[{held!r}]:
+                    entered.set()
+                    release.wait()
+            holder = threading.Thread(target=hold)
+            holder.start()
+            assert entered.wait(2)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', DeprecationWarning)
+                pid = os.fork()
+            if pid == 0:
+                signal.signal(signal.SIGALRM, lambda *_: os._exit(42))
+                signal.alarm(3)
+                try:
+                    assert clone._lock is log._lock
+                    clone.remove(token)
+                    stream = io.StringIO()
+                    new_token = log.add(stream)
+                    log.error('child record')
+                    flush()
+                    assert 'child record' in stream.getvalue()
+                    clone.remove(new_token)
+                    stdlib.uninstall_stdlib_bridge(bridge)
+                    shutdown()
+                except BaseException:
+                    os._exit(1)
+                os._exit(0)
+            _, status = os.waitpid(pid, 0)
+            release.set()
+            holder.join(2)
+            stdlib.uninstall_stdlib_bridge(bridge)
+            log.remove(token)
+            shutdown()
+            assert os.waitstatus_to_exitcode(status) == 0, status
+        """),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=8,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_close_drains_buffered_records() -> None:
