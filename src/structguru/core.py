@@ -284,7 +284,9 @@ class _Catcher(ContextDecorator):
     ) -> None:
         self._logger = logger
         self._exception = exception
-        self._level = level
+        if not isinstance(level, str) or level.lower() not in _runtime._LEVEL_NUM:
+            raise ValueError(f"unknown catch level: {level!r}")
+        self._level = level.lower()
         self._message = message
         self._reraise = reraise
 
@@ -392,6 +394,8 @@ class Logger:
         If ``reraise`` is False (the default), the exception is suppressed.
         Decorators support synchronous and coroutine functions; coroutine
         exceptions are handled while awaiting the decorated call.
+        Level names are case-insensitive; unknown names raise ``ValueError``
+        when the catcher is constructed.
         """
         return _Catcher(self, exception, level, message, reraise)
 

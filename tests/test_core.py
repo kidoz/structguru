@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import stat
@@ -20,6 +21,23 @@ from structguru.core import (
     _safe_format,
     _warn_format_failure,
 )
+
+
+@pytest.mark.parametrize("level", ["ERROR", "Error", "error", "EXCEPTION"])
+def test_catch_normalizes_levels_before_filtering(level: str) -> None:
+    stream = io.StringIO()
+    configure(level="ERROR", stream=stream)
+    with Logger().catch(level=level):
+        raise ValueError("caught")
+    record = json.loads(stream.getvalue())
+    assert record["level"] == "ERROR"
+    assert "ValueError: caught" in record["exception"]
+
+
+@pytest.mark.parametrize("level", ["TYPO", "", 40, None])
+def test_catch_rejects_invalid_levels_before_entering(level: object) -> None:
+    with pytest.raises(ValueError, match="catch level"):
+        Logger().catch(level=level)  # type: ignore[arg-type]
 
 
 @pytest.fixture(autouse=True)
