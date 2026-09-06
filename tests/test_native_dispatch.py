@@ -12,6 +12,35 @@ import pytest
 from structguru._native_dispatch import CallableSinkDispatcher, _DispatchChannel, _Record, _Sink
 
 
+@pytest.mark.parametrize("error", ["SystemExit", "KeyboardInterrupt", "BaseException"])
+def test_callback_base_exception_does_not_strand_dispatch(error: str) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent(f"""
+            from structguru import configure, logger, flush, shutdown
+            received = []
+            def failing(line):
+                raise {error}('callback failure')
+            configure(target='null', callable_sinks=[failing, received.append],
+                      callable_queue_maxsize=1)
+            token = logger.add(received.append)
+            logger.info('first')
+            logger.info('second')
+            flush()
+            assert len(received) == 4, received
+            logger.remove(token)
+            shutdown()
+        """),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_close_drains_a_producer_reserved_before_retirement() -> None:
     """A producer acknowledged by the old generation cannot become orphaned."""
     received: list[str] = []

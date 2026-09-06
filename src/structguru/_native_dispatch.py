@@ -139,7 +139,7 @@ class _DispatchChannel:
             for sink in item.sinks:
                 try:
                     sink.callback(item.line)
-                except Exception:  # noqa: BLE001 - sinks must never break logging
+                except BaseException:  # worker callbacks cannot interrupt the caller
                     pass
             with self._condition:
                 self.queue.unfinished_tasks -= 1

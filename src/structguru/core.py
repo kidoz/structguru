@@ -541,6 +541,8 @@ class Logger:
         configured backpressure and flush semantics therefore apply uniformly.
         Logs emitted inside a sink callback reach the native writer but bypass
         all callable/``add()`` sinks to prevent recursive delivery and deadlocks.
+        Callback failures, including ``BaseException`` subclasses, are isolated
+        on the worker so later records and lifecycle operations can complete.
 
         Third-party records arrive raw (unrendered) via the stdlib root logger.
         Install the bridge (``structguru.integrations.stdlib``) to receive them
