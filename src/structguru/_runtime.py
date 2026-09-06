@@ -50,6 +50,20 @@ class _NativeWriter(Protocol):
 
     def enqueue_blocking(self, message: str) -> bool: ...
 
+    def render_enqueue_json(
+        self,
+        fields: dict[str, Any],
+        logger: str,
+        level: str,
+        service: str,
+        message: str,
+        blocking: bool,
+        config: Any = None,
+        sensitive_keys: list[str] | None = None,
+        stack: str | None = None,
+        timestamp: str | None = None,
+    ) -> bool: ...
+
     def flush(self) -> None: ...
 
     def close(self) -> None: ...
@@ -202,6 +216,9 @@ class _RuntimeState:
     stream_sink: Any
     callable_sinks: tuple[Callable[[str], None], ...]
     callable_queue_maxsize: int
+    # True when a record can be rendered and enqueued in one native call: JSON
+    # output with no synchronous stream sink and no Sentry line to hand back.
+    fused_json: bool
 
 
 _state_lock = threading.Lock()
@@ -678,6 +695,7 @@ def configure(
         stream_sink=stream_sink,
         callable_sinks=tuple(callable_sinks or ()),
         callable_queue_maxsize=callable_queue_maxsize,
+        fused_json=not new_console and sentry_processor is None and stream_sink is None,
     )
     with _state_lock:
         old_runtime = _runtime
@@ -833,6 +851,24 @@ def render_and_enqueue(
     """
     state = runtime or current_runtime()
     if _RUST is None or state is None:
+        return None
+    if state.fused_json and _callable_dispatcher.idle():
+        # Common production shape: JSON to the native writer and nothing else
+        # wants the rendered text. Render and enqueue in one call so the line
+        # never becomes a Python string (no PyString build, concat, or re-copy).
+        accepted = state.writer.render_enqueue_json(
+            fields,
+            logger,
+            level,
+            state.service,
+            message,
+            state.overflow == "block",
+            state.redaction_config,
+            state.sensitive_keys,
+            stack,
+        )
+        if not accepted and current_runtime() is state:
+            _note_drop()
         return None
     if state.console:
         if state.redaction_config is not None:

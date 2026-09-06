@@ -76,6 +76,20 @@ fn validate_patterns(patterns: Vec<String>, allow_backtracking: bool) -> PyResul
 /// This is the standalone form: patterns (if any) are recompiled per call. For
 /// the hot path, prefer `render_line_with_config` + `RedactionConfig`, which
 /// compile patterns once at enable time.
+/// Convert a Python field mapping into owned `(key, Value)` entries for the core renderer.
+fn convert_fields(fields: &Bound<'_, PyDict>) -> PyResult<Vec<(String, Value)>> {
+    let mut entries: Vec<(String, Value)> = Vec::with_capacity(fields.len());
+    for (key, value) in fields.iter() {
+        let key = key
+            .cast::<PyString>()
+            .map_err(|_| PyTypeError::new_err("field keys must be strings"))?
+            .to_str()?
+            .to_owned();
+        entries.push((key, convert_py_value(&value)?));
+    }
+    Ok(entries)
+}
+
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (fields, logger, level, service, message, timestamp=None, sensitive_keys=None, sensitive_patterns=None, stack=None, pattern_replacement=None))]
@@ -91,15 +105,7 @@ fn render_line(
     stack: Option<&str>,
     pattern_replacement: Option<&str>,
 ) -> PyResult<String> {
-    let mut entries: Vec<(String, Value)> = Vec::with_capacity(fields.len());
-    for (key, value) in fields.iter() {
-        let key = key
-            .cast::<PyString>()
-            .map_err(|_| PyTypeError::new_err("field keys must be strings"))?
-            .to_str()?
-            .to_owned();
-        entries.push((key, convert_py_value(&value)?));
-    }
+    let entries = convert_fields(fields)?;
     let generated;
     let timestamp = match timestamp {
         Some(value) => value,
@@ -193,15 +199,7 @@ fn render_line_with_config(
     sensitive_keys: Option<Vec<String>>,
     stack: Option<&str>,
 ) -> PyResult<String> {
-    let mut entries: Vec<(String, Value)> = Vec::with_capacity(fields.len());
-    for (key, value) in fields.iter() {
-        let key = key
-            .cast::<PyString>()
-            .map_err(|_| PyTypeError::new_err("field keys must be strings"))?
-            .to_str()?
-            .to_owned();
-        entries.push((key, convert_py_value(&value)?));
-    }
+    let entries = convert_fields(fields)?;
     let generated;
     let timestamp = match timestamp {
         Some(value) => value,
@@ -247,15 +245,7 @@ fn render_line_console(
     stack: Option<&str>,
     pattern_replacement: Option<&str>,
 ) -> PyResult<String> {
-    let mut entries: Vec<(String, Value)> = Vec::with_capacity(fields.len());
-    for (key, value) in fields.iter() {
-        let key = key
-            .cast::<PyString>()
-            .map_err(|_| PyTypeError::new_err("field keys must be strings"))?
-            .to_str()?
-            .to_owned();
-        entries.push((key, convert_py_value(&value)?));
-    }
+    let entries = convert_fields(fields)?;
     let generated;
     let timestamp = match timestamp {
         Some(value) => value,
@@ -308,15 +298,7 @@ fn render_console_with_config(
     sensitive_keys: Option<Vec<String>>,
     stack: Option<&str>,
 ) -> PyResult<String> {
-    let mut entries: Vec<(String, Value)> = Vec::with_capacity(fields.len());
-    for (key, value) in fields.iter() {
-        let key = key
-            .cast::<PyString>()
-            .map_err(|_| PyTypeError::new_err("field keys must be strings"))?
-            .to_str()?
-            .to_owned();
-        entries.push((key, convert_py_value(&value)?));
-    }
+    let entries = convert_fields(fields)?;
     let generated;
     let timestamp = match timestamp {
         Some(value) => value,
@@ -440,6 +422,70 @@ impl NativeStringWriter {
             Ok(()) => true,
             Err(message) => py.detach(|| self.writer.enqueue_blocking(message).is_ok()),
         }
+    }
+
+    /// Render one JSON record and hand it to the writer in a single call.
+    ///
+    /// Renders exactly like `render_line_with_config` (when `config` is given)
+    /// or `render_line` (otherwise), appends the newline, and pushes the line
+    /// into the queue without ever materialising a Python string. `blocking`
+    /// selects `enqueue_blocking` semantics (wait for space with the GIL
+    /// released) over `try_enqueue` (a full queue counts as a drop). Returns
+    /// whether the line was accepted.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (fields, logger, level, service, message, blocking, config=None, sensitive_keys=None, stack=None, timestamp=None))]
+    fn render_enqueue_json(
+        &self,
+        py: Python<'_>,
+        fields: &Bound<'_, PyDict>,
+        logger: &str,
+        level: &str,
+        service: &str,
+        message: &str,
+        blocking: bool,
+        config: Option<&RedactionConfig>,
+        sensitive_keys: Option<Vec<String>>,
+        stack: Option<&str>,
+        timestamp: Option<&str>,
+    ) -> PyResult<bool> {
+        let entries = convert_fields(fields)?;
+        let generated;
+        let timestamp = match timestamp {
+            Some(value) => value,
+            None => {
+                generated = structguru_core::now_iso8601();
+                &generated
+            }
+        };
+        let (patterns, replacement) = match config {
+            Some(config) if !config.patterns.is_empty() => (
+                Some(config.patterns.as_slice()),
+                Some(config.replacement.as_str()),
+            ),
+            Some(config) => (None, Some(config.replacement.as_str())),
+            None => (None, None),
+        };
+        let mut line = structguru_core::render_line(
+            entries,
+            logger,
+            level,
+            service,
+            message,
+            timestamp,
+            stack,
+            sensitive_keys,
+            patterns,
+            replacement,
+        )
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        line.push('\n');
+        if !blocking {
+            return Ok(self.writer.try_enqueue(line).is_ok());
+        }
+        Ok(match self.writer.enqueue_if_space(line) {
+            Ok(()) => true,
+            Err(line) => py.detach(|| self.writer.enqueue_blocking(line).is_ok()),
+        })
     }
 
     fn flush(&self, py: Python<'_>) {
