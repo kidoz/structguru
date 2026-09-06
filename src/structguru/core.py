@@ -14,6 +14,7 @@ A global ``logger`` instance is exported for convenience::
 from __future__ import annotations
 
 import functools
+import inspect
 import itertools
 import json
 import logging
@@ -27,7 +28,7 @@ from collections.abc import Callable, Iterator
 from contextlib import ContextDecorator, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any, Protocol, TypeAlias, TypeVar, cast
 
 from structguru import _runtime
 from structguru._contextvars import bound_contextvars, get_contextvars
@@ -35,7 +36,18 @@ from structguru.config import _to_logging_level
 from structguru.otel import add_otel_context
 
 HandlerId: TypeAlias = int
-Sink: TypeAlias = "str | Path | logging.Handler | Callable[[str], None]"
+
+
+class WritableSink(Protocol):
+    """A text stream accepted by :meth:`Logger.add`."""
+
+    def write(self, message: str, /) -> object:
+        """Write a rendered text record."""
+        ...
+
+
+Sink: TypeAlias = "str | Path | logging.Handler | Callable[[str], None] | WritableSink"
+_F = TypeVar("_F", bound=Callable[..., Any])
 
 
 def _caller_module_name() -> str:
@@ -249,6 +261,19 @@ class _Catcher(ContextDecorator):
     def __enter__(self) -> None:
         pass
 
+    def __call__(self, func: _F) -> _F:
+        """Wrap synchronous calls or the awaited execution of a coroutine."""
+        if inspect.iscoroutinefunction(func):
+
+            @functools.wraps(func)
+            async def wrapped(*args: Any, **kwargs: Any) -> Any:
+                with self._recreate_cm():
+                    return await func(*args, **kwargs)
+                return None
+
+            return cast(_F, wrapped)
+        return super().__call__(func)
+
     def __exit__(
         self,
         exc_type: type[BaseException] | None,
@@ -335,6 +360,8 @@ class Logger:
         the exception details.
 
         If ``reraise`` is False (the default), the exception is suppressed.
+        Decorators support synchronous and coroutine functions; coroutine
+        exceptions are handled while awaiting the decorated call.
         """
         return _Catcher(self, exception, level, message, reraise)
 

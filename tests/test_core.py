@@ -519,3 +519,102 @@ def test_format_warning_omits_exception_details() -> None:
     with pytest.warns(UserWarning) as captured:
         _safe_format("{}", (BadFormat(),), {})
     assert "DEMO_VALUE" not in str(captured[0].message)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reraise", [False, True])
+async def test_catch_coroutine_logs_awaited_exceptions(reraise: bool) -> None:
+    import asyncio
+    import inspect
+
+    buf = io.StringIO()
+    configure(stream=buf)
+    log = Logger()
+    failure = ValueError("async failure")
+
+    @log.catch(ValueError, reraise=reraise)
+    async def operation(fail: bool) -> int:
+        await asyncio.sleep(0)
+        if fail:
+            raise failure
+        return 42
+
+    assert inspect.iscoroutinefunction(operation)
+    assert operation.__name__ == "operation"
+    assert await operation(False) == 42
+    if reraise:
+        with pytest.raises(ValueError) as captured:
+            await operation(True)
+        assert captured.value is failure
+    else:
+        assert await operation(True) is None
+    assert "async failure" in buf.getvalue()
+    assert len(buf.getvalue().splitlines()) == 1
+
+
+@pytest.mark.asyncio
+async def test_catch_coroutine_preserves_unmatched_errors_and_cancellation() -> None:
+    import asyncio
+
+    buf = io.StringIO()
+    configure(stream=buf)
+
+    @Logger().catch(ValueError)
+    async def operation(error: BaseException) -> None:
+        raise error
+
+    for error in (RuntimeError("unmatched"), asyncio.CancelledError()):
+        with pytest.raises(type(error)) as captured:
+            await operation(error)
+        assert captured.value is error
+    assert not buf.getvalue()
+
+
+def test_stream_sink_protocol_accepts_standard_and_custom_streams() -> None:
+    from structguru import flush
+    from structguru.core import WritableSink
+
+    class Stream:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def write(self, message: str, /) -> None:
+            self.lines.append(message)
+
+    custom = Stream()
+    streams: list[WritableSink] = [io.StringIO(), custom]
+    _runtime.configure(target="null")
+    log = Logger()
+    tokens = [log.add(stream) for stream in streams]
+    log.info("stream record")
+    flush()
+    assert len(custom.lines) == 1
+    for token in tokens:
+        log.remove(token)
+
+
+def test_stream_sink_consumer_types_accept_text_and_reject_binary() -> None:
+    api = pytest.importorskip("mypy.api")
+    code = """
+import io
+from structguru import logger
+from structguru.core import WritableSink
+
+class Stream:
+    def write(self, message: str, /) -> None:
+        pass
+
+sink: WritableSink = Stream()
+logger.add(sink)
+logger.add(io.StringIO())
+"""
+    stdout, stderr, status = api.run(["--no-incremental", "-c", code])
+    assert status == 0, stdout + stderr
+    stdout, stderr, status = api.run(
+        [
+            "--no-incremental",
+            "-c",
+            "import io; from structguru import logger; logger.add(io.BytesIO())",
+        ]
+    )
+    assert status == 1 and "arg-type" in stdout, stdout + stderr
