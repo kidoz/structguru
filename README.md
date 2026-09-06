@@ -205,6 +205,14 @@ that path. Install the [stdlib bridge](#stdlib-bridge) to receive them rendered
 and redacted instead — while it is installed the raw delivery is suspended, so a
 sink never sees the same record twice.
 
+Logs emitted inside a sink callback reach the native writer but skip callable
+and `logger.add()` sinks, preventing recursive delivery and worker deadlocks.
+Outside callbacks, `logger.remove()` waits for producers that already selected
+the removed sink. Lifecycle calls inside a callback cannot wait for their own
+worker; previously selected deliveries finish as that worker drains.
+For native file/stdout mirroring, `writer_metrics()["sink_errors"]` includes
+failed destinations even when another destination successfully writes the record.
+
 Native delivery uses the bounded callable queue and is drained on
 reconfiguration, `shutdown()`, fork, and interpreter exit. Call
 `structguru.flush()` when you need to block until buffered records have actually

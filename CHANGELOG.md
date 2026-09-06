@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- Callable sink callbacks can log without blocking their own queue or creating
+  a delivery loop. Their logs reach the native writer and bypass callable sinks.
+  Sink removal now waits for producers that selected a sink before queue insertion.
+- Level-only configuration changes preserve in-flight callable and Sentry delivery,
+  as well as the existing native writer and filter state.
+- Native dictionary conversion snapshots entries before invoking Python converters,
+  preventing a PyO3 panic when a converter mutates its containing dictionary.
+- URL sanitization decodes bytes URLs, preserves IPv6 brackets, and handles invalid
+  ports without leaking userinfo or replacing the original request exception.
+- Formatting diagnostics omit raw templates, exception details, and user source
+  lines. Native logger/service metadata now obeys key and pattern redaction.
+- Native sink error metrics include partial failures while successful destinations
+  continue receiving records. Sentry receives redacted native metadata, including
+  the configured service for tags.
+- `logger.catch()` handles awaited coroutine exceptions, including suppression and
+  reraising. Stream sinks are represented in the public typing contract.
+
 ### Added
 
 - Frozen `Settings` with mapping/environment constructors, `get_config()`, and
@@ -56,11 +75,9 @@ All notable changes to this project are documented here. The format is based on
 - `Logger.bind()` and `Logger.opt()` copy the logger directly instead of
   re-running the dataclass constructor: about 0.25 µs instead of 0.75 µs
   each, which also speeds up every record that crosses the stdlib bridge.
-- Callable sinks hand a record to their dispatch thread in one lock
-  acquisition instead of four, and the set of sinks admitting a level is
-  cached until a sink is added or removed: the caller-side cost of a callable
-  sink drops from about 6.8 µs to 3.9 µs per record. Lifecycle semantics
-  (retire, drain, fork) are unchanged.
+- Callable sinks cache the set of destinations admitting each level. Producer
+  reservations synchronize sink selection with removal before queue insertion;
+  blocking waits happen outside the sink registry lock.
 
 ## [1.2.3] - 2026-09-06
 
