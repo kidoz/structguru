@@ -12,6 +12,7 @@ import enum
 import io
 import json
 import re
+import sys
 import uuid
 from typing import Any
 
@@ -260,6 +261,79 @@ def test_native_unsupported_field_keeps_exception_traceback() -> None:
     assert record["status_code"] == 500
     assert record["request"] == "<unsupported: object>"
     assert "RuntimeError: synthetic application failure" in record["exception"]
+
+
+def _is_caret_line(line: str) -> bool:
+    # Exception groups indent their members behind a "|" margin.
+    body = line.strip().lstrip("|+ ").strip()
+    return bool(body) and set(body) <= set("~^")
+
+
+def _lookup_missing(data: dict[str, Any]) -> Any:
+    return data["a"]["missing"]  # sub-expression failure: carets under ["missing"]
+
+
+def _capture(raise_fn: Any) -> Any:
+    try:
+        raise_fn()
+    except Exception:
+        return sys.exc_info()
+    raise AssertionError("expected an exception")
+
+
+def _raise_chained() -> None:
+    try:
+        _lookup_missing({"a": {}})
+    except KeyError as err:
+        raise ValueError("wrapped") from err
+
+
+def _raise_group() -> None:
+    errors = []
+    for payload in ({"a": {}}, {"a": {}}):
+        try:
+            _lookup_missing(payload)
+        except KeyError as err:
+            errors.append(err)
+    raise ExceptionGroup("group", errors)
+
+
+@pytest.mark.parametrize(
+    "raise_fn",
+    [lambda: _lookup_missing({"a": {}}), _raise_chained, _raise_group],
+    ids=["plain", "chained-cause", "exception-group"],
+)
+def test_format_exception_without_carets_drops_only_position_markers(raise_fn: Any) -> None:
+    exc_info = _capture(raise_fn)
+    with_carets = _runtime.format_exception(exc_info)
+    without = _runtime.format_exception(exc_info, carets=False)
+
+    assert not any(_is_caret_line(line) for line in without.splitlines())
+    expected = "\n".join(line for line in with_carets.splitlines() if not _is_caret_line(line))
+    assert without == expected
+    assert "Traceback (most recent call last):" in without
+
+
+def test_configure_exception_carets_false_applies_to_logged_records() -> None:
+    exc_info = _capture(lambda: _lookup_missing({"a": {}}))
+    if not any(_is_caret_line(line) for line in _runtime.format_exception(exc_info).splitlines()):
+        pytest.skip("interpreter emits no position markers (PYTHONNODEBUGRANGES?)")
+
+    def logged_exception(**config: Any) -> str:
+        _runtime.configure(service="svc", target="memory", level="DEBUG", **config)
+        try:
+            structguru.logger.opt(exception=exc_info).error("failed")
+            _runtime.flush()
+            exception = json.loads(_runtime.drain_messages()[-1])["exception"]
+        finally:
+            _runtime.shutdown()
+        assert isinstance(exception, str)
+        return exception
+
+    assert any(_is_caret_line(line) for line in logged_exception().splitlines())
+    without = logged_exception(exception_carets=False)
+    assert not any(_is_caret_line(line) for line in without.splitlines())
+    assert "KeyError: 'missing'" in without
 
 
 def test_native_logging_call_never_raises_for_field_shape() -> None:

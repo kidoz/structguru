@@ -50,10 +50,11 @@ def _bench_exception(benchmark: Any, depth: int, **config: Any) -> None:
         _runtime.shutdown()
 
 
+@pytest.mark.parametrize("carets", [True, False], ids=["carets", "no-carets"])
 @pytest.mark.parametrize("depth", [1, 20], ids=["shallow", "deep"])
-def test_bench_native_exception_traceback_string(benchmark: Any, depth: int) -> None:
-    """Benchmark the default formatted-traceback exception field."""
-    _bench_exception(benchmark, depth)
+def test_bench_native_exception_traceback_string(benchmark: Any, depth: int, carets: bool) -> None:
+    """Benchmark the formatted-traceback exception field with and without PEP 657 carets."""
+    _bench_exception(benchmark, depth, exception_carets=carets)
 
 
 @pytest.mark.parametrize("depth", [1, 20], ids=["shallow", "deep"])

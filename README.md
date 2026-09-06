@@ -247,6 +247,16 @@ configure(structured_exceptions=True, exception_max_frames=20)
 `exception_max_frames=0` omits traceback frames entirely. Negative frame and
 local-representation limits are rejected during configuration.
 
+Formatted tracebacks (the default) carry CPython's per-frame position markers,
+the `~~~^^^` lines, and on Python 3.11+ computing them is most of the cost of
+`logger.exception()`. `exception_carets=False` omits them, which formats a
+traceback about five times faster and matches what CPython prints under
+`PYTHONNODEBUGRANGES=1`:
+
+```python
+configure(exception_carets=False)
+```
+
 ### OpenTelemetry correlation
 
 Inject trace context into every log event:

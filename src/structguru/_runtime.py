@@ -209,6 +209,7 @@ class _RuntimeState:
     redaction_config: Any
     record_filter: Any
     exception_config: dict[str, Any] | None
+    exception_carets: bool
     metric_processor: Any
     sentry_processor: Any
     console: bool
@@ -390,8 +391,10 @@ def build_exception_field(
     serializes the result.
     """
     state = runtime or current_runtime()
-    if state is None or state.exception_config is None:
+    if state is None:
         return format_exception(exc_info)
+    if state.exception_config is None:
+        return format_exception(exc_info, carets=state.exception_carets)
 
     from structguru.exceptions import build_exception_dict
 
@@ -416,11 +419,13 @@ def format_stack() -> str:
     return stack[:-1] if stack.endswith("\n") else stack
 
 
-def format_exception(exc_info: Any) -> str:
+def format_exception(exc_info: Any, *, carets: bool = True) -> str:
     """Format ``exc_info`` to a traceback string matching structlog's output.
 
     Accepts ``True`` (use the current exception), a ``BaseException`` instance,
-    or a ``(type, value, tb)`` tuple.
+    or a ``(type, value, tb)`` tuple. With ``carets=False`` the PEP 657
+    position markers under each frame are omitted, which is what CPython
+    prints when it runs without debug ranges.
     """
     if exc_info is True:
         exc_info = sys.exc_info()
@@ -432,7 +437,48 @@ def format_exception(exc_info: Any) -> str:
     if not isinstance(exc_value, BaseException):
         return ""
     tb = cast("TracebackType | None", exc_tb)
-    return "".join(traceback.format_exception(type(exc_value), exc_value, tb)).rstrip("\n")
+    if carets:
+        return "".join(traceback.format_exception(type(exc_value), exc_value, tb)).rstrip("\n")
+    formatted = traceback.TracebackException(type(exc_value), exc_value, tb, compact=True)
+    _drop_positions(formatted)
+    return "".join(formatted.format()).rstrip("\n")
+
+
+def _drop_positions(formatted: traceback.TracebackException) -> None:
+    """Rebuild every frame summary without column data so no carets render.
+
+    ``TracebackException.format()`` derives the ``~~~^^^`` marker lines from
+    each frame's ``colno``/``end_colno``. A :class:`traceback.FrameSummary`
+    built without them, and with ``end_lineno`` collapsed onto ``lineno``, is
+    exactly what CPython produces under ``PYTHONNODEBUGRANGES=1``, so the
+    output matches that mode line for line. Walks the ``__cause__`` and
+    ``__context__`` chain and exception-group members, which ``format()``
+    renders through the same frame summaries.
+    """
+    pending = [formatted]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        current.stack = traceback.StackSummary.from_list(
+            [
+                traceback.FrameSummary(
+                    frame.filename,
+                    frame.lineno,
+                    frame.name,
+                    lookup_line=False,
+                    locals=frame.locals,
+                    line=frame.line,
+                )
+                for frame in current.stack
+            ]
+        )
+        pending.extend(
+            linked for linked in (current.__cause__, current.__context__) if linked is not None
+        )
+        pending.extend(current.exceptions or ())
 
 
 def configure(
@@ -457,6 +503,7 @@ def configure(
     exception_include_locals: bool = False,
     exception_max_frames: int = 20,
     exception_max_local_repr: int = 200,
+    exception_carets: bool = True,
     format: str = "json",
     colors: bool | None = None,
     file_path: str | None = None,
@@ -517,6 +564,15 @@ def configure(
     ``exception_*`` knobs mirroring the processor's parameters and
     ``sensitive_keys`` reused for locals redaction) instead of the formatted
     traceback string.
+
+    ``exception_carets=False`` omits the PEP 657 position markers (the
+    ``~~~^^^`` lines under each frame) from formatted tracebacks. CPython
+    computes them per frame while formatting, and on 3.11+ they are most of
+    the cost of ``logger.exception()``; without them a traceback formats
+    about five times faster. The output is what CPython itself prints under
+    ``PYTHONNODEBUGRANGES=1``. The default keeps the markers so the field
+    matches ``traceback.format_exception``; ``structured_exceptions=True``
+    never renders them.
 
     ``format`` selects the renderer: ``"json"`` (default, production-friendly
     compact JSON) or ``"console"`` (colored, human-readable dev output in
@@ -688,6 +744,7 @@ def configure(
         redaction_config=new_config,
         record_filter=new_filter,
         exception_config=new_exception_config,
+        exception_carets=exception_carets,
         metric_processor=metric_processor,
         sentry_processor=sentry_processor,
         console=new_console,
