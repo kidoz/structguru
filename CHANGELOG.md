@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Structured exception logging tolerates failing exception messages and snapshots
+  locals before calling `repr()`. Exception groups preserve nested members,
+  frames, and causes, with bounded traversal and native redaction.
+- Public flush and the pre-fork drain include native records emitted by callbacks.
+- Eager and nested Celery tasks restore caller context on success and failure;
+  worker tasks still clear stale context. Eager tasks inherit selected fields and
+  respect explicit propagation headers in `request.headers`.
+- Sentry recognizes catch-level aliases and exports canonical severity names,
+  including `EXCEPTION` as error and `FATAL` as critical.
 - Callback failures, including `SystemExit` and `KeyboardInterrupt`, no longer
   terminate the dispatch worker or strand flush/removal/shutdown operations.
 - Forked children reset sink registry, logger, and stdlib bridge locks while
