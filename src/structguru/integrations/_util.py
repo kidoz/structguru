@@ -18,17 +18,19 @@ def sanitize_url(raw: object) -> str:
     can still see that parameters existed without their values. A URL that does
     not parse is coerced to ``"<unparsable-url>"`` rather than logged raw.
     """
-    text = str(raw)
     try:
+        text = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
         parts = urlsplit(text)
-    except ValueError:
+        # Accessing hostname/port also validates parts of the authority.
+        host = parts.hostname or ""
+        if ":" in host:
+            host = f"[{host}]"
+        port = parts.port
+        if port is not None:
+            host = f"{host}:{port}"
+        sanitized = urlunsplit((parts.scheme, host, parts.path, "", ""))
+    except Exception:  # noqa: BLE001 - diagnostics must not mask request failures
         return "<unparsable-url>"
-    # netloc without userinfo: keep host[:port], drop anything before '@'.
-    host = parts.hostname or ""
-    if parts.port is not None:
-        host = f"{host}:{parts.port}"
-    # Drop the fragment too; it is client-side and occasionally sensitive.
-    sanitized = urlunsplit((parts.scheme, host, parts.path, "", ""))
     # Preserve a bare '?' so operators can see parameters were present.
     return f"{sanitized}?" if parts.query else sanitized
 

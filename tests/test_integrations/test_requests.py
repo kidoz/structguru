@@ -89,3 +89,34 @@ def test_requests_logging_session_transport_failure() -> None:
     assert rec["message"] == "Outbound HTTP Request Failed"
     assert rec["level"] == "ERROR"
     assert "status_code" not in rec
+
+
+@responses.activate
+def test_requests_bytes_url_is_sanitized() -> None:
+    buf = io.StringIO()
+    configure(stream=buf)
+    responses.add(responses.GET, "https://user:pass@test.local/path", json={}, status=200)
+    get_logging_session().get(b"https://user:pass@test.local/path?token=VALUE")
+    assert _records(buf)[0]["http_url"] == "https://test.local/path?"
+    assert "pass" not in buf.getvalue() and "VALUE" not in buf.getvalue()
+
+
+def test_requests_invalid_port_preserves_original_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import requests
+
+    original = requests.exceptions.InvalidURL("original failure")
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise original
+
+    monkeypatch.setattr(requests.Session, "request", fail)
+    buf = io.StringIO()
+    configure(stream=buf)
+    with pytest.raises(requests.exceptions.InvalidURL) as captured:
+        get_logging_session().get("https://host:invalid/path")
+    assert captured.value is original
+    record = _records(buf)[0]
+    assert record["http_url"] == "<unparsable-url>"
+    assert record["message"] == "Outbound HTTP Request Failed"
