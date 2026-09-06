@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import itertools
-import queue
 import threading
+from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import NamedTuple
 
 
 @dataclass(frozen=True)
@@ -16,23 +17,89 @@ class _Sink:
     min_level: int
 
 
-@dataclass(frozen=True)
-class _Record:
+class _Record(NamedTuple):
     line: str
     sinks: tuple[_Sink, ...]
 
 
+_ACCEPTED = 1
+_DROPPED = 0
+_RETIRED = -1
+
+
+class _WorkQueue:
+    """The deque and counter ``queue.Queue`` used to own, guarded by the channel lock."""
+
+    __slots__ = ("items", "unfinished_tasks")
+
+    def __init__(self) -> None:
+        self.items: deque[_Record] = deque()
+        self.unfinished_tasks = 0
+
+    def qsize(self) -> int:
+        return len(self.items)
+
+
 class _DispatchChannel:
-    """One queue generation with producer-aware shutdown semantics."""
+    """One queue generation with producer-aware shutdown semantics.
+
+    One lock guards the queue, the producer leases, and the accepting flag, so
+    the hot path (:meth:`put`) is a single acquisition: check, wait for space
+    in block mode, append, wake the worker. The previous ``queue.Queue`` design
+    cost three acquisitions per record on top of the lease bookkeeping.
+    """
 
     def __init__(self, maxsize: int) -> None:
-        self.queue: queue.Queue[_Record] = queue.Queue(maxsize=maxsize)
+        self.queue = _WorkQueue()
         self.maxsize = maxsize
-        self._condition = threading.Condition()
+        lock = threading.Lock()
+        # State changes producers, flushers, and lifecycle callers wait on:
+        # retirement, a freed slot, the last lease released, the last task done.
+        self._condition = threading.Condition(lock)
+        # Only the worker waits here, so a producer's notify() can never wake a
+        # flusher instead of the worker.
+        self._not_empty = threading.Condition(lock)
         self._accepting = True
         self._producers = 0
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
+
+    def _full(self) -> bool:
+        return 0 < self.maxsize <= len(self.queue.items)
+
+    def _append(self, record: _Record) -> None:
+        self.queue.items.append(record)
+        self.queue.unfinished_tasks += 1
+        self._not_empty.notify()
+
+    def _release_lease(self) -> None:
+        self._producers -= 1
+        if self._producers == 0:
+            self._condition.notify_all()
+            self._not_empty.notify_all()
+
+    def put(self, record: _Record, *, overflow: str) -> int:
+        """Insert one record in a single lock acquisition.
+
+        Returns ``_ACCEPTED``, ``_DROPPED`` (drop mode with a full queue), or
+        ``_RETIRED`` (this generation no longer accepts producers). A producer
+        that has to wait for space holds a lease meanwhile, which keeps the
+        worker draining even if the generation is retired underneath it.
+        """
+        with self._condition:
+            if not self._accepting:
+                return _RETIRED
+            if self._full():
+                if overflow != "block":
+                    return _DROPPED
+                self._producers += 1
+                try:
+                    while self._full():
+                        self._condition.wait()
+                finally:
+                    self._release_lease()
+            self._append(record)
+            return _ACCEPTED
 
     def reserve(self) -> bool:
         """Reserve one producer before a lifecycle transition can close the queue."""
@@ -44,29 +111,26 @@ class _DispatchChannel:
 
     def put_reserved(self, record: _Record, *, overflow: str) -> bool:
         """Insert a previously reserved record and release its producer lease."""
-        try:
-            if overflow == "block":
-                self.queue.put(record)
-                return True
+        with self._condition:
             try:
-                self.queue.put_nowait(record)
-            except queue.Full:
-                return False
-            return True
-        finally:
-            with self._condition:
-                self._producers -= 1
-                self._condition.notify_all()
+                if self._full():
+                    if overflow != "block":
+                        return False
+                    while self._full():
+                        self._condition.wait()
+                self._append(record)
+                return True
+            finally:
+                self._release_lease()
 
     def flush(self) -> None:
         """Wait for producers already using this generation and all queued work."""
         if threading.current_thread() is self.thread:
             return
         with self._condition:
-            while self._producers:
-                self._condition.wait()
-        self.queue.join()
-        with self._condition:
+            self._condition.wait_for(
+                lambda: self._producers == 0 and self.queue.unfinished_tasks == 0
+            )
             retired = not self._accepting
         if retired:
             self.thread.join()
@@ -76,6 +140,7 @@ class _DispatchChannel:
         with self._condition:
             self._accepting = False
             self._condition.notify_all()
+            self._not_empty.notify_all()
 
     def close(self, *, drain: bool) -> None:
         """Reject new producers and stop after every accepted producer finishes."""
@@ -87,25 +152,28 @@ class _DispatchChannel:
         self.thread.join()
 
     def _loop(self) -> None:
+        items = self.queue.items
         while True:
-            with self._condition:
-                # Producers notify after insertion, including when a reserved
-                # producer finishes after retirement. No stop token can be left
-                # behind if several callers close the same generation.
-                self._condition.wait_for(
-                    lambda: (
-                        not self.queue.empty() or (not self._accepting and self._producers == 0)
-                    )
+            with self._not_empty:
+                # A leased producer may still append after retirement, so the
+                # worker only stops once the queue is empty and no lease is held.
+                self._not_empty.wait_for(
+                    lambda: bool(items) or (not self._accepting and self._producers == 0)
                 )
-                if self.queue.empty():
+                if not items:
                     return
-                item = self.queue.get_nowait()
+                item = items.popleft()
+                if self._producers:
+                    self._condition.notify_all()  # a producer may wait for this slot
             for sink in item.sinks:
                 try:
                     sink.callback(item.line)
                 except Exception:  # noqa: BLE001 - sinks must never break logging
                     pass
-            self.queue.task_done()
+            with self._condition:
+                self.queue.unfinished_tasks -= 1
+                if self.queue.unfinished_tasks == 0:
+                    self._condition.notify_all()
 
 
 class CallableSinkDispatcher:
@@ -122,12 +190,17 @@ class CallableSinkDispatcher:
         # remove/flush/shutdown cannot overlook callbacks still using a sink.
         self._channels: set[_DispatchChannel] = set()
         self._dropped = 0
+        # Per-level tuple of sinks that admit that level; rebound (never
+        # mutated) whenever the registry changes, so a reader holding the old
+        # dict sees a consistent, at worst one-record-stale, snapshot.
+        self._eligible: dict[int, tuple[_Sink, ...]] = {}
 
     def add(self, callback: Callable[[str], None], min_level: int, *, enabled: bool) -> int:
         """Register a runtime sink, starting dispatch when logging is enabled."""
         token = next(self._tokens)
         with self._lock:
             self._runtime[token] = _Sink(token, callback, min_level)
+            self._eligible = {}
             if enabled and self._channel is None:
                 self._channel = _DispatchChannel(self._maxsize)
                 self._channels.add(self._channel)
@@ -137,6 +210,7 @@ class CallableSinkDispatcher:
         """Remove one sink, then drain every record that captured it."""
         with self._lock:
             removed = self._runtime.pop(token, None) is not None
+            self._eligible = {}
             if not (self._configured or self._runtime):
                 self._retire_active()
             channels = tuple(self._channels)
@@ -157,6 +231,7 @@ class CallableSinkDispatcher:
             self._retire_active()
             channels = tuple(self._channels)
             self._configured = new_configured
+            self._eligible = {}
             self._maxsize = maxsize
             self._dropped = 0
             if self._configured or self._runtime:
@@ -169,6 +244,7 @@ class CallableSinkDispatcher:
         with self._lock:
             self._retire_active()
             self._configured = []
+            self._eligible = {}
             channels = tuple(self._channels)
         self._drain(channels)
 
@@ -192,25 +268,40 @@ class CallableSinkDispatcher:
                 channel for channel in channels if not channel.thread.is_alive()
             )
 
+    def idle(self) -> bool:
+        """True when no callable sink can receive a line.
+
+        Read without the lock: the attribute read is atomic, and a stale
+        ``True`` (a sink being added concurrently) only means this record
+        predates the sink, exactly as if it had been logged one call sooner.
+        """
+        return self._channel is None
+
     def enqueue(self, line: str, level: int, *, overflow: str) -> bool:
         """Queue one rendered record; return false when delivery is rejected."""
+        channel = self._channel
+        if channel is None:
+            return True
+        sinks = self._eligible.get(level)
+        if sinks is None:
+            sinks = self._eligible_sinks(level)
+        if not sinks:
+            return True
+        outcome = channel.put(_Record(line, sinks), overflow=overflow)
+        if outcome == _DROPPED:
+            self._note_drop()
+            return False
+        return outcome == _ACCEPTED
+
+    def _eligible_sinks(self, level: int) -> tuple[_Sink, ...]:
         with self._lock:
             sinks = tuple(
                 sink
                 for sink in (*self._configured, *self._runtime.values())
                 if level >= sink.min_level
             )
-            channel = self._channel
-            if not sinks or channel is None:
-                return True
-            reserved = channel.reserve()
-        if not reserved:
-            return False
-
-        accepted = channel.put_reserved(_Record(line, sinks), overflow=overflow)
-        if not accepted:
-            self._note_drop()
-        return accepted
+            self._eligible[level] = sinks
+        return sinks
 
     def flush(self) -> None:
         """Block until all queued deliveries have completed."""
@@ -229,6 +320,7 @@ class CallableSinkDispatcher:
     def after_fork(self, *, enabled: bool) -> None:
         """Replace inherited synchronization state and restart in a forked child."""
         self._lock = threading.Lock()
+        self._eligible = {}
         self._channel = (
             _DispatchChannel(self._maxsize)
             if enabled and (self._configured or self._runtime)
