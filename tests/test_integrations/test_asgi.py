@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
+import json
 from typing import Any
 
 import pytest
@@ -244,3 +246,31 @@ class TestStructguruMiddleware:
         assert "Request completed" in output
         header_keys = [h[0] for h in sent[0]["headers"]]
         assert b"x-request-id" in header_keys
+
+
+@pytest.mark.parametrize("response_started", [False, True])
+async def test_cancellation_is_logged_as_cancelled_and_propagated(response_started: bool) -> None:
+    from structguru._contextvars import get_contextvars
+
+    async def cancelling_app(scope: dict, receive: Any, send: Any) -> None:
+        if response_started:
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+        raise asyncio.CancelledError
+
+    async def send(message: dict) -> None:
+        pass
+
+    buf = io.StringIO()
+    configure(service="test", level="DEBUG", stream=buf)
+    app = StructguruMiddleware(cancelling_app)
+    scope: dict = {"type": "http", "method": "GET", "path": "/slow", "headers": [], "client": None}
+
+    with pytest.raises(asyncio.CancelledError):
+        await app(scope, lambda: {"type": "http.request"}, send)
+
+    record = json.loads(buf.getvalue())
+    assert record["message"] == "Request cancelled"
+    assert record["level"] == "INFO"
+    # No status is invented for a request that never started its response.
+    assert record.get("status_code") == (200 if response_started else None)
+    assert get_contextvars() == {}

@@ -7,6 +7,7 @@ structguru context variables for every HTTP/WebSocket request.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, TypeAlias
@@ -99,7 +100,7 @@ class StructguruMiddleware:
         log = Logger(name=self.logger_name)
         start_time = time.perf_counter()
         is_websocket = scope["type"] == "websocket"
-        status_code: int | None = None if is_websocket else 500
+        status_code: int | None = None
 
         async def send_wrapper(message: dict[str, Any]) -> None:
             nonlocal status_code
@@ -111,11 +112,17 @@ class StructguruMiddleware:
                 message = {**message, "headers": resp_headers}
             await send(message)
 
-        failed = False
+        outcome = "completed"
         try:
             await self.app(scope, receive, send_wrapper)
+        except asyncio.CancelledError:
+            # A cancelled request (client disconnect, shutdown, timeout) neither
+            # completed nor failed. Record that, then let the cancellation
+            # propagate so the surrounding task still observes it.
+            outcome = "cancelled"
+            raise
         except Exception:
-            failed = True
+            outcome = "failed"
             raise
         finally:
             if self.log_request:
@@ -123,8 +130,14 @@ class StructguruMiddleware:
                 extra: dict[str, Any] = {"duration_ms": round(duration_ms, 2)}
                 if status_code is not None:
                     extra["status_code"] = status_code
-                if failed:
+                elif not is_websocket and outcome != "cancelled":
+                    # No response was started: the server answers with 500. A
+                    # cancelled request sends nothing, so no status is invented.
+                    extra["status_code"] = 500
+                if outcome == "failed":
                     log.error("Request failed", **extra)
+                elif outcome == "cancelled":
+                    log.info("Request cancelled", **extra)
                 else:
                     log.info("Request completed", **extra)
             clear_contextvars()
