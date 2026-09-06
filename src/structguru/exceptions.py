@@ -13,6 +13,9 @@ from typing import Any
 
 from structguru.redaction import DEFAULT_SENSITIVE_KEYS
 
+_MAX_GROUP_DEPTH = 10
+_MAX_EXCEPTION_NODES = 100
+
 
 def _exception_message(value: BaseException) -> str:
     """Convert an exception message without replacing the original failure."""
@@ -36,7 +39,9 @@ def build_exception_dict(
     or a ``(type, value, tb)`` tuple; returns ``None`` when *exc_info* does not
     resolve to an active exception. Frame walking, ``f_locals`` access, and
     ``repr`` are Python-owned — the native renderer receives this dict and only
-    serializes it.
+    serializes it. Exception groups include an ``exceptions`` list, bounded to
+    ten nesting levels and 100 exception nodes per record. Groups report omitted
+    direct children in ``exceptions_truncated`` when either limit is reached.
     """
     if max_frames < 0:
         msg = f"max_frames must be >= 0, got {max_frames}"
@@ -58,6 +63,53 @@ def build_exception_dict(
         return None
     keys = sensitive_keys if sensitive_keys is not None else DEFAULT_SENSITIVE_KEYS
 
+    remaining = _MAX_EXCEPTION_NODES
+
+    def build(value: BaseException, tb: Any, depth: int) -> dict[str, Any]:
+        nonlocal remaining
+        remaining -= 1
+        result: dict[str, Any] = {
+            "type": type(value).__qualname__,
+            "message": _exception_message(value),
+            "module": type(value).__module__,
+            "frames": _build_frames(tb, include_locals, max_frames, max_local_repr, keys),
+        }
+        cause = value.__cause__
+        if cause is None and not value.__suppress_context__:
+            cause = value.__context__
+        if cause is not None:
+            result["cause"] = {
+                "type": type(cause).__qualname__,
+                "message": _exception_message(cause),
+            }
+        if isinstance(value, BaseExceptionGroup):
+            children: list[dict[str, Any]] = []
+            if depth < _MAX_GROUP_DEPTH:
+                for child in value.exceptions:
+                    if remaining == 0:
+                        break
+                    children.append(build(child, child.__traceback__, depth + 1))
+            result["exceptions"] = children
+            omitted = len(value.exceptions) - len(children)
+            if omitted:
+                result["exceptions_truncated"] = omitted
+        return result
+
+    result = build(exc_value, exc_tb, 0)
+    # Preserve the explicit type supplied by a valid exc_info tuple.
+    result["type"] = exc_type.__qualname__
+    result["module"] = exc_type.__module__
+    return result
+
+
+def _build_frames(
+    exc_tb: Any,
+    include_locals: bool,
+    max_frames: int,
+    max_local_repr: int,
+    keys: frozenset[str],
+) -> list[dict[str, Any]]:
+    """Collect bounded traceback frames using the same options for every member."""
     frames = []
     if include_locals:
         # Walk raw traceback to capture local variables, since
@@ -89,23 +141,7 @@ def build_exception_dict(
             }
             frames.append(frame_info)
 
-    exception_dict: dict[str, Any] = {
-        "type": exc_type.__qualname__,
-        "message": _exception_message(exc_value),
-        "module": exc_type.__module__,
-        "frames": frames,
-    }
-
-    cause = exc_value.__cause__
-    if cause is None and not exc_value.__suppress_context__:
-        cause = exc_value.__context__
-    if cause is not None:
-        exception_dict["cause"] = {
-            "type": type(cause).__qualname__,
-            "message": _exception_message(cause),
-        }
-
-    return exception_dict
+    return frames
 
 
 def _format_locals(

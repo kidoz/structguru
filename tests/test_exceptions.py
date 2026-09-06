@@ -57,6 +57,75 @@ def test_broken_exception_messages_preserve_the_record_and_cause() -> None:
     assert "private conversion detail" not in line
 
 
+@pytest.mark.parametrize("include_locals", [False, True])
+def test_nested_exception_groups_preserve_members_and_redact_them(include_locals: bool) -> None:
+    from structguru import _runtime
+    from structguru.core import Logger
+
+    def make_error() -> ValueError:
+        password = "private-value"
+        try:
+            raise ValueError(password)
+        except ValueError as exc:
+            return exc
+
+    original = make_error()
+    original.__cause__ = TypeError("cause private-value")
+    group = ExceptionGroup(
+        "group private-value",
+        [
+            original,
+            ExceptionGroup("nested", [TypeError("nested private-value")]),
+        ],
+    )
+    _runtime.configure(
+        target="memory",
+        structured_exceptions=True,
+        exception_include_locals=include_locals,
+        exception_max_frames=1,
+        sensitive_patterns=["private-value"],
+    )
+    Logger().error("group", exc_info=group)
+    _runtime.flush()
+    line = _runtime.drain_messages()[-1]
+    result = json.loads(line)["exception"]
+    assert "private-value" not in line
+    first, nested = result["exceptions"]
+    assert first["type"] == "ValueError"
+    assert first["message"] == "[REDACTED]"
+    assert first["cause"]["message"] == "cause [REDACTED]"
+    assert len(first["frames"]) == 1
+    if include_locals:
+        assert first["frames"][0]["locals"]["password"] == "[REDACTED]"
+    assert nested["exceptions"][0]["type"] == "TypeError"
+    assert nested["exceptions"][0]["message"] == "nested [REDACTED]"
+
+
+def test_base_exception_groups_preserve_interrupt_members_as_data() -> None:
+    result = build_exception_dict(BaseExceptionGroup("interrupts", [KeyboardInterrupt("stop")]))
+    assert result is not None
+    assert result["exceptions"][0]["type"] == "KeyboardInterrupt"
+    assert result["exceptions"][0]["message"] == "stop"
+
+
+def test_exception_groups_bound_depth_and_total_nodes() -> None:
+    wide = build_exception_dict(ExceptionGroup("wide", [ValueError(str(i)) for i in range(200)]))
+    assert wide is not None
+    assert len(wide["exceptions"]) == 99
+    assert wide["exceptions_truncated"] == 101
+    error: BaseException = ValueError("leaf")
+    for _ in range(30):
+        error = ExceptionGroup("deep", [error])
+    deep = build_exception_dict(error)
+    assert deep is not None
+    depth = 0
+    while deep["exceptions"]:
+        deep = deep["exceptions"][0]
+        depth += 1
+    assert depth == 10
+    assert deep["exceptions_truncated"] == 1
+
+
 def _make_exc_info() -> tuple:
     try:
         raise ValueError("boom")
