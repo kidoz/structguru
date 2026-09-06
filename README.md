@@ -54,7 +54,7 @@ Available extras: `otel`, `celery`, `flask`, `django`, `sqlalchemy`, `grpc`,
 ## Quick start
 
 ```python
-from structguru import configure, logger
+from structguru import Logger, configure, logger
 
 # Configure once at startup
 configure(service="myapp", level="DEBUG", format="json")
@@ -62,7 +62,65 @@ configure(service="myapp", level="DEBUG", format="json")
 # Use anywhere
 logger.info("Hello {name}", name="world")
 # → {"logger":"...","level":"INFO","severity":6,"timestamp":"...","service":"myapp","message":"Hello world"}
+
+# Or choose an explicit module name
+log = Logger(name=__name__)
 ```
+
+## Configuration
+
+Call `configure()` once at startup. Each call replaces the previous configuration:
+explicit keywords override environment values, which override built-in defaults.
+Use `update()` to retain existing options while changing selected ones:
+
+```python
+from structguru import Settings, configure, get_config, update
+
+configure(service="checkout", sensitive_patterns=[r"token=\w+"])
+update(otel=True, structured_exceptions=True)  # retains service and redaction
+current = get_config()  # Settings, or None after shutdown()
+
+# Applications can load a mapping themselves; no files are read automatically.
+settings = Settings.from_mapping({"service": "checkout", "level": "DEBUG"})
+configure(settings)  # uses this object instead of environment values
+```
+
+`Settings.from_env()` resolves environment values without applying them; pass a mapping
+instead of using the process environment when testing. `Settings` validates Python
+values and freezes collections. Native regex compilation and file access are checked
+when configuring; failure leaves the previous runtime active. Explicit keywords,
+including `None` and built-in default values, win over the selected base.
+
+`update()` never rereads the environment and requires an active runtime. An empty update
+does nothing. Level-only updates and `set_level()` preserve queues and rate-limit state;
+other updates rebuild writers and reset filter state. Snapshots describe configured
+options, not buffered records, counters, stdlib bridge state, or `logger.add()` sinks.
+Those registered sinks survive reconfiguration. Streams and callbacks retain their identity.
+
+Levels accept case-insensitive names (including `NOTSET`) or non-negative integer
+thresholds. Unknown names, booleans and negative integers raise `ValueError`.
+
+### Environment configuration
+
+| Variable | Default | Compatibility fallback |
+|---|---|---|
+| `STRUCTGURU_SERVICE` | `app` | — |
+| `STRUCTGURU_LEVEL` | `INFO` | `LOG_LEVEL` |
+| `STRUCTGURU_TARGET` | `stdout` | `STRUCTGURU_NATIVE_TARGET` |
+| `STRUCTGURU_FORMAT` | `json` | — |
+| `STRUCTGURU_SAMPLE_RATE` | `1.0` | `STRUCTGURU_NATIVE_SAMPLE_RATE` |
+| `STRUCTGURU_RATE_LIMIT` | disabled; period defaults to 60 seconds | `STRUCTGURU_NATIVE_RATE_LIMIT` |
+| `STRUCTGURU_AUTOCONFIGURE` | enabled | inverse of `STRUCTGURU_LEGACY` |
+
+New names win over their fallbacks; old names remain supported without warnings.
+Rate limits use `MAX` or `MAX/PERIOD`, with integer counts and seconds for the period.
+Autoconfiguration accepts `1/0`, `true/false`, `yes/no`, or `on/off` and controls import
+only. Set it to `0` before import to configure explicitly later. Invalid selected values
+fail validation; an invalid import-time value must be corrected or autoconfiguration
+disabled before the application can call `configure()`.
+
+File output, redaction, exceptions and other settings currently use Python configuration.
+The stdlib bridge retains its separate `STRUCTGURU_STDLIB_*` options and explicit installer.
 
 ## Usage
 
@@ -166,11 +224,11 @@ structguru.flush()  # returns once the line has reached its sink
 
 ```python
 # JSON (production)
-configure(service="myapp", format="json")
+update(service="myapp", format="json")
 # → {"logger":"...","level":"INFO","severity":6,"timestamp":"...","service":"myapp","message":"..."}
 
 # Console (development) — colored, human-readable
-configure(service="myapp", format="console")
+update(service="myapp", format="console")
 # → 2026-01-15T12:00:00.123456Z [INFO    ] Hello world
 ```
 
@@ -181,9 +239,9 @@ configure(service="myapp", format="console")
 Mask sensitive fields automatically:
 
 ```python
-from structguru import configure
+from structguru import update
 
-configure(
+update(
     sensitive_keys=["password", "token", "ssn"],
     sensitive_patterns=[r"\b\d{3}-\d{2}-\d{4}\b"],
     pattern_replacement="***",
@@ -191,7 +249,7 @@ configure(
 ```
 
 Patterns run on Rust's linear-time regex engine (no ReDoS), which rejects
-look-around and backreferences at `configure()` time. Most look-behinds rewrite
+look-around and backreferences at `update()` time. Most look-behinds rewrite
 as capture groups — `(?<=password=)\S+` becomes `(password=)\S+` with
 `pattern_replacement="$1[REDACTED]"`, so the prefix is re-emitted and the
 secret is replaced (`password=hunter2` → `password=[REDACTED]`). Put the
@@ -204,7 +262,7 @@ backtrack limit, it is redacted entirely (fail-closed) rather than emitted
 unchecked.
 
 ```python
-configure(
+update(
     sensitive_patterns=[r"(?<=password=)\S+"],
     allow_backtracking_patterns=True,
 )
@@ -215,9 +273,9 @@ configure(
 Suppress noisy logs:
 
 ```python
-from structguru import configure
+from structguru import update
 
-configure(sample_rate=0.1, rate_limit_max=5, rate_limit_period=60)
+update(sample_rate=0.1, rate_limit_max=5, rate_limit_period=60)
 ```
 
 ### Metric extraction
@@ -225,13 +283,13 @@ configure(sample_rate=0.1, rate_limit_max=5, rate_limit_period=60)
 Derive metrics from log events:
 
 ```python
-from structguru import MetricProcessor, configure
+from structguru import MetricProcessor, update
 
 metrics = MetricProcessor()
 metrics.counter("user.login", lambda ed: login_counter.inc())
 metrics.histogram("db.query", "duration_ms", lambda v, ed: query_hist.observe(v))
 
-configure(metric_processor=metrics)
+update(metric_processor=metrics)
 ```
 
 ### Exception formatting
@@ -239,9 +297,9 @@ configure(metric_processor=metrics)
 Render exceptions as JSON-serializable dictionaries:
 
 ```python
-from structguru import configure
+from structguru import update
 
-configure(structured_exceptions=True, exception_max_frames=20)
+update(structured_exceptions=True, exception_max_frames=20)
 ```
 
 `exception_max_frames=0` omits traceback frames entirely. Negative frame and
@@ -254,7 +312,7 @@ traceback about five times faster and matches what CPython prints under
 `PYTHONNODEBUGRANGES=1`:
 
 ```python
-configure(exception_carets=False)
+update(exception_carets=False)
 ```
 
 ### OpenTelemetry correlation
@@ -262,9 +320,9 @@ configure(exception_carets=False)
 Inject trace context into every log event:
 
 ```python
-from structguru import configure
+from structguru import update
 
-configure(otel=True)  # no-op injection when opentelemetry-api is absent
+update(otel=True)  # no-op injection when opentelemetry-api is absent
 ```
 
 ### Non-blocking logging
@@ -273,6 +331,7 @@ Since v1.0, log I/O is offloaded to a background thread by default. The native
 Rust writer uses a bounded 8192-record queue with lossless backpressure. Set
 `overflow="drop"` to favor caller latency, or explicitly pass `maxsize=0` only
 when an unbounded queue is acceptable.
+
 
 ## Native runtime
 
@@ -317,10 +376,10 @@ structguru.logger.bind(request_id="abc").info("order {id} accepted", id=987)
 # → JSON line written to /var/log/app.log by a background writer thread
 ```
 
-The default import-time configuration also honors environment variables:
+Import-time configuration and `configure()` without a Settings object honor environment variables:
 
 ```bash
-LOG_LEVEL=INFO STRUCTGURU_SERVICE=myapp python -m myapp
+STRUCTGURU_LEVEL=INFO STRUCTGURU_SERVICE=myapp python -m myapp
 ```
 
 Invalid native environment values fail import with an actionable exception. This
@@ -330,7 +389,10 @@ Public API:
 
 | Symbol | Purpose |
 |--------|---------|
-| `configure(...)` | Configure rendering, filtering, redaction, and output sinks. See the API reference for the complete signature. |
+| `configure(...)` | Replace rendering, filtering, redaction, and output settings. |
+| `Settings` | Validate reusable options; construct from Python values, a mapping, or the environment. |
+| `get_config()` | Return configured options, or `None` when shut down. |
+| `update(...)` | Change selected active options without rereading the environment. |
 | `shutdown()` | Stop the writer; logging is disabled until `configure()` is called. |
 | `set_level(level)` | Adjust the level threshold at runtime. |
 | `writer_metrics()` | Writer counters (enqueued/written/dropped/depth/...) plus filter counters (`sampled`/`rate_limited`) when active. |
@@ -414,11 +476,11 @@ server = grpc.server(
 ```python
 import logging
 
-from structguru import configure
+from structguru import update
 from structguru.integrations.sentry import SentryProcessor
 
 sentry = SentryProcessor(event_level=logging.ERROR, tag_keys=frozenset({"service"}))
-configure(sentry_processor=sentry)
+update(sentry_processor=sentry)
 ```
 
 ### Stdlib bridge
