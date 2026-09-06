@@ -15,11 +15,13 @@ class _Sink:
     token: int
     callback: Callable[[str], None]
     min_level: int
+    level_callback: Callable[[str, int], None] | None = None
 
 
 class _Record(NamedTuple):
     line: str
     sinks: tuple[_Sink, ...]
+    level: int = 20
 
 
 class _WorkQueue:
@@ -138,7 +140,10 @@ class _DispatchChannel:
                     self._condition.notify_all()  # a producer may wait for this slot
             for sink in item.sinks:
                 try:
-                    sink.callback(item.line)
+                    if sink.level_callback is not None:
+                        sink.level_callback(item.line, item.level)
+                    else:
+                        sink.callback(item.line)
                 except BaseException:  # worker callbacks cannot interrupt the caller
                     pass
             with self._condition:
@@ -165,11 +170,18 @@ class CallableSinkDispatcher:
         # invalidated on every registration change.
         self._eligible: dict[int, tuple[_Sink, ...]] = {}
 
-    def add(self, callback: Callable[[str], None], min_level: int, *, enabled: bool) -> int:
+    def add(
+        self,
+        callback: Callable[[str], None],
+        min_level: int,
+        *,
+        enabled: bool,
+        level_callback: Callable[[str, int], None] | None = None,
+    ) -> int:
         """Register a runtime sink, starting dispatch when logging is enabled."""
         token = next(self._tokens)
         with self._lock:
-            self._runtime[token] = _Sink(token, callback, min_level)
+            self._runtime[token] = _Sink(token, callback, min_level, level_callback)
             self._eligible = {}
             if enabled and self._channel is None:
                 self._channel = _DispatchChannel(self._maxsize)
@@ -274,7 +286,7 @@ class CallableSinkDispatcher:
                 return False
         # The lease covers the gap between selecting sinks and queue insertion.
         # Removal sees this producer even before its record enters the queue.
-        accepted = channel.put_reserved(_Record(line, sinks), overflow=overflow)
+        accepted = channel.put_reserved(_Record(line, sinks, level), overflow=overflow)
         if not accepted:
             self._note_drop()
         return accepted

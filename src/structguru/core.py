@@ -16,7 +16,6 @@ from __future__ import annotations
 import functools
 import inspect
 import itertools
-import json
 import logging
 import os
 import string
@@ -108,15 +107,8 @@ def _make_handler(sink: Sink) -> logging.Handler:
     raise TypeError(msg)
 
 
-def _emit_rendered(handler: logging.Handler, line: str) -> None:
+def _emit_rendered(handler: logging.Handler, line: str, level: int = logging.INFO) -> None:
     """Forward a native rendered line through a stdlib handler."""
-    level = logging.INFO
-    try:
-        rendered = json.loads(line)
-        level_name = str(rendered.get("level", "INFO"))
-        level = _to_logging_level(level_name)
-    except (json.JSONDecodeError, TypeError):
-        pass
     record = logging.LogRecord(
         name="structguru",
         level=level,
@@ -598,7 +590,15 @@ class Logger:
             if callable(sink) and not isinstance(sink, logging.Handler)
             else functools.partial(_emit_rendered, handler)
         )
-        native_token = _runtime.add_callable_sink(native_callback, min_level=threshold)
+        native_token = _runtime.add_callable_sink(
+            native_callback,
+            min_level=threshold,
+            level_callback=(
+                None
+                if callable(sink) and not isinstance(sink, logging.Handler)
+                else functools.partial(_emit_rendered, handler)
+            ),
+        )
 
         _attach_to_root(handler)
 

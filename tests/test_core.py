@@ -40,6 +40,28 @@ def test_catch_rejects_invalid_levels_before_entering(level: object) -> None:
         Logger().catch(level=level)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("format", ["json", "console"])
+@pytest.mark.parametrize("method, expected", [("debug", 10), ("error", 40), ("critical", 50)])
+def test_handler_receives_original_severity(format: str, method: str, expected: int) -> None:
+    _runtime.configure(target="null", level="DEBUG", format=format, colors=True)
+    records: list[logging.LogRecord] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    log = Logger(name="source")
+    token = log.add(Capture())
+    try:
+        getattr(log, method)("severity probe")
+        _runtime.flush()
+        assert len(records) == 1
+        assert records[0].levelno == expected
+        assert "severity probe" in records[0].getMessage()
+    finally:
+        log.remove(token)
+
+
 @pytest.fixture(autouse=True)
 def _reset_format_warning_cache() -> None:  # type: ignore[misc]
     _warn_format_failure.cache_clear()

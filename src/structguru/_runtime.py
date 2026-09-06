@@ -274,13 +274,20 @@ def sensitive_keys() -> list[str] | None:
     return state.sensitive_keys if state is not None else None
 
 
-def add_callable_sink(fn: Callable[[str], None], min_level: int = 0) -> int:
+def add_callable_sink(
+    fn: Callable[[str], None],
+    min_level: int = 0,
+    *,
+    level_callback: Callable[[str, int], None] | None = None,
+) -> int:
     """Register a runtime callable sink and return its stable token.
 
     The sink is invoked with each rendered line on the dispatch thread.
     If the dispatch infrastructure is not running, it is started.
     """
-    token = _callable_dispatcher.add(fn, min_level, enabled=is_native_enabled())
+    token = _callable_dispatcher.add(
+        fn, min_level, enabled=is_native_enabled(), level_callback=level_callback
+    )
     _sync_callable_dispatcher()
     return token
 
