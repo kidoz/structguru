@@ -358,3 +358,54 @@ def test_native_logging_call_never_raises_for_field_shape() -> None:
     while isinstance(innermost, list):
         innermost = innermost[0]
     assert innermost == "<max depth exceeded>"
+
+
+@pytest.mark.parametrize("format", ["json", "console"])
+@pytest.mark.parametrize("kind", ["isoformat", "dataclass"])
+def test_mutating_field_conversion_uses_dictionary_snapshot(format: str, kind: str) -> None:
+    from dataclasses import dataclass
+
+    payload: dict[str, Any] = {}
+
+    class ISOValue:
+        def isoformat(self) -> str:
+            payload.clear()
+            payload["replacement"] = "after snapshot"
+            return "converted"
+
+    @dataclass
+    class DataclassValue:
+        value: str
+
+        def __getattribute__(self, name: str) -> Any:
+            if name == "value":
+                payload.clear()
+                payload["replacement"] = "after snapshot"
+            return object.__getattribute__(self, name)
+
+    payload.update(
+        first=ISOValue() if kind == "isoformat" else DataclassValue("converted"),
+        second="snapshot retained",
+    )
+    _runtime.configure(target="memory", format=format, colors=False)
+    structguru.logger.info("conversion survives", payload=payload)
+    _runtime.flush()
+    line = _runtime.drain_messages()[0]
+    assert "converted" in line
+    assert "snapshot retained" in line
+    assert "after snapshot" not in line
+    assert payload == {"replacement": "after snapshot"}
+
+
+def test_standalone_native_renderer_snapshots_top_level_fields() -> None:
+    fields: dict[str, Any] = {}
+
+    class ISOValue:
+        def isoformat(self) -> str:
+            fields.clear()
+            return "converted"
+
+    fields.update(first=ISOValue(), second="retained")
+    assert _runtime._RUST is not None
+    record = json.loads(_runtime._RUST.render_line(fields, "test", "info", "svc", "message"))
+    assert record["first"] == "converted" and record["second"] == "retained"

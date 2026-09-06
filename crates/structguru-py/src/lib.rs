@@ -79,7 +79,10 @@ fn validate_patterns(patterns: Vec<String>, allow_backtracking: bool) -> PyResul
 /// Convert a Python field mapping into owned `(key, Value)` entries for the core renderer.
 fn convert_fields(fields: &Bound<'_, PyDict>) -> PyResult<Vec<(String, Value)>> {
     let mut entries: Vec<(String, Value)> = Vec::with_capacity(fields.len());
-    for (key, value) in fields.iter() {
+    for item in fields.items().iter() {
+        let pair = item.cast::<PyTuple>()?;
+        let key = pair.get_item(0)?;
+        let value = pair.get_item(1)?;
         let key = key
             .cast::<PyString>()
             .map_err(|_| PyTypeError::new_err("field keys must be strings"))?
@@ -731,7 +734,13 @@ fn convert_dict(
     containers: &mut ContainerStack,
 ) -> PyResult<Value> {
     let mut entries = Vec::with_capacity(dict.len());
-    for (key, value) in dict.iter() {
+    // Snapshot before conversion invokes Python (isoformat/dataclass properties
+    // can mutate this dict, including from another free-threaded worker).
+    // Iterating the live dict would panic when its size changes.
+    for item in dict.items().iter() {
+        let pair = item.cast::<PyTuple>()?;
+        let key = pair.get_item(0)?;
+        let value = pair.get_item(1)?;
         let key = convert_map_key(&key, depth, containers)?;
         entries.push((key, convert_py_value_inner(&value, depth + 1, containers)?));
     }
