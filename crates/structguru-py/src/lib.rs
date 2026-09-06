@@ -432,8 +432,14 @@ impl NativeStringWriter {
 
     fn enqueue_blocking(&self, py: Python<'_>, message: &str) -> bool {
         let message = message.to_owned();
-        // Release the GIL while blocked on a full queue so other Python threads run.
-        py.detach(|| self.writer.enqueue_blocking(message).is_ok())
+        // The queue normally has room, and the push is a mutex plus a
+        // VecDeque append: detaching from the GIL for it costs more than the
+        // push itself and forces a GIL hand-off per record when other threads
+        // are runnable. Only give the GIL up for the wait on a full queue.
+        match self.writer.enqueue_if_space(message) {
+            Ok(()) => true,
+            Err(message) => py.detach(|| self.writer.enqueue_blocking(message).is_ok()),
+        }
     }
 
     fn flush(&self, py: Python<'_>) {

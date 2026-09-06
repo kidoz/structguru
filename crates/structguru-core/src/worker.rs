@@ -649,6 +649,22 @@ impl StringWriter {
         Ok(())
     }
 
+    /// Push without waiting; `Err(message)` when the queue is full or closed.
+    ///
+    /// Unlike [`try_enqueue`](Self::try_enqueue), a full queue is not counted
+    /// as a drop: this is the fast half of a blocking enqueue, and the caller
+    /// goes on to wait for space instead of giving the record up.
+    pub fn enqueue_if_space(&self, message: String) -> Result<(), String> {
+        let mut state = self.lock_state();
+        if state.closed || (self.shared.maxsize > 0 && state.queue.len() >= self.shared.maxsize) {
+            return Err(message);
+        }
+        state.queue.push_back(message);
+        state.counters.enqueued += 1;
+        self.shared.available.notify_one();
+        Ok(())
+    }
+
     /// Enqueue, blocking the caller until space is available (backpressure).
     ///
     /// Returns `Err` only if the writer is closed. Callers should release the
@@ -869,6 +885,20 @@ mod tests {
         fn flush(&mut self) -> IoResult<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn enqueue_if_space_never_counts_a_drop() {
+        let writer = StringWriter::new_paused(1);
+        assert!(writer.enqueue_if_space("first".to_owned()).is_ok());
+        let rejected = writer.enqueue_if_space("second".to_owned());
+        assert_eq!(rejected, Err("second".to_owned()));
+        let metrics = writer.metrics();
+        assert_eq!(metrics.enqueued, 1);
+        assert_eq!(metrics.dropped, 0, "a full queue is not a drop here");
+        writer.resume();
+        writer.flush();
+        writer.close();
     }
 
     #[test]
