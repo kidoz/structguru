@@ -9,14 +9,19 @@ from __future__ import annotations
 
 import logging
 
+from structguru.settings import _LEVELS
+
 
 def _to_logging_level(level_name: str) -> int:
-    """Convert a human-readable level name to its :mod:`logging` constant."""
-    upper_level = level_name.upper()
-    if upper_level == "WARN":
-        return logging.WARNING
-    result: int | None = getattr(logging, upper_level, None)
-    if not isinstance(result, int):
+    """Convert a level name to its :mod:`logging` number.
+
+    Accepts every name the library recognizes elsewhere (``configure(level=...)``,
+    ``logger.catch(level=...)``), so the loguru-style aliases ``TRACE``,
+    ``SUCCESS``, ``EXCEPTION``, and ``FATAL`` gate sinks the same way their
+    logging methods do. Unknown names warn and fall back to ``INFO``.
+    """
+    result = _LEVELS.get(level_name.upper())
+    if result is None:
         import warnings
 
         warnings.warn(

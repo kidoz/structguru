@@ -556,6 +556,32 @@ class TestLoggerAddRemove:
         finally:
             log.remove(handler_id)
 
+    @pytest.mark.parametrize(
+        "level, threshold, kept, gated",
+        [("TRACE", 5, "debug", None), ("EXCEPTION", 40, "error", "info")],
+    )
+    def test_sink_level_aliases_gate_both_paths(
+        self, level: str, threshold: int, kept: str, gated: str | None
+    ) -> None:
+        # Aliases the rest of the library accepts must not warn and fall back to
+        # INFO, which dropped DEBUG below TRACE and admitted INFO to EXCEPTION.
+        configure(service="test", level="DEBUG", stream=io.StringIO())
+        log = Logger()
+        messages: list[str] = []
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            handler_id = log.add(messages.append, level=level)
+        try:
+            assert log._handlers[handler_id].level == threshold
+            getattr(log, kept)("kept")
+            if gated is not None:
+                getattr(log, gated)("gated")
+            _runtime.flush()
+        finally:
+            log.remove(handler_id)
+        assert any("kept" in message for message in messages)
+        assert not any("gated" in message for message in messages)
+
     def test_logger_is_hashable(self) -> None:
         # Loggers are identity-valued handles; users put them in dicts/sets.
         log = Logger(name="svc")

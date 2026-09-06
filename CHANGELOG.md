@@ -16,6 +16,9 @@ All notable changes to this project are documented here. The format is based on
   so a callback that logs through `logging` no longer re-enters itself.
 - `logger.remove()` waits for raw stdlib deliveries in progress, matching the
   guarantee it already gave native deliveries.
+- `logger.add(level=...)` and the stdlib bridge accept `TRACE`, `SUCCESS`,
+  `EXCEPTION`, and `FATAL` like the rest of the library instead of warning and
+  falling back to `INFO`.
 - Structured exception logging tolerates failing exception messages and snapshots
   locals before calling `repr()`. Exception groups preserve nested members,
   frames, and causes, with bounded traversal and native redaction.

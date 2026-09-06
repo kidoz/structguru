@@ -36,3 +36,12 @@ class TestToLoggingLevel:
     def test_unknown_defaults_to_info(self) -> None:
         with pytest.warns(UserWarning, match="Unknown log level"):
             assert _to_logging_level("CUSTOM") == logging.INFO
+
+    @pytest.mark.parametrize(
+        "name, expected",
+        [("NOTSET", 0), ("TRACE", 5), ("SUCCESS", 20), ("EXCEPTION", 40), ("FATAL", 50)],
+    )
+    def test_library_aliases(self, name: str, expected: int) -> None:
+        # The names configure(level=...) and logger.catch(level=...) accept.
+        assert _to_logging_level(name) == expected
+        assert _to_logging_level(name.lower()) == expected
