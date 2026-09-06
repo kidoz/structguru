@@ -11,6 +11,11 @@ All notable changes to this project are documented here. The format is based on
 - URL sanitization rejects URLs whose authority failed to parse
   (`https:/user:pw@host/path`), where `urlsplit()` leaves the credentials in the
   path, instead of logging them.
+- Raw stdlib delivery to `add()` sinks shares the callback reentrancy guard: a
+  record emitted inside any sink callback bypasses `add()` sinks on both paths,
+  so a callback that logs through `logging` no longer re-enters itself.
+- `logger.remove()` waits for raw stdlib deliveries in progress, matching the
+  guarantee it already gave native deliveries.
 - Structured exception logging tolerates failing exception messages and snapshots
   locals before calling `repr()`. Exception groups preserve nested members,
   frames, and causes, with bounded traversal and native redaction.
@@ -35,6 +40,10 @@ All notable changes to this project are documented here. The format is based on
 - Callable sink callbacks can log without blocking their own queue or creating
   a delivery loop. Their logs reach the native writer and bypass callable sinks.
   Sink removal now waits for producers that selected a sink before queue insertion.
+  A stdlib handler added with `logger.add()` can call `logger.remove()` from its
+  own `emit()` while a native record for that handler is queued: removal no
+  longer waits for the dispatch worker, which is blocked on the handler's lock,
+  so the two no longer deadlock.
 - Level-only configuration changes preserve in-flight callable and Sentry delivery,
   as well as the existing native writer and filter state.
 - Native dictionary conversion snapshots entries before invoking Python converters,

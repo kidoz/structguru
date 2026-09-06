@@ -31,6 +31,7 @@ from typing import Any, Protocol, TypeAlias, TypeVar, cast
 
 from structguru import _runtime
 from structguru._contextvars import bound_contextvars, get_contextvars
+from structguru._native_dispatch import callback_scope, in_callback
 from structguru.config import _to_logging_level
 from structguru.otel import add_otel_context
 
@@ -184,15 +185,71 @@ _id_counter = itertools.count(1)
 _id_counter_lock = threading.Lock()
 
 
+class _RootRelay(logging.Handler):
+    """Root-logger attachment that delivers raw stdlib records to one sink.
+
+    Third-party records reach an ``add()`` sink through this relay rather than
+    through the sink's handler directly, so raw delivery keeps the guarantees
+    of native delivery: a record emitted inside any sink callback is not
+    delivered back into ``add()`` sinks, and :meth:`Logger.remove` waits for
+    raw deliveries already in progress.
+    """
+
+    def __init__(self, sink: logging.Handler) -> None:
+        super().__init__()
+        self._sink = sink
+        self._condition = threading.Condition()
+        self._active = 0
+        self._detached = False
+
+    def __repr__(self) -> str:
+        return f"<{type(self).__name__} {self._sink!r}>"
+
+    def handle(self, record: logging.LogRecord) -> bool:
+        # The relay stays at NOTSET so the root logger offers every record;
+        # the sink's own level applies here, as ``callHandlers`` would apply it.
+        if record.levelno < self._sink.level or in_callback():
+            return False
+        with self._condition:
+            if self._detached:
+                return False
+            self._active += 1
+        try:
+            with callback_scope():
+                return bool(self._sink.handle(record))
+        finally:
+            with self._condition:
+                self._active -= 1
+                if self._active == 0:
+                    self._condition.notify_all()
+
+    def detach(self) -> None:
+        """Reject further records, then wait for deliveries already in progress.
+
+        A callback cannot wait for a delivery that may in turn be waiting for
+        it, so a detach issued inside a sink callback returns at once; the
+        in-progress delivery finishes on its own.
+        """
+        with self._condition:
+            self._detached = True
+            if in_callback():
+                return
+            self._condition.wait_for(lambda: self._active == 0)
+
+    def _reset_after_fork(self) -> None:
+        self._condition = threading.Condition()
+        self._active = 0
+
+
 # Sinks registered through `Logger.add()` are attached to the stdlib root logger
-# so they also receive third-party `logging` records. The stdlib bridge
-# (`structguru.integrations.stdlib`) routes those same records through the
-# native renderer instead, which delivers them to the very same sinks — already
-# formatted and redacted. Leaving the root attachment in place while the bridge
-# is installed therefore delivers every third-party record twice: once raw, once
-# rendered. Track what we attached so the bridge can suspend it and restore it
-# on uninstall.
-_root_sinks: weakref.WeakSet[logging.Handler] = weakref.WeakSet()
+# (through a `_RootRelay`) so they also receive third-party `logging` records.
+# The stdlib bridge (`structguru.integrations.stdlib`) routes those same records
+# through the native renderer instead, which delivers them to the very same
+# sinks — already formatted and redacted. Leaving the root attachment in place
+# while the bridge is installed therefore delivers every third-party record
+# twice: once raw, once rendered. Track what we attached so the bridge can
+# suspend it and restore it on uninstall.
+_root_relays: dict[logging.Handler, _RootRelay] = {}
 _root_attach_lock = threading.Lock()
 _stdlib_bridge_active = False
 
@@ -200,17 +257,25 @@ _stdlib_bridge_active = False
 def _attach_to_root(handler: logging.Handler) -> None:
     """Register *handler* for third-party records, unless the bridge supersedes it."""
     with _root_attach_lock:
-        _root_sinks.add(handler)
+        relay = _root_relays.get(handler)
+        if relay is None:
+            relay = _RootRelay(handler)
+            _root_relays[handler] = relay
         if _stdlib_bridge_active:
             return
-        logging.getLogger().addHandler(handler)
+        logging.getLogger().addHandler(relay)
 
 
 def _detach_from_root(handler: logging.Handler) -> None:
-    """Undo :func:`_attach_to_root` (a no-op when the handler is not attached)."""
+    """Undo :func:`_attach_to_root`, waiting for raw deliveries in progress."""
     with _root_attach_lock:
-        _root_sinks.discard(handler)
-        logging.getLogger().removeHandler(handler)
+        relay = _root_relays.pop(handler, None)
+        if relay is None:
+            return
+        logging.getLogger().removeHandler(relay)
+    # Wait outside the attach lock: the delivery in progress may itself be
+    # adding or removing sinks.
+    relay.detach()
 
 
 def _set_stdlib_bridge_active(active: bool) -> None:
@@ -225,12 +290,12 @@ def _set_stdlib_bridge_active(active: bool) -> None:
     root = logging.getLogger()
     with _root_attach_lock:
         _stdlib_bridge_active = active
-        affected = list(_root_sinks)
-        for handler in affected:
+        affected = list(_root_relays.values())
+        for relay in affected:
             if active:
-                root.removeHandler(handler)
+                root.removeHandler(relay)
             else:
-                root.addHandler(handler)
+                root.addHandler(relay)
 
 
 class _SinkLock:
@@ -257,6 +322,8 @@ def _after_fork() -> None:
     _id_counter_lock = threading.Lock()
     for owner in list(_SinkLock._instances):
         owner.lock = threading.Lock()
+    for relay in list(_root_relays.values()):
+        relay._reset_after_fork()
 
 
 if hasattr(os, "register_at_fork"):
@@ -565,16 +632,18 @@ class Logger:
         Every sink receives both structguru records and third-party stdlib records.
         Native records are delivered via the bounded callable dispatch queue;
         configured backpressure and flush semantics therefore apply uniformly.
-        Logs emitted inside a sink callback reach the native writer but bypass
-        all callable/``add()`` sinks to prevent recursive delivery and deadlocks.
-        Callback failures, including ``BaseException`` subclasses, are isolated
-        on the worker so later records and lifecycle operations can complete.
+        Logs emitted inside a sink callback, on either delivery path, reach the
+        native writer but bypass all callable/``add()`` sinks to prevent
+        recursive delivery and deadlocks. Callback failures, including
+        ``BaseException`` subclasses, are isolated on the worker so later
+        records and lifecycle operations can complete.
 
         Third-party records arrive raw (unrendered) via the stdlib root logger.
         Install the bridge (``structguru.integrations.stdlib``) to receive them
         rendered and redacted through the native path instead; while it is
         installed the raw root-logger delivery is suspended, so a sink never
-        sees the same record twice.
+        sees the same record twice. :meth:`remove` waits for raw deliveries in
+        progress as it does for native ones.
         """
         handler = _make_handler(sink)
         # One threshold for both delivery paths. Unset means NOTSET (0) — "all

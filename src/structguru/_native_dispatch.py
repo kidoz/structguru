@@ -5,9 +5,30 @@ from __future__ import annotations
 import itertools
 import threading
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import NamedTuple
+
+# Threads currently inside a sink callback: dispatch workers for their whole
+# lifetime, raw stdlib deliveries (``structguru.core``) for each callback.
+_callback_state = threading.local()
+
+
+def in_callback() -> bool:
+    """True while the current thread is inside a sink callback."""
+    return getattr(_callback_state, "depth", 0) > 0
+
+
+@contextmanager
+def callback_scope() -> Iterator[None]:
+    """Mark the current thread as inside a sink callback for the block."""
+    depth = getattr(_callback_state, "depth", 0)
+    _callback_state.depth = depth + 1
+    try:
+        yield
+    finally:
+        _callback_state.depth = depth
 
 
 @dataclass(frozen=True)
@@ -125,6 +146,7 @@ class _DispatchChannel:
         self.thread.join()
 
     def _loop(self) -> None:
+        _callback_state.depth = 1  # every callback this thread runs is nested
         items = self.queue.items
         while True:
             with self._not_empty:
@@ -237,12 +259,14 @@ class CallableSinkDispatcher:
             self._channel = None
 
     def _drain(self, channels: tuple[_DispatchChannel, ...]) -> None:
-        """Wait outside state locks, except when invoked by a sink callback."""
-        current = threading.current_thread()
-        # A callback cannot wait for itself, or for another generation whose
-        # callback may be waiting for this one. An external lifecycle call will
+        """Wait outside state locks, except when invoked from a sink callback."""
+        # A callback cannot wait for its own worker, nor for a worker that may be
+        # waiting on it: a stdlib handler on the raw root-logger path runs its
+        # emit() under the handler lock, and a queued native delivery to that
+        # same handler blocks on that lock on the worker thread. Both cases are
+        # marked by the shared callback scope. An external lifecycle call will
         # still find and drain every retired generation in _channels.
-        if not any(current is channel.thread for channel in channels):
+        if not in_callback():
             for channel in channels:
                 channel.flush()
         with self._lock:
@@ -262,15 +286,15 @@ class CallableSinkDispatcher:
     def enqueue(self, line: str, level: int, *, overflow: str) -> bool:
         """Queue a record, reserving its sinks before removal can drain them.
 
-        Logs emitted by our callbacks bypass callable delivery. They still reach
-        the native writer, but cannot recursively feed or block their own worker.
+        Logs emitted inside a sink callback, on the dispatch worker or during a
+        raw stdlib delivery, bypass callable delivery. They still reach the
+        native writer, but cannot recursively feed or block their own worker.
         """
+        if in_callback():
+            return True
         with self._lock:
             channel = self._channel
             if channel is None:
-                return True
-            current = threading.current_thread()
-            if any(current is candidate.thread for candidate in self._channels):
                 return True
             sinks = self._eligible.get(level)
             if sinks is None:
@@ -307,6 +331,9 @@ class CallableSinkDispatcher:
 
     def after_fork(self, *, enabled: bool) -> None:
         """Replace inherited synchronization state and restart in a forked child."""
+        # The surviving thread may have forked from inside a callback; the
+        # child does not continue that delivery.
+        _callback_state.depth = 0
         self._lock = threading.Lock()
         self._eligible = {}
         self._channel = (

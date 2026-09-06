@@ -9,7 +9,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from structguru import _runtime
+from structguru import _runtime, core
 from structguru.core import Logger
 from structguru.integrations.stdlib import (
     StructguruHandler,
@@ -73,13 +73,14 @@ def test_bridge_uninstall_cannot_reattach_removed_sink(
     log = Logger()
     token = log.add(received.append)
     handler = log._handlers[token]
+    relay = core._root_relays[handler]
     bridge = install_stdlib_bridge()
     root = logging.getLogger()
     original_add = root.addHandler
     entered, release, removing = threading.Event(), threading.Event(), threading.Event()
 
     def delayed_add(candidate: logging.Handler) -> None:
-        if candidate is handler:
+        if candidate is relay:
             entered.set()
             assert release.wait(3)
         original_add(candidate)
@@ -106,7 +107,7 @@ def test_bridge_uninstall_cannot_reattach_removed_sink(
             remover.join(3)
     assert not uninstall.is_alive()
     assert not remover.is_alive()
-    assert handler not in root.handlers
+    assert relay not in root.handlers
     logging.getLogger("foreign").warning("after removal")
     assert received == []
 

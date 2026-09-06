@@ -205,10 +205,12 @@ that path. Install the [stdlib bridge](#stdlib-bridge) to receive them rendered
 and redacted instead — while it is installed the raw delivery is suspended, so a
 sink never sees the same record twice.
 
-Logs emitted inside a sink callback reach the native writer but skip callable
-and `logger.add()` sinks, preventing recursive delivery and worker deadlocks.
-Outside callbacks, `logger.remove()` waits for producers that already selected
-the removed sink. Lifecycle calls inside a callback cannot wait for their own
+Logs emitted inside a sink callback, whether it received a native record or a
+raw stdlib one, reach the native writer but skip callable and `logger.add()`
+sinks, preventing recursive delivery and worker deadlocks. Outside callbacks,
+`logger.remove()` waits for producers that already selected the removed sink
+and for raw stdlib deliveries in progress. Lifecycle calls inside a callback,
+including a stdlib handler's `emit()` on the raw path, cannot wait for the
 worker; previously selected deliveries finish as that worker drains.
 For native file/stdout mirroring, `writer_metrics()["sink_errors"]` includes
 failed destinations even when another destination successfully writes the record.

@@ -7,13 +7,14 @@ import json
 import logging
 import os
 import stat
+import threading
 import warnings
 from pathlib import Path
 
 import pytest
 from conftest import configure
 
-from structguru import _runtime
+from structguru import _runtime, core
 from structguru.core import (
     Logger,
     _CallableHandler,
@@ -291,6 +292,128 @@ class TestLoggerLevelMethods:
         log, buf = self._make_capturing_logger()
         log.fatal("test fatal")
         assert "test fatal" in buf.getvalue()
+
+
+class TestRawStdlibDelivery:
+    """Third-party records reach ``add()`` sinks raw through the root logger."""
+
+    def test_records_emitted_by_a_raw_callback_do_not_reenter_sinks(self) -> None:
+        configure(service="test", level="DEBUG", stream=io.StringIO())
+        log = Logger()
+        received: list[str] = []
+
+        def sink(line: str) -> None:
+            received.append(line)
+            logging.getLogger("third_party").warning("emitted by callback")
+
+        handler_id = log.add(sink)
+        try:
+            logging.getLogger("third_party").warning("original")
+        finally:
+            log.remove(handler_id)
+        assert received == ["original"]
+
+    def test_raw_records_emitted_by_a_native_callback_do_not_reenter_sinks(self) -> None:
+        configure(service="test", level="DEBUG", stream=io.StringIO())
+        log = Logger()
+        received: list[str] = []
+
+        def sink(line: str) -> None:
+            received.append(line)
+            logging.getLogger("third_party").warning("emitted by callback")
+
+        handler_id = log.add(sink)
+        try:
+            log.info("native record")
+            _runtime.flush()
+        finally:
+            log.remove(handler_id)
+        assert len(received) == 1
+        assert "native record" in received[0]
+
+    def test_native_records_emitted_by_a_raw_callback_bypass_sinks(self) -> None:
+        stream = io.StringIO()
+        configure(service="test", level="DEBUG", stream=stream)
+        log = Logger()
+        received: list[str] = []
+
+        def sink(line: str) -> None:
+            received.append(line)
+            log.info("echo from callback")
+
+        handler_id = log.add(sink)
+        try:
+            logging.getLogger("third_party").warning("original")
+            _runtime.flush()
+        finally:
+            log.remove(handler_id)
+        assert received == ["original"]
+        assert "echo from callback" in stream.getvalue()
+
+    def test_remove_waits_for_raw_delivery_in_progress(self) -> None:
+        configure(service="test", level="DEBUG", stream=io.StringIO())
+        log = Logger()
+        entered, release = threading.Event(), threading.Event()
+        order: list[str] = []
+
+        def sink(line: str) -> None:
+            entered.set()
+            assert release.wait(3)
+            order.append("delivered")
+
+        handler_id = log.add(sink)
+        emitter = threading.Thread(
+            target=logging.getLogger("third_party").warning, args=("blocked",)
+        )
+        emitter.start()
+        assert entered.wait(3)
+
+        def remove() -> None:
+            log.remove(handler_id)
+            order.append("removed")
+
+        remover = threading.Thread(target=remove)
+        remover.start()
+        remover.join(0.2)
+        try:
+            assert remover.is_alive()
+        finally:
+            release.set()
+            emitter.join(3)
+            remover.join(3)
+        assert order == ["delivered", "removed"]
+
+    def test_remove_inside_a_raw_callback_returns_without_deadlock(self) -> None:
+        configure(service="test", level="DEBUG", stream=io.StringIO())
+        log = Logger()
+        received: list[str] = []
+        handler_id: int | None = None
+
+        def sink(line: str) -> None:
+            received.append(line)
+            assert handler_id is not None
+            log.remove(handler_id)
+
+        handler_id = log.add(sink)
+        emitter = threading.Thread(target=logging.getLogger("third_party").warning, args=("once",))
+        emitter.start()
+        emitter.join(3)
+        assert not emitter.is_alive()
+        logging.getLogger("third_party").warning("after removal")
+        assert received == ["once"]
+
+    def test_removed_sink_rejects_raw_records_already_offered(self) -> None:
+        # A producer that fetched the relay just before removal must not deliver
+        # after remove() has returned.
+        configure(service="test", level="DEBUG", stream=io.StringIO())
+        log = Logger()
+        received: list[str] = []
+        handler_id = log.add(received.append)
+        relay = core._root_relays[log._handlers[handler_id]]
+        log.remove(handler_id)
+        record = logging.LogRecord("third_party", logging.WARNING, "", 0, "late", (), None)
+        assert relay.handle(record) is False
+        assert received == []
 
 
 class TestLoggerAddRemove:

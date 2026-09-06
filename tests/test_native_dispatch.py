@@ -268,6 +268,64 @@ def test_callback_logging_bypasses_callable_delivery(capacity: int) -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_raw_handler_can_remove_itself_while_native_delivery_waits_for_its_lock() -> None:
+    # A stdlib handler added with logger.add() runs emit() under its own lock on
+    # the raw root-logger path. If it calls logger.remove() there while a native
+    # record for the same handler is queued, the dispatch worker is blocked on
+    # that lock; removal must not wait for the worker or both hang forever.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+            import logging
+            import threading
+            import time
+            import structguru as sg
+            from structguru import _runtime
+
+            entered = threading.Event()
+            queued = threading.Event()
+
+            class Handler(logging.Handler):
+                def __init__(self):
+                    super().__init__()
+                    self.messages = []
+
+                def emit(self, record):
+                    self.messages.append(record.getMessage())
+                    if record.getMessage() == 'raw':
+                        entered.set()
+                        assert queued.wait(3)
+                        sg.logger.remove(token)
+
+            handler = Handler()
+            sg.configure(target='memory')
+            token = sg.logger.add(handler)
+            raw = threading.Thread(
+                target=logging.getLogger('third_party').warning, args=('raw',), daemon=True
+            )
+            raw.start()
+            assert entered.wait(3)
+            sg.logger.info('native')
+            deadline = time.monotonic() + 3
+            while _runtime.writer_metrics()['callable_depth'] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            queued.set()
+            raw.join(3)
+            assert not raw.is_alive(), 'remove() inside a raw handler waited for the worker'
+            sg.flush()
+            assert handler.messages[0] == 'raw', handler.messages
+            sg.shutdown()
+        """),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize("keep_other_sink", [False, True])
 def test_removal_waits_for_selected_but_not_yet_enqueued_record(
     monkeypatch: pytest.MonkeyPatch,
