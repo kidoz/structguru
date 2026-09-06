@@ -13,7 +13,7 @@ test: ## Run tests with the coverage floor enforced
 		--cov=structguru --cov-report=term-missing --cov-fail-under=90
 
 bench: ## Run benchmarks
-	uv run python -m pytest tests/benchmarks/ --benchmark-only
+	uv run python -m pytest tests/benchmarks/ --benchmark-enable --benchmark-only
 
 lint: ## Run linter and format check
 	uv run ruff check .

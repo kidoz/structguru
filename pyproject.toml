@@ -146,3 +146,6 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Benchmarks under tests/benchmarks/ are collected by a plain `pytest` run; without
+# this they execute in full (minutes). `make bench` re-enables them explicitly.
+addopts = ["--benchmark-disable"]
