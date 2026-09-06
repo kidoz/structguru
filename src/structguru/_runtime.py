@@ -360,7 +360,7 @@ def notify_sentry(
     except (json.JSONDecodeError, TypeError):
         return
     event_dict: dict[str, Any] = {"event": rendered.get("message", "")}
-    for key in field_names:
+    for key in (*field_names, "service", "logger", "level", "severity", "timestamp"):
         if key in rendered:
             event_dict[key] = rendered[key]
     if exc_info is not None:
@@ -1054,6 +1054,9 @@ def writer_metrics() -> dict[str, Any] | None:
     Writer counters: ``enqueued``, ``dropped`` (queue-full), ``written``, ``depth``,
     etc. When a pre-render filter is active, ``sampled`` and ``rate_limited`` are
     added — these are distinct from the transport ``dropped`` counter.
+    ``written`` counts records delivered to at least one native destination;
+    ``sink_errors`` counts failed sink operations, including partial failures
+    when another destination succeeds.
     """
     state = current_runtime()
     if state is None:

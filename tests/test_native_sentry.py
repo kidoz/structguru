@@ -275,3 +275,35 @@ def test_raw_exception_is_only_used_for_sentry_capture(event_level: int) -> None
     else:
         mock_sentry.capture_exception.assert_not_called()
         mock_sentry.new_scope.assert_not_called()
+
+
+@pytest.mark.parametrize("format", ["json", "console"])
+@pytest.mark.parametrize("override", [False, True])
+def test_sentry_tags_include_redacted_native_metadata(format: str, override: bool) -> None:
+    from structguru.integrations import sentry as sentry_mod
+    from structguru.integrations.sentry import SentryProcessor
+
+    sdk = MagicMock()
+    scope = sdk.new_scope.return_value.__enter__.return_value
+    _runtime.configure(
+        target="memory",
+        service="DEMO_VALUE-configured",
+        format=format,
+        colors=False,
+        sensitive_patterns=["DEMO_VALUE"],
+        sentry_processor=SentryProcessor(tag_keys=frozenset({"service", "logger"})),
+    )
+    log = structguru.Logger(name="DEMO_VALUE-logger")
+    if override:
+        log = log.bind(service="DEMO_VALUE-bound")
+    with patch.object(sentry_mod, "_sentry_sdk", sdk):
+        log.error("failure")
+    scope.set_tag.assert_any_call(
+        "service", "[REDACTED]-bound" if override else "[REDACTED]-configured"
+    )
+    scope.set_tag.assert_any_call("logger", "[REDACTED]-logger")
+    extras = scope.set_extra.call_args.args[1]
+    assert extras["level"] == "ERROR"
+    assert extras["severity"] == 3
+    assert "timestamp" in extras
+    assert "DEMO_VALUE" not in str(extras)

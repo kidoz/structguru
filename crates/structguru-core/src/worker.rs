@@ -34,6 +34,12 @@ pub trait StringSink: Send {
     fn flush(&mut self) -> Result<(), SinkError> {
         Ok(())
     }
+
+    /// Drain child failure counts, including failures hidden by partial success.
+    /// Simple sinks report their failures through Result and use this default.
+    fn take_errors(&mut self) -> u64 {
+        0
+    }
 }
 
 #[derive(Default)]
@@ -428,11 +434,12 @@ fn backup_path(base: &Path, index: usize) -> PathBuf {
 /// failures via `sink_errors`).
 pub struct MultiSink {
     sinks: Vec<Box<dyn StringSink>>,
+    errors: u64,
 }
 
 impl MultiSink {
     pub fn new(sinks: Vec<Box<dyn StringSink>>) -> Self {
-        Self { sinks }
+        Self { sinks, errors: 0 }
     }
 }
 
@@ -442,7 +449,9 @@ impl StringSink for MultiSink {
         let mut ok_count = 0;
         for sink in &mut self.sinks {
             // Clone for all but the last sink to avoid an owned copy per child.
-            match sink.write(message.clone()) {
+            let result = sink.write(message.clone());
+            self.errors += sink.take_errors().max(u64::from(result.is_err()));
+            match result {
                 Ok(()) => ok_count += 1,
                 Err(err) => last_err = Some(err),
             }
@@ -457,12 +466,18 @@ impl StringSink for MultiSink {
     fn flush(&mut self) -> Result<(), SinkError> {
         let mut last_err: Option<SinkError> = None;
         for sink in &mut self.sinks {
-            if let Err(err) = sink.flush() {
+            let result = sink.flush();
+            self.errors += sink.take_errors().max(u64::from(result.is_err()));
+            if let Err(err) = result {
                 last_err = Some(err);
             }
         }
         // flush is best-effort; report the last error but don't suppress others
         last_err.map(Err).unwrap_or(Ok(()))
+    }
+
+    fn take_errors(&mut self) -> u64 {
+        std::mem::take(&mut self.errors)
     }
 }
 
@@ -788,13 +803,12 @@ fn worker_loop(shared: Arc<WorkerShared>, mut sink: Box<dyn StringSink>) {
                 if state.closed {
                     drop(state);
                     let flush_result = sink.flush();
+                    let errors = sink.take_errors().max(u64::from(flush_result.is_err()));
                     let mut state = shared
                         .state
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    if flush_result.is_err() {
-                        state.counters.sink_errors += 1;
-                    }
+                    state.counters.sink_errors += errors;
                     state.worker_done = true;
                     shared.drained.notify_all();
                     return;
@@ -807,17 +821,14 @@ fn worker_loop(shared: Arc<WorkerShared>, mut sink: Box<dyn StringSink>) {
         };
 
         let result = sink.write(message);
+        let errors = sink.take_errors().max(u64::from(result.is_err()));
         let mut state = shared
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match result {
-            Ok(()) => {
-                state.counters.written += 1;
-            }
-            Err(_) => {
-                state.counters.sink_errors += 1;
-            }
+        state.counters.sink_errors += errors;
+        if result.is_ok() {
+            state.counters.written += 1;
         }
         state.in_flight -= 1;
         let should_flush = state.queue.is_empty() && state.in_flight == 0;
@@ -825,13 +836,12 @@ fn worker_loop(shared: Arc<WorkerShared>, mut sink: Box<dyn StringSink>) {
 
         if should_flush {
             let flush_result = sink.flush();
+            let errors = sink.take_errors().max(u64::from(flush_result.is_err()));
             let mut state = shared
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if flush_result.is_err() {
-                state.counters.sink_errors += 1;
-            }
+            state.counters.sink_errors += errors;
             shared.drained.notify_all();
         }
     }
@@ -1303,5 +1313,37 @@ mod tests {
         let mut multi = MultiSink::new(vec![Box::new(a), Box::new(b)]);
         let result = multi.write("nothing".to_owned());
         assert!(result.is_err(), "Err when every child fails");
+    }
+
+    #[test]
+    fn worker_counts_nested_partial_sink_failures_without_losing_successes() {
+        let (a, _) = FailingSink::new(0);
+        let (b, _) = FailingSink::new(0);
+        let (memory, handle) = MemorySink::new();
+        let inner = MultiSink::new(vec![Box::new(a), Box::new(memory)]);
+        let outer = MultiSink::new(vec![Box::new(inner), Box::new(b)]);
+        let writer = StringWriter::with_boxed_sink(8, Box::new(outer));
+        writer.enqueue_blocking("survives".to_owned()).unwrap();
+        writer.close();
+        assert_eq!(handle.messages(), vec!["survives"]);
+        assert_eq!(writer.metrics().written, 1);
+        assert_eq!(writer.metrics().sink_errors, 2);
+    }
+
+    #[test]
+    fn multi_sink_counts_flush_failures_without_double_counting() {
+        struct FlushFailure;
+        impl StringSink for FlushFailure {
+            fn write(&mut self, _: String) -> Result<(), SinkError> {
+                Ok(())
+            }
+            fn flush(&mut self) -> Result<(), SinkError> {
+                Err(SinkError::new("flush failed"))
+            }
+        }
+        let mut sink = MultiSink::new(vec![Box::new(FlushFailure), Box::new(FlushFailure)]);
+        assert!(sink.flush().is_err());
+        assert_eq!(sink.take_errors(), 2);
+        assert_eq!(sink.take_errors(), 0);
     }
 }

@@ -374,3 +374,24 @@ def test_console_renderer_warn_level_uses_yellow() -> None:
 
     assert "\x1b[33m" in line  # ANSI yellow
     assert "[WARN    ]" in line
+
+
+def test_partial_file_failure_is_visible_while_stdout_keeps_working(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "partial.log"
+    _runtime.configure(
+        file_path=str(path), file_max_bytes=10, file_backup_count=1, also_stdout=True
+    )
+    structguru.logger.info("first")
+    structguru.flush()
+    # A directory at the oldest backup path makes rotation fail portably.
+    (tmp_path / "partial.log.1").mkdir()
+    structguru.logger.info("second")
+    structguru.flush()
+    metrics = structguru.writer_metrics()
+    assert metrics is not None
+    assert metrics["written"] == 2
+    assert metrics["sink_errors"] == 1
+    assert len(path.read_text().splitlines()) == 1
+    assert len(capfd.readouterr().out.splitlines()) == 2
