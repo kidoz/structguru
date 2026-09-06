@@ -172,6 +172,22 @@ pub struct RotatingFileSink {
     max_bytes: usize,
     backup_count: usize,
     bytes_written: usize,
+    /// (device, inode) of the open active handle; `None` when unknown.
+    active_identity: Option<(u64, u64)>,
+}
+
+/// Stable identity of a file for rotation detection (unix only; `None` elsewhere).
+fn file_identity(meta: &fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
 }
 
 impl RotatingFileSink {
@@ -194,11 +210,12 @@ impl RotatingFileSink {
         let unlock_result = File::unlock(&lock_file);
         let file = opened?;
         unlock_result.map_err(|err| SinkError::new(err.to_string()))?;
-        let bytes_written = file
+        let meta = file
             .get_ref()
             .metadata()
-            .map_err(|err| SinkError::new(err.to_string()))?
-            .len() as usize;
+            .map_err(|err| SinkError::new(err.to_string()))?;
+        let bytes_written = meta.len() as usize;
+        let active_identity = file_identity(&meta);
         Ok(Self {
             file: Some(file),
             lock_file,
@@ -206,6 +223,7 @@ impl RotatingFileSink {
             max_bytes,
             backup_count,
             bytes_written,
+            active_identity,
         })
     }
 
@@ -229,11 +247,9 @@ impl RotatingFileSink {
                 // Track the reopened file's real length: 0 after a successful
                 // rotation (fresh active file), or the surviving size if the
                 // active rename failed, so the threshold check stays meaningful.
-                self.bytes_written = file
-                    .get_ref()
-                    .metadata()
-                    .map(|meta| meta.len() as usize)
-                    .unwrap_or(0);
+                let meta = file.get_ref().metadata().ok();
+                self.bytes_written = meta.as_ref().map(|meta| meta.len() as usize).unwrap_or(0);
+                self.active_identity = meta.as_ref().and_then(file_identity);
                 self.file = Some(file);
                 shuffle
             }
@@ -268,7 +284,14 @@ impl RotatingFileSink {
     /// Never panics: a reopen failure is reported as a countable sink error.
     fn active_file(&mut self) -> Result<&mut BufWriter<File>, SinkError> {
         if self.file.is_none() {
-            self.file = Some(open_append(&self.path)?);
+            let file = open_append(&self.path)?;
+            self.active_identity = file
+                .get_ref()
+                .metadata()
+                .ok()
+                .as_ref()
+                .and_then(file_identity);
+            self.file = Some(file);
         }
         self.file
             .as_mut()
@@ -277,16 +300,28 @@ impl RotatingFileSink {
 
     /// Reopen the active path after another process may have rotated it.
     fn refresh_active_file(&mut self) -> Result<(), SinkError> {
+        // Fast path: one stat. If the path still resolves to the handle we hold,
+        // no other process rotated it; only refresh the size (another writer
+        // may have appended) and keep the handle open.
+        if self.file.is_some()
+            && let Some(active) = self.active_identity
+            && let Ok(meta) = fs::metadata(&self.path)
+            && file_identity(&meta) == Some(active)
+        {
+            self.bytes_written = meta.len() as usize;
+            return Ok(());
+        }
         if let Some(mut file) = self.file.take() {
             file.flush()
                 .map_err(|err| SinkError::new(err.to_string()))?;
         }
         let file = open_append(&self.path)?;
-        self.bytes_written = file
+        let meta = file
             .get_ref()
             .metadata()
-            .map_err(|err| SinkError::new(err.to_string()))?
-            .len() as usize;
+            .map_err(|err| SinkError::new(err.to_string()))?;
+        self.bytes_written = meta.len() as usize;
+        self.active_identity = file_identity(&meta);
         self.file = Some(file);
         Ok(())
     }
@@ -1162,6 +1197,27 @@ mod tests {
         second.write("second".to_owned()).unwrap();
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+        assert_eq!(
+            std::fs::read_to_string(backup_path(&path, 1)).unwrap(),
+            "123456789"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn rotating_file_follows_rotation_by_another_writer() {
+        // A writer still holding the pre-rotation handle must notice that the
+        // path now names a fresh file and reopen it, instead of appending to
+        // the backup through its stale handle.
+        let path = temp_log_path("rotate-follow-external");
+        let mut first = RotatingFileSink::new(&path, 10, 2).unwrap();
+        let mut second = RotatingFileSink::new(&path, 10, 2).unwrap();
+
+        first.write("123456789".to_owned()).unwrap();
+        second.write("AB".to_owned()).unwrap(); // crosses 10 bytes: rotates
+        first.write("cd".to_owned()).unwrap(); // must land in the new active file
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ABcd");
         assert_eq!(
             std::fs::read_to_string(backup_path(&path, 1)).unwrap(),
             "123456789"
