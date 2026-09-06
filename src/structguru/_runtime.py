@@ -930,7 +930,8 @@ def render_and_enqueue(
             state.sensitive_keys,
             stack,
         )
-        if not accepted and current_runtime() is state:
+        active = current_runtime()
+        if not accepted and active is not None and active.writer is state.writer:
             _note_drop()
         return None
     if state.console:
@@ -983,7 +984,9 @@ def render_and_enqueue(
     # A retired writer rejects late records during configure/disable. That is a
     # lifecycle boundary, not queue overflow, and must not raise or emit a false
     # "queue full" warning from application code.
-    still_active = current_runtime() is state
+    active = current_runtime()
+    # Level-only updates replace the snapshot, but keep its delivery resources.
+    still_active = active is not None and active.writer is state.writer
     if not enqueued and still_active:
         _note_drop()
     if still_active:

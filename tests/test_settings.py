@@ -290,3 +290,30 @@ def test_import_configuration_switches(environ: dict[str, str], success: bool) -
     assert (result.returncode == 0) is success, result.stderr
     if not success:
         assert "ValueError" in result.stderr
+
+
+@pytest.mark.parametrize("change", [update, set_level])
+@pytest.mark.parametrize("format", ["json", "console"])
+def test_level_change_during_record_preserves_all_deliveries(change: Any, format: str) -> None:
+    callbacks: list[str] = []
+    sentry: list[dict[str, Any]] = []
+
+    def metrics(*args: Any) -> None:
+        # Deterministically cross the level-change boundary mid-record.
+        change(level="ERROR")
+
+    configure(
+        target="memory",
+        format=format,
+        colors=False,
+        metric_processor=metrics,
+        callable_sinks=[callbacks.append],
+        sentry_processor=lambda _, method, event: sentry.append(event),
+    )
+    logger.info("already admitted")
+    logger.info("now filtered")
+    flush()
+    lines = _runtime.drain_messages()
+    assert len(lines) == 1
+    assert callbacks == lines
+    assert [event["event"] for event in sentry] == ["already admitted"]
