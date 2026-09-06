@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from structguru.integrations import sentry as sentry_mod
 from structguru.integrations.sentry import SentryProcessor
 from structguru.redaction import REDACTED_MARKER_KEY
@@ -19,6 +21,59 @@ def _mock_sentry() -> MagicMock:
     mock.new_scope.return_value = cm
     mock._scope = scope
     return mock
+
+
+@pytest.mark.parametrize(
+    "level, canonical",
+    [
+        ("ERROR", "error"),
+        ("EXCEPTION", "error"),
+        ("FATAL", "critical"),
+        ("CrItIcAl", "critical"),
+    ],
+)
+def test_catch_aliases_capture_exceptions_in_sentry(level: str, canonical: str) -> None:
+    from structguru import configure, logger
+
+    sdk = _mock_sentry()
+    error = ValueError("caught")
+    with patch.object(sentry_mod, "_sentry_sdk", sdk):
+        configure(target="null", sentry_processor=SentryProcessor())
+        with logger.catch(level=level):
+            raise error
+    sdk.capture_exception.assert_called_once_with(error)
+    assert sdk.add_breadcrumb.call_args.kwargs["level"] == canonical
+
+
+@pytest.mark.parametrize(
+    "alias, canonical, threshold",
+    [
+        ("TRACE", "debug", 5),
+        ("SUCCESS", "info", 20),
+        ("WARN", "warning", 30),
+        ("EXCEPTION", "error", 40),
+        ("FATAL", "critical", 50),
+    ],
+)
+def test_sentry_alias_thresholds_and_message_levels(
+    alias: str, canonical: str, threshold: int
+) -> None:
+    sdk = _mock_sentry()
+    with patch.object(sentry_mod, "_sentry_sdk", sdk):
+        processor = SentryProcessor(
+            event_level=threshold, breadcrumb_level=threshold, capture_messages=True
+        )
+        event = {"event": "message", REDACTED_MARKER_KEY: True}
+        assert processor(None, alias, event) is event
+        sdk.capture_message.assert_called_once_with("message", level=canonical)
+        assert sdk.add_breadcrumb.call_args.kwargs["level"] == canonical
+        sdk.reset_mock()
+        processor = SentryProcessor(
+            event_level=threshold + 1, breadcrumb_level=threshold + 1, capture_messages=True
+        )
+        processor(None, alias, event)
+        sdk.capture_message.assert_not_called()
+        sdk.add_breadcrumb.assert_not_called()
 
 
 class TestSentryProcessor:

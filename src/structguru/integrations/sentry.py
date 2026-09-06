@@ -28,12 +28,24 @@ except ImportError:  # pragma: no cover - exercised via _sentry_sdk = None
     _sentry_sdk = None
 
 _METHOD_TO_LEVEL: dict[str, int] = {
+    "trace": 5,
     "debug": logging.DEBUG,
     "info": logging.INFO,
+    "success": logging.INFO,
     "warning": logging.WARNING,
     "warn": logging.WARNING,
     "error": logging.ERROR,
+    "exception": logging.ERROR,
     "critical": logging.CRITICAL,
+    "fatal": logging.CRITICAL,
+}
+
+_SENTRY_LEVEL_ALIASES = {
+    "trace": "debug",
+    "success": "info",
+    "warn": "warning",
+    "exception": "error",
+    "fatal": "critical",
 }
 
 
@@ -103,7 +115,9 @@ class SentryProcessor:
         if _sentry_sdk is None:
             return event_dict
 
-        level = _METHOD_TO_LEVEL.get(method_name.lower(), logging.INFO)
+        method_name = method_name.lower()
+        level = _METHOD_TO_LEVEL.get(method_name, logging.INFO)
+        sentry_level = _SENTRY_LEVEL_ALIASES.get(method_name, method_name)
         # Raw exceptions are reserved for capture_exception. The SDK serializes
         # arbitrary objects in breadcrumbs/extras, which would bypass redaction.
         payload = {
@@ -114,7 +128,7 @@ class SentryProcessor:
             _sentry_sdk.add_breadcrumb(
                 message=str(event_dict.get("event", "")),
                 category="structguru",
-                level=method_name,
+                level=sentry_level,
                 data={k: v for k, v in payload.items() if k != "event"},
             )
 
@@ -137,7 +151,7 @@ class SentryProcessor:
             elif self._capture_messages:
                 _sentry_sdk.capture_message(
                     str(event_dict.get("event", "")),
-                    level=method_name,
+                    level=sentry_level,
                 )
 
         return event_dict
