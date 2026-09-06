@@ -7,11 +7,17 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-import orjson
+import pytest
 import structguru._rust as rust
+
+try:
+    import orjson
+except ImportError:  # pragma: no cover - free-threaded builds have no orjson wheel
+    orjson = None  # type: ignore[assignment]
 
 
 def orjson_serializer(obj: object) -> str:
+    assert orjson is not None
     return orjson.dumps(obj).decode()
 
 
@@ -53,6 +59,7 @@ def test_bench_native_conversion_stats(benchmark: Any) -> None:
         rust._conversion_stats(record)
 
 
+@pytest.mark.skipif(orjson is None, reason="orjson not installed")
 def test_bench_python_orjson_serializer(benchmark: Any) -> None:
     """Benchmark current Python orjson serialization."""
     record = _realistic_record()

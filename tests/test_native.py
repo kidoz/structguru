@@ -1,13 +1,23 @@
 from __future__ import annotations
 
-import orjson
 import pytest
 import structguru._rust as rust
 
 from structguru import _runtime
 
+# orjson is only the reference serializer for the parity checks below; it has no
+# free-threaded wheel, so those checks skip on 3.14t instead of blocking the module.
+try:
+    import orjson
+except ImportError:  # pragma: no cover - exercised on free-threaded builds only
+    orjson = None  # type: ignore[assignment]
+
+
+_needs_orjson = pytest.mark.skipif(orjson is None, reason="orjson not installed")
+
 
 def orjson_serializer(obj: object) -> str:
+    assert orjson is not None
     return orjson.dumps(obj).decode()
 
 
@@ -333,6 +343,7 @@ def test_native_lone_surrogates_are_replaced_not_rejected() -> None:
         },
     ],
 )
+@_needs_orjson
 def test_native_json_render_matches_orjson_serializer(value: object) -> None:
     assert rust._render_json_debug(value) == orjson_serializer(value)
 
