@@ -68,3 +68,25 @@ def test_sanitize_url_does_not_propagate_conversion_failure() -> None:
             raise RuntimeError("conversion failed")
 
     assert sanitize_url(BrokenURL()) == "<unparsable-url>"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "https:/user:password@host/path",
+        "https:user:password@host/path",
+        "https:///user:password@host/path",
+        "user:password@host/path",
+        "/user:password@host/path",
+    ],
+)
+def test_sanitize_url_rejects_credentials_outside_a_parsed_authority(raw: str) -> None:
+    # urlsplit() leaves userinfo in the path when the authority is malformed,
+    # where stripping userinfo cannot reach it. The path must not be retained.
+    result = sanitize_url(raw)
+    assert result == "<unparsable-url>"
+    assert "password" not in result
+
+
+def test_sanitize_url_keeps_relative_paths_without_userinfo() -> None:
+    assert sanitize_url("/relative/path?x=1") == "/relative/path?"

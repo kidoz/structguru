@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- URL sanitization rejects URLs whose authority failed to parse
+  (`https:/user:pw@host/path`), where `urlsplit()` leaves the credentials in the
+  path, instead of logging them.
 - Structured exception logging tolerates failing exception messages and snapshots
   locals before calling `repr()`. Exception groups preserve nested members,
   frames, and causes, with bounded traversal and native redaction.

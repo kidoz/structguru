@@ -16,11 +16,19 @@ def sanitize_url(raw: object) -> str:
     (``?api_key=...``, ``?token=...``). Both are stripped here, leaving
     scheme/host/path plus a ``?`` marker when a query was present, so operators
     can still see that parameters existed without their values. A URL that does
-    not parse is coerced to ``"<unparsable-url>"`` rather than logged raw.
+    not parse, or whose authority is malformed so that credentials would survive
+    in the path, is coerced to ``"<unparsable-url>"`` rather than logged raw.
     """
     try:
         text = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
         parts = urlsplit(text)
+        # urlsplit() only recognizes userinfo inside an authority ("//user:pw@host").
+        # A URL missing its slashes ("https:/user:pw@host/path") or its scheme
+        # ("user:pw@host/path" parses as scheme "user") carries the credentials in
+        # the path instead, where stripping userinfo cannot reach them. Retain the
+        # path only when the authority was actually parsed.
+        if not parts.netloc and (parts.scheme or "@" in parts.path):
+            return "<unparsable-url>"
         # Accessing hostname/port also validates parts of the authority.
         host = parts.hostname or ""
         if ":" in host:
