@@ -191,3 +191,101 @@ def test_callback_shutdown_during_external_lifecycle_operation(operation: str) -
         timeout=10,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("capacity", [1, 8])
+def test_callback_logging_bypasses_callable_delivery(capacity: int) -> None:
+    # Bound both a worker self-deadlock (capacity=1) and a feedback loop when
+    # there is space. Reentrant records must still reach the native writer.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+            import json
+            import sys
+            import threading
+            import structguru as sg
+            from structguru import _runtime
+
+            entered = threading.Event()
+            proceed = threading.Event()
+            delivered = []
+            def sink(line):
+                message = json.loads(line)['message']
+                delivered.append(message)
+                if message == 'trigger':
+                    entered.set()
+                    assert proceed.wait(3)
+                    sg.logger.info('nested')
+            sg.configure(target='memory', callable_sinks=[sink],
+                         callable_queue_maxsize=int(sys.argv[1]))
+            sg.logger.info('trigger')
+            assert entered.wait(3)
+            sg.logger.info('queued')
+            proceed.set()
+            sg.flush()
+            messages = [json.loads(line)['message'] for line in _runtime.drain_messages()]
+            assert messages == ['trigger', 'queued', 'nested'], messages
+            assert delivered == ['trigger', 'queued'], delivered
+            sg.shutdown()
+        """),
+            str(capacity),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("keep_other_sink", [False, True])
+def test_removal_waits_for_selected_but_not_yet_enqueued_record(
+    monkeypatch: pytest.MonkeyPatch,
+    keep_other_sink: bool,
+) -> None:
+    dispatcher = CallableSinkDispatcher()
+    received: list[str] = []
+    token = dispatcher.add(received.append, 0, enabled=True)
+    if keep_other_sink:
+        dispatcher.add(lambda line: None, 0, enabled=True)
+    channel = dispatcher._channel
+    assert channel is not None
+    original = channel.put_reserved
+    ready, proceed, removing, removed = (threading.Event() for _ in range(4))
+
+    def delayed(record: _Record, *, overflow: str) -> bool:
+        ready.set()
+        assert proceed.wait(3)
+        return original(record, overflow=overflow)
+
+    monkeypatch.setattr(channel, "put_reserved", delayed)
+    producer = threading.Thread(
+        target=dispatcher.enqueue,
+        args=("pending", 20),
+        kwargs={"overflow": "block"},
+        daemon=True,
+    )
+    producer.start()
+    assert ready.wait(1)
+
+    def remove() -> None:
+        removing.set()
+        dispatcher.remove(token)
+        removed.set()
+
+    remover = threading.Thread(target=remove, daemon=True)
+    remover.start()
+    try:
+        assert removing.wait(1)
+        assert not removed.wait(0.1), "remove missed a producer that had selected the sink"
+    finally:
+        proceed.set()
+        producer.join(3)
+        remover.join(3)
+    assert not producer.is_alive() and not remover.is_alive()
+    assert removed.is_set()
+    assert received == ["pending"]
+    dispatcher.enqueue("after removal", 20, overflow="block")
+    dispatcher.disable()
+    assert received == ["pending"]

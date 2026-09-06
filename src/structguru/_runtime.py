@@ -562,6 +562,8 @@ def configure(settings: Settings | None = None, **changes: Unpack[SettingsChange
     *rendered* line. They run on a dedicated daemon thread. Their queue is bounded
     by ``callable_queue_maxsize``; ``overflow="block"`` applies backpressure when
     full, while ``overflow="drop"`` drops and counts the callable delivery.
+    Logs emitted inside these callbacks still reach the native writer but skip
+    callable sinks, preventing feedback loops and worker self-deadlocks.
 
     Registers shutdown (``atexit``) and fork (``os.register_at_fork``) handlers so
     buffered records are flushed on exit and the background writer is respawned in

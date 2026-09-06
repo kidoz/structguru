@@ -509,6 +509,8 @@ class Logger:
         Every sink receives both structguru records and third-party stdlib records.
         Native records are delivered via the bounded callable dispatch queue;
         configured backpressure and flush semantics therefore apply uniformly.
+        Logs emitted inside a sink callback reach the native writer but bypass
+        all callable/``add()`` sinks to prevent recursive delivery and deadlocks.
 
         Third-party records arrive raw (unrendered) via the stdlib root logger.
         Install the bridge (``structguru.integrations.stdlib``) to receive them

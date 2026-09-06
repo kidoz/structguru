@@ -22,11 +22,6 @@ class _Record(NamedTuple):
     sinks: tuple[_Sink, ...]
 
 
-_ACCEPTED = 1
-_DROPPED = 0
-_RETIRED = -1
-
-
 class _WorkQueue:
     """The deque and counter ``queue.Queue`` used to own, guarded by the channel lock."""
 
@@ -43,10 +38,9 @@ class _WorkQueue:
 class _DispatchChannel:
     """One queue generation with producer-aware shutdown semantics.
 
-    One lock guards the queue, the producer leases, and the accepting flag, so
-    the hot path (:meth:`put`) is a single acquisition: check, wait for space
-    in block mode, append, wake the worker. The previous ``queue.Queue`` design
-    cost three acquisitions per record on top of the lease bookkeeping.
+    One lock guards the queue, producer leases, and accepting flag. Producers
+    reserve delivery while holding the sink registry lock, then wait for queue
+    space outside that lock. Retirement drains all outstanding reservations.
     """
 
     def __init__(self, maxsize: int) -> None:
@@ -77,29 +71,6 @@ class _DispatchChannel:
         if self._producers == 0:
             self._condition.notify_all()
             self._not_empty.notify_all()
-
-    def put(self, record: _Record, *, overflow: str) -> int:
-        """Insert one record in a single lock acquisition.
-
-        Returns ``_ACCEPTED``, ``_DROPPED`` (drop mode with a full queue), or
-        ``_RETIRED`` (this generation no longer accepts producers). A producer
-        that has to wait for space holds a lease meanwhile, which keeps the
-        worker draining even if the generation is retired underneath it.
-        """
-        with self._condition:
-            if not self._accepting:
-                return _RETIRED
-            if self._full():
-                if overflow != "block":
-                    return _DROPPED
-                self._producers += 1
-                try:
-                    while self._full():
-                        self._condition.wait()
-                finally:
-                    self._release_lease()
-            self._append(record)
-            return _ACCEPTED
 
     def reserve(self) -> bool:
         """Reserve one producer before a lifecycle transition can close the queue."""
@@ -190,9 +161,8 @@ class CallableSinkDispatcher:
         # remove/flush/shutdown cannot overlook callbacks still using a sink.
         self._channels: set[_DispatchChannel] = set()
         self._dropped = 0
-        # Per-level tuple of sinks that admit that level; rebound (never
-        # mutated) whenever the registry changes, so a reader holding the old
-        # dict sees a consistent, at worst one-record-stale, snapshot.
+        # Per-level eligibility cache, accessed under the registry lock and
+        # invalidated on every registration change.
         self._eligible: dict[int, tuple[_Sink, ...]] = {}
 
     def add(self, callback: Callable[[str], None], min_level: int, *, enabled: bool) -> int:
@@ -278,30 +248,36 @@ class CallableSinkDispatcher:
         return self._channel is None
 
     def enqueue(self, line: str, level: int, *, overflow: str) -> bool:
-        """Queue one rendered record; return false when delivery is rejected."""
-        channel = self._channel
-        if channel is None:
-            return True
-        sinks = self._eligible.get(level)
-        if sinks is None:
-            sinks = self._eligible_sinks(level)
-        if not sinks:
-            return True
-        outcome = channel.put(_Record(line, sinks), overflow=overflow)
-        if outcome == _DROPPED:
-            self._note_drop()
-            return False
-        return outcome == _ACCEPTED
+        """Queue a record, reserving its sinks before removal can drain them.
 
-    def _eligible_sinks(self, level: int) -> tuple[_Sink, ...]:
+        Logs emitted by our callbacks bypass callable delivery. They still reach
+        the native writer, but cannot recursively feed or block their own worker.
+        """
         with self._lock:
-            sinks = tuple(
-                sink
-                for sink in (*self._configured, *self._runtime.values())
-                if level >= sink.min_level
-            )
-            self._eligible[level] = sinks
-        return sinks
+            channel = self._channel
+            if channel is None:
+                return True
+            current = threading.current_thread()
+            if any(current is candidate.thread for candidate in self._channels):
+                return True
+            sinks = self._eligible.get(level)
+            if sinks is None:
+                sinks = tuple(
+                    sink
+                    for sink in (*self._configured, *self._runtime.values())
+                    if level >= sink.min_level
+                )
+                self._eligible[level] = sinks
+            if not sinks:
+                return True
+            if not channel.reserve():
+                return False
+        # The lease covers the gap between selecting sinks and queue insertion.
+        # Removal sees this producer even before its record enters the queue.
+        accepted = channel.put_reserved(_Record(line, sinks), overflow=overflow)
+        if not accepted:
+            self._note_drop()
+        return accepted
 
     def flush(self) -> None:
         """Block until all queued deliveries have completed."""
