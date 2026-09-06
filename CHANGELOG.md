@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Callback failures, including `SystemExit` and `KeyboardInterrupt`, no longer
+  terminate the dispatch worker or strand flush/removal/shutdown operations.
+- Forked children reset sink registry, logger, and stdlib bridge locks while
+  preserving the sink registry shared by bound loggers.
+- `logger.catch()` validates case-insensitive level names before execution,
+  preventing uppercase error levels from silently filtering caught exceptions.
+- Native flush waits for sink flushing and its error accounting to finish.
+- Concurrent stdlib bridge uninstall and sink removal cannot reattach a removed
+  sink. Handler sinks retain their original severity in JSON and console modes.
+- Stdlib messages containing braces remain verbatim when stack info is included.
+- Extracted ASGI headers cannot overwrite request metadata or crash a request
+  because their names collide with reserved context fields.
 - Callable sink callbacks can log without blocking their own queue or creating
   a delivery loop. Their logs reach the native writer and bypass callable sinks.
   Sink removal now waits for producers that selected a sink before queue insertion.
