@@ -4,6 +4,48 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `configure(exception_carets=False)` omits the PEP 657 position markers (the
+  `~~~^^^` lines under each frame) from formatted tracebacks. CPython computes
+  them per frame while formatting, and on 3.11+ they are most of the cost of
+  `logger.exception()`: a 22-frame traceback formats in 92 µs instead of
+  475 µs without them. The output is exactly what CPython prints under
+  `PYTHONNODEBUGRANGES=1`, including chained exceptions and exception groups.
+  The default is unchanged, and `structured_exceptions=True` never renders
+  the markers.
+
+### Changed
+
+- The rotating file sink no longer closes, reopens, and stats the log file
+  before every record to detect a rotation by another process. It stats the
+  path once and compares the file identity with its open handle, reopening
+  only when the path names a new file. With rotation enabled (the default)
+  the writer thread handles 256 records in 0.63 ms instead of 5.08 ms, and a
+  caller throttled by a full queue waits 2.6 µs per record instead of 21 µs,
+  the same as with rotation disabled.
+- The blocking enqueue pushes under the GIL and releases it only when the
+  queue is actually full. Releasing it around every push forced a GIL
+  hand-off per record whenever another thread was runnable: four threads
+  logging concurrently now spend 3.0 ms instead of 5.6 ms per 1,000 records,
+  eight threads 6.0 ms instead of 10.5 ms. Single-threaded cost and the
+  release-while-blocked behaviour are unchanged.
+- A JSON record with no stream sink, callable sink, or Sentry processor is
+  rendered and enqueued in one native call, so the line never becomes a
+  Python string, and the callable-sink dispatcher is skipped entirely while
+  no sink is registered. `logger.info("Hello world")` takes 1.75 µs instead
+  of 2.42 µs; long or escaping-heavy messages gain more.
+- `Logger.bind()` and `Logger.opt()` copy the logger directly instead of
+  re-running the dataclass constructor: about 0.25 µs instead of 0.75 µs
+  each, which also speeds up every record that crosses the stdlib bridge.
+- Callable sinks hand a record to their dispatch thread in one lock
+  acquisition instead of four, and the set of sinks admitting a level is
+  cached until a sink is added or removed: the caller-side cost of a callable
+  sink drops from about 6.8 µs to 3.9 µs per record. Lifecycle semantics
+  (retire, drain, fork) are unchanged.
+
 ## [1.2.3] - 2026-09-06
 
 ### Fixed
