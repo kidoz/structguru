@@ -14,6 +14,14 @@ from typing import Any
 from structguru.redaction import DEFAULT_SENSITIVE_KEYS
 
 
+def _exception_message(value: BaseException) -> str:
+    """Convert an exception message without replacing the original failure."""
+    try:
+        return str(value)
+    except Exception as exc:
+        return f"<str failed: {type(exc).__name__}>"
+
+
 def build_exception_dict(
     exc_info: Any,
     *,
@@ -83,7 +91,7 @@ def build_exception_dict(
 
     exception_dict: dict[str, Any] = {
         "type": exc_type.__qualname__,
-        "message": str(exc_value),
+        "message": _exception_message(exc_value),
         "module": exc_type.__module__,
         "frames": frames,
     }
@@ -94,7 +102,7 @@ def build_exception_dict(
     if cause is not None:
         exception_dict["cause"] = {
             "type": type(cause).__qualname__,
-            "message": str(cause),
+            "message": _exception_message(cause),
         }
 
     return exception_dict
@@ -107,7 +115,8 @@ def _format_locals(
 ) -> dict[str, str]:
     """Redact sensitive names and cap ``repr`` length for each local."""
     out: dict[str, str] = {}
-    for name, value in raw.items():
+    # repr() may execute arbitrary Python and mutate the containing namespace.
+    for name, value in list(raw.items()):
         if isinstance(name, str) and name.lower() in sensitive_keys:
             out[name] = "[REDACTED]"
             continue

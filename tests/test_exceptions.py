@@ -2,11 +2,59 @@
 
 from __future__ import annotations
 
+import json
 import sys
 
 import pytest
 
 from structguru.exceptions import build_exception_dict
+
+
+def test_structured_logging_snapshots_locals_before_repr_mutates_them() -> None:
+    from structguru import _runtime
+    from structguru.core import Logger
+
+    namespace = {"logger": Logger()}
+
+    class MutatingRepr:
+        def __repr__(self) -> str:
+            namespace["added_during_repr"] = True
+            return "safe representation"
+
+    namespace["value"] = MutatingRepr()
+    _runtime.configure(target="memory", structured_exceptions=True, exception_include_locals=True)
+    exec(
+        "try:\n    raise ValueError('original')\n"
+        "except ValueError:\n    logger.exception('caught')",
+        namespace,
+    )
+    _runtime.flush()
+    result = json.loads(_runtime.drain_messages()[-1])["exception"]
+    assert result["message"] == "original"
+    assert namespace["added_during_repr"] is True
+    assert result["frames"][-1]["locals"]["value"] == "safe representation"
+    assert "added_during_repr" not in result["frames"][-1]["locals"]
+
+
+def test_broken_exception_messages_preserve_the_record_and_cause() -> None:
+    from structguru import _runtime
+    from structguru.core import Logger
+
+    class BrokenMessage(Exception):
+        def __str__(self) -> str:
+            raise RuntimeError("private conversion detail")
+
+    error = BrokenMessage()
+    error.__cause__ = BrokenMessage()
+    _runtime.configure(target="memory", structured_exceptions=True)
+    Logger().error("original log", exc_info=error)
+    _runtime.flush()
+    line = _runtime.drain_messages()[-1]
+    result = json.loads(line)
+    assert result["message"] == "original log"
+    assert result["exception"]["message"] == "<str failed: RuntimeError>"
+    assert result["exception"]["cause"]["message"] == "<str failed: RuntimeError>"
+    assert "private conversion detail" not in line
 
 
 def _make_exc_info() -> tuple:
