@@ -292,9 +292,13 @@ def add_callable_sink(
     return token
 
 
-def remove_callable_sink(token: int) -> bool:
-    """Drain prior records, then remove exactly one runtime sink token."""
-    return _callable_dispatcher.remove(token)
+def remove_callable_sink(token: int, *, finalizer: Callable[[], None] | None = None) -> bool:
+    """Drain prior records, then remove exactly one runtime sink token.
+
+    ``finalizer`` runs once no queued delivery references the sink; inside a
+    sink callback that is on the worker after the last such delivery.
+    """
+    return _callable_dispatcher.remove(token, finalizer=finalizer)
 
 
 def sensitive_patterns() -> list[str] | None:

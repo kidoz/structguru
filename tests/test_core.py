@@ -523,6 +523,38 @@ class TestLoggerAddRemove:
         assert stream.closed
         assert "native file" in (tmp_path / "test.log").read_text()
 
+    def test_remove_inside_callback_closes_handler_after_queued_deliveries(
+        self, tmp_path: Path
+    ) -> None:
+        # A callback removing a file sink cannot wait for the worker, but the
+        # deliveries already queued for that sink must still reach the file
+        # before it closes; closing first made FileHandler reopen the file for
+        # them and leak the stream.
+        configure(service="test", level="DEBUG", stream=io.StringIO())
+        log = Logger()
+        handler = logging.FileHandler(tmp_path / "test.log")
+        file_id = log.add(handler, level="DEBUG")
+        entered, proceed = threading.Event(), threading.Event()
+
+        def trigger(line: str) -> None:
+            if '"message":"trigger"' in line:
+                entered.set()
+                assert proceed.wait(3)
+                log.remove(file_id)
+
+        trigger_id = log.add(trigger, level="DEBUG")
+        try:
+            log.info("trigger")
+            assert entered.wait(3)
+            log.info("queued")  # captured the file sink before its removal
+            proceed.set()
+            _runtime.flush()
+        finally:
+            log.remove(trigger_id)
+        assert handler.stream is None, "handler closed only after the queued delivery"
+        lines = (tmp_path / "test.log").read_text().splitlines()
+        assert [json.loads(line)["message"] for line in lines] == ["trigger", "queued"]
+
     @pytest.mark.skipif(os.name != "posix", reason="Unix permission bits only")
     def test_path_sink_is_created_owner_only(self, tmp_path: Path) -> None:
         configure(service="test", level="DEBUG", stream=io.StringIO())

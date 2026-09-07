@@ -66,9 +66,16 @@ class _DispatchChannel:
     space outside that lock. Retirement drains all outstanding reservations.
     """
 
-    def __init__(self, maxsize: int) -> None:
+    def __init__(
+        self,
+        maxsize: int,
+        on_delivered: Callable[[tuple[_Sink, ...]], None] | None = None,
+    ) -> None:
         self.queue = _WorkQueue()
         self.maxsize = maxsize
+        # Called on the worker after each record's callbacks, before the record
+        # counts as done, so a flush() observes every consequence of delivery.
+        self._on_delivered = on_delivered
         lock = threading.Lock()
         # State changes producers, flushers, and lifecycle callers wait on:
         # retirement, a freed slot, the last lease released, the last task done.
@@ -168,6 +175,11 @@ class _DispatchChannel:
                         sink.callback(item.line)
                 except BaseException:  # worker callbacks cannot interrupt the caller
                     pass
+            if self._on_delivered is not None:
+                try:
+                    self._on_delivered(item.sinks)
+                except BaseException:  # a finalizer cannot take the worker down
+                    pass
             with self._condition:
                 self.queue.unfinished_tasks -= 1
                 if self.queue.unfinished_tasks == 0:
@@ -191,6 +203,10 @@ class CallableSinkDispatcher:
         # Per-level eligibility cache, accessed under the registry lock and
         # invalidated on every registration change.
         self._eligible: dict[int, tuple[_Sink, ...]] = {}
+        # Deliveries that selected a runtime sink and have not finished, and the
+        # finalizers waiting for that count to reach zero (see remove()).
+        self._outstanding: dict[int, int] = {}
+        self._finalizers: dict[int, Callable[[], None]] = {}
 
     def add(
         self,
@@ -206,20 +222,54 @@ class CallableSinkDispatcher:
             self._runtime[token] = _Sink(token, callback, min_level, level_callback)
             self._eligible = {}
             if enabled and self._channel is None:
-                self._channel = _DispatchChannel(self._maxsize)
+                self._channel = _DispatchChannel(self._maxsize, on_delivered=self._settle)
                 self._channels.add(self._channel)
         return token
 
-    def remove(self, token: int) -> bool:
-        """Remove one sink, then drain every record that captured it."""
+    def remove(self, token: int, *, finalizer: Callable[[], None] | None = None) -> bool:
+        """Remove one sink, then drain every record that captured it.
+
+        ``finalizer`` releases the sink's resources (closing a handler) and runs
+        once no delivery references the sink: after the drain when called
+        outside a callback, otherwise on the worker right after the last
+        delivery that captured the sink, since a callback cannot wait for its
+        own worker. Closing at once would leave those deliveries writing to a
+        closed handler.
+        """
         with self._lock:
             removed = self._runtime.pop(token, None) is not None
             self._eligible = {}
             if not (self._configured or self._runtime):
                 self._retire_active()
             channels = tuple(self._channels)
+            if finalizer is not None and in_callback() and self._outstanding.get(token, 0):
+                self._finalizers[token] = finalizer
+                finalizer = None
         self._drain(channels)
+        if finalizer is not None:
+            finalizer()
         return removed
+
+    def _settle(self, sinks: tuple[_Sink, ...]) -> None:
+        """Account for one finished (or dropped) delivery to each of *sinks*."""
+        due: list[Callable[[], None]] = []
+        with self._lock:
+            for sink in sinks:
+                if sink.token <= 0:
+                    continue
+                remaining = self._outstanding.get(sink.token, 0) - 1
+                if remaining > 0:
+                    self._outstanding[sink.token] = remaining
+                    continue
+                self._outstanding.pop(sink.token, None)
+                finalizer = self._finalizers.pop(sink.token, None)
+                if finalizer is not None:
+                    due.append(finalizer)
+        for finalizer in due:
+            try:
+                finalizer()
+            except Exception:  # noqa: BLE001 - releasing a sink must never break logging
+                pass
 
     def configure(
         self,
@@ -239,7 +289,7 @@ class CallableSinkDispatcher:
             self._maxsize = maxsize
             self._dropped = 0
             if self._configured or self._runtime:
-                self._channel = _DispatchChannel(maxsize)
+                self._channel = _DispatchChannel(maxsize, on_delivered=self._settle)
                 self._channels.add(self._channel)
         self._drain(channels)
 
@@ -308,11 +358,15 @@ class CallableSinkDispatcher:
                 return True
             if not channel.reserve():
                 return False
+            for sink in sinks:
+                if sink.token > 0:
+                    self._outstanding[sink.token] = self._outstanding.get(sink.token, 0) + 1
         # The lease covers the gap between selecting sinks and queue insertion.
         # Removal sees this producer even before its record enters the queue.
         accepted = channel.put_reserved(_Record(line, sinks, level), overflow=overflow)
         if not accepted:
             self._note_drop()
+            self._settle(sinks)
         return accepted
 
     def flush(self) -> None:
@@ -336,12 +390,22 @@ class CallableSinkDispatcher:
         _callback_state.depth = 0
         self._lock = threading.Lock()
         self._eligible = {}
+        # Inherited queue contents are not delivered in the child, so nothing
+        # waits on the parent's counts; release whatever removal deferred.
+        self._outstanding = {}
+        finalizers = list(self._finalizers.values())
+        self._finalizers = {}
         self._channel = (
-            _DispatchChannel(self._maxsize)
+            _DispatchChannel(self._maxsize, on_delivered=self._settle)
             if enabled and (self._configured or self._runtime)
             else None
         )
         self._channels = {self._channel} if self._channel is not None else set()
+        for finalizer in finalizers:
+            try:
+                finalizer()
+            except Exception:  # noqa: BLE001 - releasing a sink must never break logging
+                pass
 
     def metrics(self) -> dict[str, int]:
         """Return callable dispatch queue and drop metrics."""

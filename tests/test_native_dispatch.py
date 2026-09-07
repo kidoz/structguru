@@ -326,6 +326,40 @@ def test_raw_handler_can_remove_itself_while_native_delivery_waits_for_its_lock(
     assert result.returncode == 0, result.stderr
 
 
+def test_remove_finalizer_runs_after_the_last_queued_delivery() -> None:
+    dispatcher = CallableSinkDispatcher()
+    received: list[str] = []
+    closed: list[int] = []
+    entered, proceed = threading.Event(), threading.Event()
+    sink = dispatcher.add(received.append, 0, enabled=True)
+
+    def trigger(line: str) -> None:
+        if line == "trigger":
+            entered.set()
+            assert proceed.wait(3)
+            dispatcher.remove(sink, finalizer=lambda: closed.append(len(received)))
+
+    dispatcher.add(trigger, 0, enabled=True)
+    dispatcher.enqueue("trigger", 20, overflow="block")
+    assert entered.wait(3)
+    dispatcher.enqueue("queued", 20, overflow="block")
+    proceed.set()
+    dispatcher.flush()
+    assert received == ["trigger", "queued"]
+    assert closed == [2], "finalizer ran before the queued delivery finished"
+    dispatcher.disable()
+
+
+def test_remove_finalizer_runs_at_once_when_nothing_is_queued() -> None:
+    dispatcher = CallableSinkDispatcher()
+    closed: list[str] = []
+    sink = dispatcher.add(lambda line: None, 0, enabled=True)
+    dispatcher.enqueue("delivered", 20, overflow="block")
+    dispatcher.remove(sink, finalizer=lambda: closed.append("closed"))
+    assert closed == ["closed"]
+    dispatcher.disable()
+
+
 @pytest.mark.parametrize("keep_other_sink", [False, True])
 def test_removal_waits_for_selected_but_not_yet_enqueued_record(
     monkeypatch: pytest.MonkeyPatch,

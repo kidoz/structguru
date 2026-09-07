@@ -700,10 +700,18 @@ class Logger:
                     )
                 ]
         for handler, token in registrations:
-            if token is not None:
-                _runtime.remove_callable_sink(token)
             if handler is not None:
                 _detach_from_root(handler)
+            if token is not None:
+                # Close only once every native delivery that captured the
+                # handler has run. Inside a sink callback the dispatcher cannot
+                # drain, so the close is deferred to the worker that finishes
+                # those deliveries; closing at once left them writing to a
+                # closed handler (a FileHandler silently reopens its file).
+                _runtime.remove_callable_sink(
+                    token, finalizer=handler.close if handler is not None else None
+                )
+            elif handler is not None:
                 handler.close()
 
 
