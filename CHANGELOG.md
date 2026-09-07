@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- A sink removed from inside a sink callback now closes its handler only after
+  the native deliveries already queued for it have run. The callback cannot
+  wait for the worker, and closing at once left those deliveries writing to a
+  closed handler: a `FileHandler` silently reopened its file and leaked the
+  stream. The close is deferred to the worker that finishes the last delivery.
+- The Django `build_logging_config(json_logs=True)` formatter includes the
+  formatted exception (`exception`) and stack (`stack`) of a record, so
+  `logger.exception()` no longer loses the type, message, and traceback.
+- Message, logger, service, and stack text containing unpaired surrogates, such
+  as a filename from `os.fsdecode()`, is rendered with U+FFFD like field values
+  instead of being rejected, which silently dropped the record on the stdlib
+  bridge with `logging.raiseExceptions` off.
 - URL sanitization rejects URLs whose authority failed to parse
   (`https:/user:pw@host/path`), where `urlsplit()` leaves the credentials in the
   path, instead of logging them.
