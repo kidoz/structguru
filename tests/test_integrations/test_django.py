@@ -81,6 +81,26 @@ class TestBuildLoggingConfig:
             logging.getLogger("t").handlers.clear()
             logging.config.dictConfig({"version": 1, "disable_existing_loggers": False})
 
+    def test_json_formatter_includes_exception_and_stack(self) -> None:
+        buf = io.StringIO()
+        config = build_logging_config(service="svc", json_logs=True)
+        config["handlers"]["console"]["class"] = "logging.StreamHandler"
+        config["handlers"]["console"]["stream"] = buf
+        logging.config.dictConfig(config)
+        try:
+            try:
+                raise RuntimeError("boom")
+            except RuntimeError:
+                logging.getLogger("t").exception("failed", stack_info=True)
+            parsed = json.loads(buf.getvalue().strip())
+            assert parsed["message"] == "failed"
+            assert parsed["exception"].startswith("Traceback (most recent call last):")
+            assert "RuntimeError: boom" in parsed["exception"]
+            assert parsed["stack"].startswith("Stack (most recent call last):")
+        finally:
+            logging.getLogger("t").handlers.clear()
+            logging.config.dictConfig({"version": 1, "disable_existing_loggers": False})
+
 
 class TestStructguruMiddleware:
     def test_binds_context_and_logs(self) -> None:

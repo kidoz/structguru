@@ -45,12 +45,21 @@ class _JSONLogFormatter(logging.Formatter):
         self.service = service
 
     def format(self, record: logging.LogRecord) -> str:
-        payload = {
+        payload: dict[str, Any] = {
             "service": self.service,
             "level": record.levelname,
             "name": record.name,
             "message": record.getMessage(),
         }
+        # Like logging.Formatter.format(): render exc_info once and cache it on
+        # the record for other handlers, and carry stack_info, so
+        # logger.exception() keeps its type, message, and traceback.
+        if record.exc_info:
+            if not record.exc_text:
+                record.exc_text = self.formatException(record.exc_info)
+            payload["exception"] = record.exc_text
+        if record.stack_info:
+            payload["stack"] = self.formatStack(record.stack_info)
         return json.dumps(payload, ensure_ascii=False)
 
 
