@@ -98,17 +98,24 @@ fn convert_fields(fields: &Bound<'_, PyDict>) -> PyResult<Vec<(String, Value)>> 
 #[pyo3(signature = (fields, logger, level, service, message, timestamp=None, sensitive_keys=None, sensitive_patterns=None, stack=None, pattern_replacement=None))]
 fn render_line(
     fields: &Bound<'_, PyDict>,
-    logger: &str,
+    logger: &Bound<'_, PyString>,
     level: &str,
-    service: &str,
-    message: &str,
+    service: &Bound<'_, PyString>,
+    message: &Bound<'_, PyString>,
     timestamp: Option<&str>,
     sensitive_keys: Option<Vec<String>>,
     sensitive_patterns: Option<Vec<String>>,
-    stack: Option<&str>,
+    stack: Option<&Bound<'_, PyString>>,
     pattern_replacement: Option<&str>,
 ) -> PyResult<String> {
     let entries = convert_fields(fields)?;
+    let (logger, service, message, stack) = text_arguments(logger, service, message, stack);
+    let (logger, service, message, stack) = (
+        logger.as_str(),
+        service.as_str(),
+        message.as_str(),
+        stack.as_deref(),
+    );
     let generated;
     let timestamp = match timestamp {
         Some(value) => value,
@@ -193,16 +200,23 @@ impl RedactionConfig {
 #[pyo3(signature = (fields, logger, level, service, message, config, timestamp=None, sensitive_keys=None, stack=None))]
 fn render_line_with_config(
     fields: &Bound<'_, PyDict>,
-    logger: &str,
+    logger: &Bound<'_, PyString>,
     level: &str,
-    service: &str,
-    message: &str,
+    service: &Bound<'_, PyString>,
+    message: &Bound<'_, PyString>,
     config: &RedactionConfig,
     timestamp: Option<&str>,
     sensitive_keys: Option<Vec<String>>,
-    stack: Option<&str>,
+    stack: Option<&Bound<'_, PyString>>,
 ) -> PyResult<String> {
     let entries = convert_fields(fields)?;
+    let (logger, service, message, stack) = text_arguments(logger, service, message, stack);
+    let (logger, service, message, stack) = (
+        logger.as_str(),
+        service.as_str(),
+        message.as_str(),
+        stack.as_deref(),
+    );
     let generated;
     let timestamp = match timestamp {
         Some(value) => value,
@@ -237,18 +251,25 @@ fn render_line_with_config(
 #[pyo3(signature = (fields, logger, level, service, message, colors, timestamp=None, sensitive_keys=None, sensitive_patterns=None, stack=None, pattern_replacement=None))]
 fn render_line_console(
     fields: &Bound<'_, PyDict>,
-    logger: &str,
+    logger: &Bound<'_, PyString>,
     level: &str,
-    service: &str,
-    message: &str,
+    service: &Bound<'_, PyString>,
+    message: &Bound<'_, PyString>,
     colors: bool,
     timestamp: Option<&str>,
     sensitive_keys: Option<Vec<String>>,
     sensitive_patterns: Option<Vec<String>>,
-    stack: Option<&str>,
+    stack: Option<&Bound<'_, PyString>>,
     pattern_replacement: Option<&str>,
 ) -> PyResult<String> {
     let entries = convert_fields(fields)?;
+    let (logger, service, message, stack) = text_arguments(logger, service, message, stack);
+    let (logger, service, message, stack) = (
+        logger.as_str(),
+        service.as_str(),
+        message.as_str(),
+        stack.as_deref(),
+    );
     let generated;
     let timestamp = match timestamp {
         Some(value) => value,
@@ -291,17 +312,24 @@ fn render_line_console(
 #[pyo3(signature = (fields, logger, level, service, message, colors, config, timestamp=None, sensitive_keys=None, stack=None))]
 fn render_console_with_config(
     fields: &Bound<'_, PyDict>,
-    logger: &str,
+    logger: &Bound<'_, PyString>,
     level: &str,
-    service: &str,
-    message: &str,
+    service: &Bound<'_, PyString>,
+    message: &Bound<'_, PyString>,
     colors: bool,
     config: &RedactionConfig,
     timestamp: Option<&str>,
     sensitive_keys: Option<Vec<String>>,
-    stack: Option<&str>,
+    stack: Option<&Bound<'_, PyString>>,
 ) -> PyResult<String> {
     let entries = convert_fields(fields)?;
+    let (logger, service, message, stack) = text_arguments(logger, service, message, stack);
+    let (logger, service, message, stack) = (
+        logger.as_str(),
+        service.as_str(),
+        message.as_str(),
+        stack.as_deref(),
+    );
     let generated;
     let timestamp = match timestamp {
         Some(value) => value,
@@ -441,17 +469,24 @@ impl NativeStringWriter {
         &self,
         py: Python<'_>,
         fields: &Bound<'_, PyDict>,
-        logger: &str,
+        logger: &Bound<'_, PyString>,
         level: &str,
-        service: &str,
-        message: &str,
+        service: &Bound<'_, PyString>,
+        message: &Bound<'_, PyString>,
         blocking: bool,
         config: Option<&RedactionConfig>,
         sensitive_keys: Option<Vec<String>>,
-        stack: Option<&str>,
+        stack: Option<&Bound<'_, PyString>>,
         timestamp: Option<&str>,
     ) -> PyResult<bool> {
         let entries = convert_fields(fields)?;
+        let (logger, service, message, stack) = text_arguments(logger, service, message, stack);
+        let (logger, service, message, stack) = (
+            logger.as_str(),
+            service.as_str(),
+            message.as_str(),
+            stack.as_deref(),
+        );
         let generated;
         let timestamp = match timestamp {
             Some(value) => value,
@@ -709,6 +744,24 @@ fn type_name(obj: &Bound<'_, PyAny>) -> String {
         .name()
         .map(|name| name.to_string())
         .unwrap_or_else(|_| "unknown".to_owned())
+}
+
+/// Owned copies of a record's text arguments under the same policy as field
+/// values: an unpaired surrogate becomes U+FFFD instead of failing the record.
+/// `os.fsdecode()` output and stdlib messages built from it reach every entry
+/// point this way, so a message can never be rejected where a field is not.
+fn text_arguments(
+    logger: &Bound<'_, PyString>,
+    service: &Bound<'_, PyString>,
+    message: &Bound<'_, PyString>,
+    stack: Option<&Bound<'_, PyString>>,
+) -> (String, String, String, Option<String>) {
+    (
+        string_to_owned(logger),
+        string_to_owned(service),
+        string_to_owned(message),
+        stack.map(string_to_owned),
+    )
 }
 
 /// Copy a Python string, replacing unpaired surrogates (not representable in

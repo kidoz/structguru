@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from collections.abc import Iterator
 
@@ -130,6 +131,29 @@ def test_bridge_forwards_extra_fields(native_memory: None, clean_root: None) -> 
     rec = _records()[-1]
     assert rec["duration_ms"] == 42
     assert rec["level"] == "WARN"
+
+
+def test_bridge_keeps_records_whose_message_carries_surrogates(
+    native_memory: None, clean_root: None
+) -> None:
+    # A filename from os.fsdecode() is not valid UTF-8; the record must still
+    # ship (with U+FFFD) rather than fail inside the handler and be dropped.
+    filename = os.fsdecode(b"/tmp/\xff")
+    bridge = install_stdlib_bridge(level="INFO")
+    raise_exceptions = logging.raiseExceptions
+    logging.raiseExceptions = False
+    try:
+        logging.getLogger("third_party").warning("cannot open %s", filename)
+        _runtime.flush()
+        lines = [line for line in _runtime.drain_messages() if "cannot open" in line]
+    finally:
+        logging.raiseExceptions = raise_exceptions
+        uninstall_stdlib_bridge(bridge)
+    [line] = lines
+    assert "\udcff" not in line
+    message = json.loads(line)["message"]
+    prefix, _, rest = message.partition("cannot open /tmp/")
+    assert not prefix and rest and set(rest) == {"\ufffd"}, message
 
 
 def test_bridge_forwards_exc_info(native_memory: None, clean_root: None) -> None:

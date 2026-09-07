@@ -11,6 +11,7 @@ import datetime as dt
 import enum
 import io
 import json
+import os
 import re
 import sys
 import uuid
@@ -433,3 +434,40 @@ def test_native_metadata_uses_same_redaction_as_user_fields(
     assert record["logger"] == "[REDACTED]"
     assert record["service"] == "[REDACTED]"
     assert record["message"] == "metadata" and record["level"] == "INFO"
+
+
+@pytest.mark.parametrize("format", ["json", "console"])
+@pytest.mark.parametrize("redaction", [False, True], ids=["plain", "with-patterns"])
+@pytest.mark.parametrize("stream", [False, True], ids=["native-only", "stream-sink"])
+def test_surrogates_in_text_arguments_are_replaced_not_rejected(
+    format: str, redaction: bool, stream: bool
+) -> None:
+    # os.fsdecode() output carries lone surrogates. Field values already map
+    # them to U+FFFD; the message, logger, service, and stack arguments must
+    # follow the same policy on every render entry point instead of raising.
+    surrogate = os.fsdecode(b"/tmp/\xff")
+    assert "\udcff" in surrogate
+    _runtime.configure(
+        service=f"svc{surrogate}",
+        target="memory",
+        level="DEBUG",
+        format=format,
+        colors=False,
+        sensitive_patterns=[r"secret-\w+"] if redaction else None,
+        stream_sink=io.StringIO() if stream else None,
+    )
+    try:
+        log = structguru.Logger(name=f"app{surrogate}")
+        log.opt(stack_info=f"Stack (most recent call last):\n  {surrogate}").info(
+            f"opened {surrogate}", path=surrogate
+        )
+        _runtime.flush()
+        [line] = _runtime.drain_messages()
+    finally:
+        _runtime.shutdown()
+    assert "\udcff" not in line
+    assert "\ufffd" in line
+    if format == "json":
+        record = json.loads(line)
+        for key in ("message", "logger", "service", "stack", "path"):
+            assert "\ufffd" in record[key], key
