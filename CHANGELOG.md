@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Django middleware clears request context when lazy user evaluation or user-ID
+  conversion fails, including interrupted requests, so fields cannot leak into
+  later work on the same worker.
 - Native sink construction releases the GIL while opening files and acquiring
   sidecar locks, so other Python threads can keep running and logging during
   configuration. Construction failures leave the previous runtime active.
