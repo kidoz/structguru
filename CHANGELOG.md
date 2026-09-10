@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- `logger.catch(level="trace")` uses DEBUG severity consistently with
+  `logger.trace()` for level filtering, sampling, and sink thresholds, including
+  synchronous and coroutine decorators.
 - Console stacks escape terminal control characters and indent every continuation
   line, including stacks forwarded by the stdlib bridge. Stack redaction still
   runs before escaping, and JSON output is unchanged.
