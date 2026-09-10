@@ -95,6 +95,29 @@ def test_bridge_preserves_braces_with_stack_info(native_memory: None, message: s
     assert rendered["stack"] == "STACK CONTENT"
 
 
+def test_bridge_escapes_console_stack_info() -> None:
+    _runtime.configure(target="memory", format="console", colors=False)
+    record = logging.LogRecord(
+        "foreign",
+        logging.ERROR,
+        "",
+        1,
+        "failed",
+        (),
+        None,
+        sinfo="Stack:\n\x1b[2J2030-01-01 [INFO] forged\r\t\x00",
+    )
+    StructguruHandler().handle(record)
+    _runtime.flush_native()
+    [line] = _runtime.drain_messages()
+    assert line.split("\n")[1:] == [
+        "  Stack:",
+        r"  \x1b[2J2030-01-01 [INFO] forged\r\t\x00",
+        "",
+    ]
+    assert all(ord(ch) >= 32 or ch == "\n" for ch in line)
+
+
 def test_bridge_uninstall_cannot_reattach_removed_sink(
     native_memory: None,
     clean_root: None,

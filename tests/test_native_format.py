@@ -47,7 +47,49 @@ def test_stack_is_redacted(fmt: str, redact_key: bool, backtracking: bool) -> No
     if fmt == "json":
         assert json.loads(line)["stack"] == expected
     else:
-        assert line.endswith("\n" + expected)
+        assert line.endswith("\n  " + expected.replace("\n", "\n  "))
+
+
+@pytest.mark.parametrize("fmt", ["json", "console"])
+def test_stack_control_characters_are_escaped(fmt: str) -> None:
+    _runtime.configure(target="memory", format=fmt, colors=False)
+    stack = "Stack:\n\x1b[2J2030-01-01 [CRITICAL] forged\r\t\x00\x85\n  frame\n"
+    structguru.logger.opt(stack_info=stack).info("trace")
+    _runtime.flush_native()
+    [line] = _runtime.drain_messages()
+    if fmt == "json":
+        assert json.loads(line)["stack"] == stack
+    else:
+        assert line.split("\n")[1:] == [
+            "  Stack:",
+            r"  \x1b[2J2030-01-01 [CRITICAL] forged\r\t\x00\x85",
+            "    frame",
+            "  ",
+            "",
+        ]
+        assert "\x85" not in line
+    assert all(ord(ch) >= 32 or ch == "\n" for ch in line)
+
+
+def test_console_stack_escapes_pattern_replacement() -> None:
+    _runtime.configure(
+        target="memory",
+        format="console",
+        colors=False,
+        sensitive_patterns=["private\\nframe"],
+        pattern_replacement="masked\n\x1b[2J",
+    )
+    structguru.logger.opt(stack_info="private\nframe").info("trace")
+    assert _drain_last_line().endswith("\n  masked\n  \\x1b[2J")
+
+
+def test_console_captured_stack_is_indented() -> None:
+    _runtime.configure(target="memory", format="console", colors=False)
+    structguru.logger.opt(stack_info=True).info("trace")
+    lines = _drain_last_line().split("\n")
+    assert lines[1] == "  Stack (most recent call last):"
+    assert all(line.startswith("  ") for line in lines[1:])
+    assert "test_console_captured_stack_is_indented" in "\n".join(lines[1:])
 
 
 # -- acceptance --------------------------------------------------------------

@@ -484,8 +484,12 @@ pub fn render_line_console(
             sensitive_patterns,
             pattern_replacement,
         );
-        out.push('\n');
-        out.push_str(&redacted_stack);
+        // Keep multiline stacks readable while marking every line as a
+        // continuation and neutralizing terminal controls after redaction.
+        for line in redacted_stack.split('\n') {
+            out.push_str("\n  ");
+            push_escaped(&mut out, line);
+        }
     }
     out
 }
@@ -600,7 +604,11 @@ mod tests {
                 Some("$1[MASKED]"),
                 Some("frame\ntoken=REVIEW_SENTINEL"),
             );
-            assert_eq!(console, format!("TS [INFO    ] trace\n{expected}"));
+            let expected_console = expected.replace('\n', "\n  ");
+            assert_eq!(
+                console,
+                format!("TS [INFO    ] trace\n  {expected_console}")
+            );
         }
     }
 
@@ -1078,6 +1086,37 @@ mod tests {
             None,
             Some("Stack (most recent call last):\n  File x"),
         );
-        assert!(line.contains("Stack (most recent call last)"));
+        assert_eq!(
+            line,
+            "TS [INFO    ] m\n  Stack (most recent call last):\n    File x"
+        );
+    }
+
+    #[test]
+    fn console_escapes_and_indents_each_stack_line() {
+        for (stack, expected) in [
+            ("", "\n  "),
+            ("\n", "\n  \n  "),
+            ("frame\r\n\tentry\n", "\n  frame\\r\n  \\tentry\n  "),
+            (
+                "Stack:\n\x1b[2J2030-01-01 [INFO] forged\x00\x08\u{85}",
+                "\n  Stack:\n  \\x1b[2J2030-01-01 [INFO] forged\\x00\\x08\\x85",
+            ),
+        ] {
+            let line = render_line_console(
+                vec![],
+                "l",
+                "info",
+                "svc",
+                "m",
+                false,
+                "TS",
+                None,
+                None,
+                None,
+                Some(stack),
+            );
+            assert_eq!(line, format!("TS [INFO    ] m{expected}"));
+        }
     }
 }
