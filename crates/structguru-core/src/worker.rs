@@ -637,8 +637,10 @@ impl StringWriter {
 
     /// Neutralize this writer after a `fork()`: the background thread does not
     /// exist in the child process, so `close`/`Drop` must **not** try to join
-    /// it (that would hang). After this, `close`/`Drop` are no-ops and the
-    /// (detached) `JoinHandle` is simply dropped. The caller replaces the writer
+    /// it (that would hang). After this, `close` is a no-op and `Drop` leaks
+    /// the `JoinHandle` instead of detaching it: glibc reuses a dead thread's
+    /// `pthread_t` for the next thread spawned in the child, so a detach could
+    /// hit the replacement writer's live worker. The caller replaces the writer
     /// with a fresh one in the child.
     pub fn abandon(&self) {
         self.abandoned.store(true, Ordering::Release);
@@ -718,7 +720,7 @@ impl StringWriter {
     pub fn close(&self) {
         // Abandoned (post-fork) writers have no live worker thread to drain or
         // join, and their inherited state mutex may be permanently locked — never
-        // touch it. Dropping the detached JoinHandle afterwards does not join.
+        // touch it. `Drop` leaks the stale JoinHandle for the same reason.
         if self.abandoned.load(Ordering::Acquire) {
             return;
         }
@@ -776,6 +778,24 @@ impl StringWriter {
 
 impl Drop for StringWriter {
     fn drop(&mut self) {
+        if self.abandoned.load(Ordering::Acquire) {
+            // The worker died with the parent process, and glibc recycles a dead
+            // thread's descriptor for the next thread the child spawns, so this
+            // handle may now name the child's live worker. Joining it would hang
+            // or fail, and even the detach a dropped `JoinHandle` performs would
+            // make that live thread unjoinable for its own writer. Leak the
+            // handle instead. `get_mut` needs no lock, which matters because a
+            // vanished thread may still hold the inherited mutex.
+            if let Some(worker) = self
+                .worker
+                .get_mut()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                std::mem::forget(worker);
+            }
+            return;
+        }
         self.close();
     }
 }
@@ -1045,6 +1065,77 @@ mod tests {
         let metrics = writer.metrics();
         assert!(metrics.closed);
         assert!(metrics.worker_done);
+    }
+
+    /// After `fork()`, glibc hands the dead parent worker's `pthread_t` to the
+    /// next thread the child spawns. Dropping the abandoned parent writer must
+    /// therefore neither join nor detach its handle: a detach would make the
+    /// child's live worker unjoinable, and the child's own `close` would panic
+    /// with `EINVAL`. macOS never recycles descriptors, so without the fix this
+    /// only fails on Linux.
+    #[cfg(unix)]
+    #[test]
+    fn abandoned_writer_drop_leaves_child_workers_joinable() {
+        use std::time::{Duration, Instant};
+
+        unsafe extern "C" {
+            fn fork() -> i32;
+            fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+            fn kill(pid: i32, signal: i32) -> i32;
+            fn _exit(status: i32) -> !;
+        }
+        const WNOHANG: i32 = 1;
+        const SIGKILL: i32 = 9;
+
+        let parent = StringWriter::new_null(8);
+        assert_eq!(parent.try_enqueue("parent".to_owned()), Ok(()));
+        parent.flush();
+
+        // SAFETY: the child touches only this writer (abandon, then drop), spawns
+        // fresh workers, and leaves through `_exit` without running destructors.
+        let pid = unsafe { fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            parent.abandon();
+            // Enough fresh workers to reuse every thread descriptor the parent
+            // left behind, so one of them inherits the dead worker's identity.
+            let children: Vec<StringWriter> = (0..64).map(|_| StringWriter::new_null(8)).collect();
+            drop(parent);
+            let closed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                for child in &children {
+                    assert_eq!(child.try_enqueue("child".to_owned()), Ok(()));
+                    child.flush();
+                    child.close();
+                }
+            }));
+            // SAFETY: `_exit` skips destructors and atexit handlers, which is
+            // exactly what a forked test child wants.
+            unsafe { _exit(i32::from(closed.is_err())) }
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut status = 0;
+        loop {
+            // SAFETY: non-blocking wait on the child forked above.
+            let waited = unsafe { waitpid(pid, &mut status, WNOHANG) };
+            if waited == pid {
+                break;
+            }
+            assert_eq!(waited, 0, "waitpid failed");
+            if Instant::now() >= deadline {
+                // SAFETY: reap the hung child so it does not outlive the test.
+                unsafe {
+                    kill(pid, SIGKILL);
+                    waitpid(pid, &mut status, 0);
+                }
+                panic!("forked child hung while closing its writers");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            status, 0,
+            "child failed to close its writers (wait status {status:#x})"
+        );
     }
 
     #[test]
