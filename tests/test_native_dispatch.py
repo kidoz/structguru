@@ -12,6 +12,77 @@ import pytest
 from structguru._native_dispatch import CallableSinkDispatcher, _DispatchChannel, _Record, _Sink
 
 
+@pytest.mark.parametrize("registration", ["configure", "add"])
+def test_stdlib_backpressure_allows_callback_logging(registration: str) -> None:
+    # Run in a subprocess so a lock inversion cannot hang pytest or its teardown.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+                import json
+                import logging
+                import sys
+                import threading
+                import structguru as sg
+                from structguru import _runtime
+                from structguru._native_dispatch import _DispatchChannel
+                from structguru.integrations.stdlib import install_stdlib_bridge
+
+                entered = threading.Event()
+                blocked = threading.Event()
+                received = []
+                errors = []
+
+                def sink(line):
+                    message = json.loads(line)['message']
+                    received.append(message)
+                    if message == 'first':
+                        entered.set()
+                        if not blocked.wait(3):
+                            errors.append('producer did not reach the full queue')
+                            return
+                        logging.getLogger('callback').warning('nested')
+
+                original_put = _DispatchChannel.put_reserved
+                def put_reserved(self, record, *, overflow):
+                    if json.loads(record.line)['message'] == 'blocked':
+                        # The stdlib producer is inside Handler.handle(), and
+                        # 'queued' occupies the only slot until the sink returns.
+                        assert self.queue.qsize() == 1
+                        blocked.set()
+                    return original_put(self, record, overflow=overflow)
+                _DispatchChannel.put_reserved = put_reserved
+
+                sg.configure(target='memory', callable_queue_maxsize=1,
+                             callable_sinks=[sink] if sys.argv[1] == 'configure' else [])
+                token = sg.logger.add(sink) if sys.argv[1] == 'add' else None
+                install_stdlib_bridge()
+                sg.logger.info('first')
+                assert entered.wait(3)
+                sg.logger.info('queued')
+                logging.getLogger('producer').warning('blocked')
+                sg.flush()
+                assert not errors, errors
+                assert received == ['first', 'queued', 'blocked'], received
+                records = [json.loads(line) for line in _runtime.drain_messages()]
+                assert sorted(record['message'] for record in records) == [
+                    'blocked', 'first', 'nested', 'queued'
+                ], records
+                assert next(r for r in records if r['message'] == 'nested')['logger'] == 'callback'
+                if token is not None:
+                    sg.logger.remove(token)
+                sg.shutdown()
+            """),
+            registration,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize("error", ["SystemExit", "KeyboardInterrupt", "BaseException"])
 def test_callback_base_exception_does_not_strand_dispatch(error: str) -> None:
     result = subprocess.run(

@@ -116,6 +116,22 @@ class StructguruHandler(logging.Handler):
         super().__init__(level)
         self._existing_logger_states: list[tuple[logging.Logger, bool, bool]] = []
 
+    def handle(self, record: logging.LogRecord) -> bool:
+        """Apply handler filters and forward without holding an I/O lock.
+
+        The native runtime synchronizes delivery itself. Holding the stdlib
+        handler lock while waiting for callable queue space would deadlock if
+        that queue's worker logs through this bridge before freeing a slot.
+        """
+        filtered = self.filter(record)
+        if not filtered:
+            return False
+        # Python 3.12+ filters can substitute a record for this handler alone.
+        if isinstance(filtered, logging.LogRecord):
+            record = filtered
+        self.emit(record)
+        return True
+
     def emit(self, record: logging.LogRecord) -> None:
         """Re-emit one stdlib record through the structguru pipeline.
 

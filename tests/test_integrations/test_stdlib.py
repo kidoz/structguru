@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import threading
 from collections.abc import Iterator
 
@@ -52,6 +53,35 @@ def clean_root() -> Iterator[None]:
 def _records() -> list[dict]:
     _runtime.flush_native()
     return [json.loads(line) for line in _runtime.drain_messages()]
+
+
+def test_bridge_handle_respects_filters(native_memory: None) -> None:
+    handler = StructguruHandler()
+
+    def filter_record(record: logging.LogRecord) -> bool:
+        if record.msg == "drop":
+            return False
+        record.msg = "filtered"
+        return True
+
+    handler.addFilter(filter_record)
+    assert not handler.handle(logging.LogRecord("foreign", logging.INFO, "", 0, "drop", (), None))
+    assert handler.handle(logging.LogRecord("foreign", logging.INFO, "", 0, "keep", (), None))
+    assert [record["message"] for record in _records()] == ["filtered"]
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="replacement filters require Python 3.12")
+def test_bridge_handle_respects_replacement_record_filter(native_memory: None) -> None:
+    handler = StructguruHandler()
+    original = logging.LogRecord("foreign", logging.INFO, "", 0, "original", (), None)
+    replacement = logging.LogRecord("filtered", logging.ERROR, "", 0, "replacement", (), None)
+    handler.addFilter(lambda record: replacement)
+    assert handler.handle(original)
+    [record] = _records()
+    assert record["message"] == "replacement"
+    assert record["logger"] == "filtered"
+    assert record["level"] == "ERROR"
+    assert original.msg == "original"
 
 
 @pytest.mark.parametrize("message", ["literal {stack_info}", "literal {missing}", "{{json}}"])
