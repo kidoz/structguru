@@ -250,8 +250,8 @@ def test_full_queue_is_not_reclassified_when_writer_closes(
         def __getattr__(self, name: str):
             return getattr(writer, name)
 
-        def enqueue_outcome(self, message: str, blocking: bool) -> str:
-            outcome = writer.enqueue_outcome(message, blocking)
+        def log(self, *args):
+            outcome = writer.log(*args)
             structguru.shutdown()
             return outcome
 

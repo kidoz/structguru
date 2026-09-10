@@ -5,6 +5,7 @@ use pyo3::types::{
     PyAny, PyBool, PyDict, PyDictMethods, PyFloat, PyInt, PyList, PyListMethods, PyString, PyTuple,
     PyTupleMethods,
 };
+use std::borrow::Cow;
 use std::time::Duration;
 use structguru_core::{Pipeline, RedactionPattern, StringWriter, Value};
 
@@ -92,6 +93,106 @@ fn convert_fields(fields: &Bound<'_, PyDict>) -> PyResult<Vec<(String, Value)>> 
     Ok(entries)
 }
 
+/// Call keywords that steer the record and are never structured fields.
+const RESERVED_FIELD_KEYS: [&str; 2] = ["exc_info", "stack_info"];
+
+fn field_key(key: &Bound<'_, PyAny>) -> PyResult<String> {
+    key.cast::<PyString>()
+        .map(string_to_owned)
+        .map_err(|_| PyTypeError::new_err("field keys must be strings"))
+}
+
+/// Replace the value of an existing `key` in place, or append the entry.
+fn upsert_entry(entries: &mut Vec<(String, Value)>, key: String, value: Value) {
+    match entries.iter_mut().find(|(existing, _)| *existing == key) {
+        Some((_, slot)) => *slot = value,
+        None => entries.push((key, value)),
+    }
+}
+
+/// Merge a record's field sources into converted entries.
+///
+/// Reproduces the facade's dict merge: `{**bound, **kwargs}` keeps a bound
+/// key's position while taking the kwargs value, contextvars only fill keys
+/// that are still absent (`setdefault`), and `exception` is assigned last.
+///
+/// Each source dict is iterated with no Python code running in between: its
+/// pairs are collected before any value is converted, because conversion may
+/// run `isoformat()` or a dataclass property. The library never mutates a
+/// source in place — `bind()` replaces `_bound`, `kwargs` is private to the
+/// call, and the contextvars mapping is copy-on-write — so the iteration can
+/// never observe a size change.
+fn merge_record_fields(
+    bound: &Bound<'_, PyDict>,
+    kwargs: &Bound<'_, PyDict>,
+    contextvars: &Bound<'_, PyDict>,
+    exception: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<(String, Value)>> {
+    let mut entries: Vec<(String, Value)> = Vec::with_capacity(
+        bound.len() + kwargs.len() + contextvars.len() + usize::from(exception.is_some()),
+    );
+    let mut pairs: Vec<(Bound<'_, PyAny>, Bound<'_, PyAny>)> =
+        Vec::with_capacity(bound.len().max(kwargs.len()).max(contextvars.len()));
+
+    // Bound keys are unique, so no position lookup is needed.
+    pairs.extend(bound.iter());
+    for (key, value) in pairs.drain(..) {
+        entries.push((field_key(&key)?, convert_py_value(&value)?));
+    }
+    pairs.extend(kwargs.iter());
+    for (key, value) in pairs.drain(..) {
+        let key = field_key(&key)?;
+        if RESERVED_FIELD_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        let value = convert_py_value(&value)?;
+        upsert_entry(&mut entries, key, value);
+    }
+    pairs.extend(contextvars.iter());
+    for (key, value) in pairs.drain(..) {
+        let key = field_key(&key)?;
+        if entries.iter().any(|(existing, _)| *existing == key) {
+            continue;
+        }
+        let value = convert_py_value(&value)?;
+        entries.push((key, value));
+    }
+    if let Some(exception) = exception {
+        let value = convert_py_value(exception)?;
+        upsert_entry(&mut entries, "exception".to_owned(), value);
+    }
+    Ok(entries)
+}
+
+/// Merge a record's field sources into a Python dict.
+///
+/// Same semantics as the merge inside the fused `log` entry points, for the
+/// path where a Python hook (OpenTelemetry enrichment, the metric or Sentry
+/// processor) needs the merged mapping before rendering.
+#[pyfunction]
+fn merge_fields<'py>(
+    bound: &Bound<'py, PyDict>,
+    kwargs: &Bound<'py, PyDict>,
+    contextvars: &Bound<'py, PyDict>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let merged = bound.copy()?;
+    for (key, value) in kwargs.iter() {
+        if let Ok(text) = key.cast::<PyString>()
+            && let Ok(text) = text.to_str()
+            && RESERVED_FIELD_KEYS.contains(&text)
+        {
+            continue;
+        }
+        merged.set_item(key, value)?;
+    }
+    for (key, value) in contextvars.iter() {
+        if !merged.contains(&key)? {
+            merged.set_item(key, value)?;
+        }
+    }
+    Ok(merged)
+}
+
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (fields, logger, level, service, message, timestamp=None, sensitive_keys=None, sensitive_patterns=None, stack=None, pattern_replacement=None))]
@@ -144,7 +245,7 @@ fn render_line(
         message,
         timestamp,
         stack,
-        sensitive_keys,
+        sensitive_keys.as_deref(),
         patterns_ref,
         pattern_replacement,
     )
@@ -237,7 +338,7 @@ fn render_line_with_config(
         message,
         timestamp,
         stack,
-        sensitive_keys,
+        sensitive_keys.as_deref(),
         patterns_ref,
         Some(&config.replacement),
     )
@@ -298,7 +399,7 @@ fn render_line_console(
         message,
         colors,
         timestamp,
-        sensitive_keys,
+        sensitive_keys.as_deref(),
         patterns_ref,
         pattern_replacement,
         stack,
@@ -350,11 +451,198 @@ fn render_console_with_config(
         message,
         colors,
         timestamp,
-        sensitive_keys,
+        sensitive_keys.as_deref(),
         patterns_ref,
         Some(&config.replacement),
         stack,
     ))
+}
+
+/// Render and delivery policy shared by every record of one configuration.
+///
+/// Built once by `configure()` and passed to the fused `log` entry points on
+/// `_NativeStringWriter`, so the service name, redaction keys, compiled
+/// patterns, output format, and overflow policy are never re-marshalled per
+/// record. Frozen: a record reads it without a borrow check, and a level-only
+/// update shares it between runtime snapshots.
+#[pyclass(name = "RuntimeConfig", frozen)]
+struct RuntimeConfig {
+    service: String,
+    sensitive_keys: Option<Vec<String>>,
+    patterns: Vec<RedactionPattern>,
+    replacement: String,
+    console: bool,
+    colors: bool,
+    blocking: bool,
+}
+
+impl RuntimeConfig {
+    fn patterns(&self) -> Option<&[RedactionPattern]> {
+        (!self.patterns.is_empty()).then_some(self.patterns.as_slice())
+    }
+
+    fn render_json(
+        &self,
+        entries: Vec<(String, Value)>,
+        logger: &str,
+        level: &str,
+        message: &str,
+        stack: Option<&str>,
+        timestamp: &str,
+    ) -> PyResult<String> {
+        structguru_core::render_line(
+            entries,
+            logger,
+            level,
+            &self.service,
+            message,
+            timestamp,
+            stack,
+            self.sensitive_keys.as_deref(),
+            self.patterns(),
+            Some(&self.replacement),
+        )
+        .map_err(|err| PyValueError::new_err(err.to_string()))
+    }
+
+    fn render_console(
+        &self,
+        entries: Vec<(String, Value)>,
+        logger: &str,
+        level: &str,
+        message: &str,
+        stack: Option<&str>,
+        timestamp: &str,
+    ) -> String {
+        structguru_core::render_line_console(
+            entries,
+            logger,
+            level,
+            &self.service,
+            message,
+            self.colors,
+            timestamp,
+            self.sensitive_keys.as_deref(),
+            self.patterns(),
+            Some(&self.replacement),
+            stack,
+        )
+    }
+}
+
+#[pymethods]
+impl RuntimeConfig {
+    #[new]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        service,
+        sensitive_keys=None,
+        sensitive_patterns=None,
+        pattern_replacement=None,
+        allow_backtracking=false,
+        console=false,
+        colors=false,
+        blocking=true,
+    ))]
+    fn new(
+        service: &Bound<'_, PyString>,
+        sensitive_keys: Option<Vec<String>>,
+        sensitive_patterns: Option<Vec<String>>,
+        pattern_replacement: Option<String>,
+        allow_backtracking: bool,
+        console: bool,
+        colors: bool,
+        blocking: bool,
+    ) -> PyResult<Self> {
+        let patterns = sensitive_patterns
+            .unwrap_or_default()
+            .iter()
+            .map(|pattern| RedactionPattern::compile(pattern, allow_backtracking))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(PyValueError::new_err)?;
+        Ok(Self {
+            service: string_to_owned(service),
+            sensitive_keys,
+            patterns,
+            replacement: pattern_replacement.unwrap_or_else(|| "[REDACTED]".to_owned()),
+            console,
+            colors,
+            blocking,
+        })
+    }
+
+    #[getter]
+    fn service(&self) -> &str {
+        &self.service
+    }
+
+    #[getter]
+    fn console(&self) -> bool {
+        self.console
+    }
+
+    #[getter]
+    fn colors(&self) -> bool {
+        self.colors
+    }
+
+    #[getter]
+    fn blocking(&self) -> bool {
+        self.blocking
+    }
+
+    /// Number of compiled value-redaction patterns.
+    #[getter]
+    fn pattern_count(&self) -> usize {
+        self.patterns.len()
+    }
+}
+
+/// Merge, redact, and render one record in the configured format.
+///
+/// Returns the line with its trailing newline and, when `json_copy` is set,
+/// the redacted JSON record for the Sentry hook: the line itself in JSON mode,
+/// a second render in console mode.
+#[allow(clippy::too_many_arguments)]
+fn render_record(
+    config: &RuntimeConfig,
+    logger: &Bound<'_, PyString>,
+    level: &str,
+    message: &Bound<'_, PyString>,
+    bound: &Bound<'_, PyDict>,
+    kwargs: &Bound<'_, PyDict>,
+    contextvars: &Bound<'_, PyDict>,
+    exception: Option<&Bound<'_, PyAny>>,
+    stack: Option<&Bound<'_, PyString>>,
+    json_copy: bool,
+) -> PyResult<(String, Option<String>)> {
+    let entries = merge_record_fields(bound, kwargs, contextvars, exception)?;
+    let logger = string_to_cow(logger);
+    let message = string_to_cow(message);
+    let stack = stack.map(string_to_cow);
+    let stack = stack.as_deref();
+    let timestamp = structguru_core::now_iso8601();
+    if config.console {
+        let json = if json_copy {
+            Some(config.render_json(
+                entries.clone(),
+                &logger,
+                level,
+                &message,
+                stack,
+                &timestamp,
+            )?)
+        } else {
+            None
+        };
+        let mut line = config.render_console(entries, &logger, level, &message, stack, &timestamp);
+        line.push('\n');
+        return Ok((line, json));
+    }
+    let mut line = config.render_json(entries, &logger, level, &message, stack, &timestamp)?;
+    let json = json_copy.then(|| line.clone());
+    line.push('\n');
+    Ok((line, json))
 }
 
 #[pyclass(name = "_NativeStringWriter")]
@@ -362,24 +650,49 @@ struct NativeStringWriter {
     writer: StringWriter,
 }
 
+/// Result of handing one line to the queue, observed under the queue lock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outcome {
+    Accepted = 0,
+    Full = 1,
+    Closed = 2,
+}
+
+impl Outcome {
+    /// Text form returned by the `*_outcome` writer methods.
+    fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Accepted => "accepted",
+            Outcome::Full => "full",
+            Outcome::Closed => "closed",
+        }
+    }
+
+    /// Numeric form returned by the fused `log` entry points: 0 accepted,
+    /// 1 full (dropped), 2 closed (rejected by a retired writer).
+    fn code(self) -> u8 {
+        self as u8
+    }
+}
+
 impl NativeStringWriter {
-    fn enqueue_owned(&self, py: Python<'_>, message: String, blocking: bool) -> &'static str {
+    fn enqueue_owned(&self, py: Python<'_>, message: String, blocking: bool) -> Outcome {
         if !blocking {
             return match self.writer.try_enqueue_with_reason(message) {
-                Ok(()) => "accepted",
-                Err(structguru_core::EnqueueError::Full(_)) => "full",
-                Err(structguru_core::EnqueueError::Closed(_)) => "closed",
+                Ok(()) => Outcome::Accepted,
+                Err(structguru_core::EnqueueError::Full(_)) => Outcome::Full,
+                Err(structguru_core::EnqueueError::Closed(_)) => Outcome::Closed,
             };
         }
         // Keep the uncontended path attached; only a full/closed queue needs
         // the blocking path, whose sole rejection reason is closure.
         match self.writer.enqueue_if_space(message) {
-            Ok(()) => "accepted",
+            Ok(()) => Outcome::Accepted,
             Err(message) => {
                 if py.detach(|| self.writer.enqueue_blocking(message).is_ok()) {
-                    "accepted"
+                    Outcome::Accepted
                 } else {
-                    "closed"
+                    Outcome::Closed
                 }
             }
         }
@@ -485,6 +798,7 @@ impl NativeStringWriter {
     /// Return the enqueue outcome without racing a later close or reconfigure.
     fn enqueue_outcome(&self, py: Python<'_>, message: &str, blocking: bool) -> &'static str {
         self.enqueue_owned(py, message.to_owned(), blocking)
+            .as_str()
     }
 
     /// Render one JSON record and hand it to the writer in a single call.
@@ -574,13 +888,91 @@ impl NativeStringWriter {
             message,
             timestamp,
             stack,
-            sensitive_keys,
+            sensitive_keys.as_deref(),
             patterns,
             replacement,
         )
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
         line.push('\n');
-        Ok(self.enqueue_owned(py, line, blocking))
+        Ok(self.enqueue_owned(py, line, blocking).as_str())
+    }
+
+    /// Merge, render, and enqueue one record in a single call.
+    ///
+    /// Fields merge with the facade's semantics: bound fields first, then call
+    /// kwargs (overriding a bound key in place; `exc_info` and `stack_info`
+    /// are never fields), then contextvars for keys still absent, then
+    /// `exception` as the `exception` field. The record renders in `config`'s
+    /// format and is pushed without ever becoming a Python string. Returns the
+    /// outcome code: 0 accepted, 1 full, 2 closed.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (config, logger, level, message, bound, kwargs, contextvars, exception, stack))]
+    fn log(
+        &self,
+        py: Python<'_>,
+        config: &Bound<'_, RuntimeConfig>,
+        logger: &Bound<'_, PyString>,
+        level: &str,
+        message: &Bound<'_, PyString>,
+        bound: &Bound<'_, PyDict>,
+        kwargs: &Bound<'_, PyDict>,
+        contextvars: &Bound<'_, PyDict>,
+        exception: Option<&Bound<'_, PyAny>>,
+        stack: Option<&Bound<'_, PyString>>,
+    ) -> PyResult<u8> {
+        let config = config.get();
+        let (line, _) = render_record(
+            config,
+            logger,
+            level,
+            message,
+            bound,
+            kwargs,
+            contextvars,
+            exception,
+            stack,
+            false,
+        )?;
+        Ok(self.enqueue_owned(py, line, config.blocking).code())
+    }
+
+    /// Like [`log`](Self::log), returning the rendered line as well.
+    ///
+    /// Returns `(outcome, line, json)`: `line` keeps its trailing newline and
+    /// is what stream and callable sinks receive; `json` is the redacted JSON
+    /// record for the Sentry hook when `json_copy` is set, rendered separately
+    /// in console mode.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (config, logger, level, message, bound, kwargs, contextvars, exception, stack, json_copy))]
+    fn log_capture(
+        &self,
+        py: Python<'_>,
+        config: &Bound<'_, RuntimeConfig>,
+        logger: &Bound<'_, PyString>,
+        level: &str,
+        message: &Bound<'_, PyString>,
+        bound: &Bound<'_, PyDict>,
+        kwargs: &Bound<'_, PyDict>,
+        contextvars: &Bound<'_, PyDict>,
+        exception: Option<&Bound<'_, PyAny>>,
+        stack: Option<&Bound<'_, PyString>>,
+        json_copy: bool,
+    ) -> PyResult<(u8, String, Option<String>)> {
+        let config = config.get();
+        let (line, json) = render_record(
+            config,
+            logger,
+            level,
+            message,
+            bound,
+            kwargs,
+            contextvars,
+            exception,
+            stack,
+            json_copy,
+        )?;
+        let outcome = self.enqueue_owned(py, line.clone(), config.blocking);
+        Ok((outcome.code(), line, json))
     }
 
     fn flush(&self, py: Python<'_>) {
@@ -829,9 +1221,15 @@ fn text_arguments(
 /// Copy a Python string, replacing unpaired surrogates (not representable in
 /// UTF-8, so `to_str` rejects them) with U+FFFD instead of failing the record.
 fn string_to_owned(value: &Bound<'_, PyString>) -> String {
+    string_to_cow(value).into_owned()
+}
+
+/// Borrow a Python string's UTF-8 text, copying only to replace unpaired
+/// surrogates with U+FFFD (the [`string_to_owned`] policy without the copy).
+fn string_to_cow<'a>(value: &'a Bound<'_, PyString>) -> Cow<'a, str> {
     match value.to_str() {
-        Ok(text) => text.to_owned(),
-        Err(_) => value.to_string_lossy().into_owned(),
+        Ok(text) => Cow::Borrowed(text),
+        Err(_) => value.to_string_lossy(),
     }
 }
 
@@ -1038,5 +1436,7 @@ fn rust_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<NativeStringWriter>()?;
     module.add_class::<NativeFilter>()?;
     module.add_class::<RedactionConfig>()?;
+    module.add_class::<RuntimeConfig>()?;
+    module.add_function(wrap_pyfunction!(merge_fields, module)?)?;
     Ok(())
 }

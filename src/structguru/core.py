@@ -30,12 +30,17 @@ from pathlib import Path
 from typing import Any, Protocol, TypeAlias, TypeVar, cast
 
 from structguru import _runtime
-from structguru._contextvars import bound_contextvars, get_contextvars
+from structguru._contextvars import _ctx, bound_contextvars
 from structguru._native_dispatch import callback_scope, in_callback
 from structguru.config import _to_logging_level
 from structguru.otel import add_otel_context
 
 HandlerId: TypeAlias = int
+
+_LEVEL_NUM = _runtime._LEVEL_NUM
+# Stands in for an exhausted field source once Python has merged the fields
+# itself; the renderer only reads it, so one shared empty dict is safe.
+_NO_FIELDS: dict[str, Any] = {}
 
 
 class WritableSink(Protocol):
@@ -543,7 +548,13 @@ class Logger:
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> None:
-        """Internal dispatch — native Rust path (the only path since v1.0)."""
+        """Internal dispatch — native Rust path (the only path since v1.0).
+
+        Python keeps what only Python can see: brace formatting, the caller's
+        module name, exception and stack capture, and the hooks. The Rust
+        writer merges bound fields, kwargs, and contextvars, redacts, renders,
+        and enqueues the record in one call.
+        """
         # One coherent snapshot follows the record through every processing stage.
         # Reconfigure/disable may retire its writer, but cannot invalidate this
         # Python object or expose a partially updated configuration.
@@ -551,12 +562,11 @@ class Logger:
         if runtime is None:
             return
 
-        stack_info = kwargs.get("stack_info") or self._opt_stack_info
-
         # Cheap disabled path: level-filter before any formatting.
-        if _runtime.is_below_level(method, runtime):
+        if _LEVEL_NUM.get(method, 20) < runtime.level_threshold:
             return
 
+        stack_info = kwargs.get("stack_info") or self._opt_stack_info
         formatted_msg, consumed_keys = _safe_format(message, args, kwargs)
 
         # Strip kwargs that were consumed by brace-formatting so they don't
@@ -566,47 +576,49 @@ class Logger:
 
         # Pre-render filter (sampling/rate-limit): decide before building fields.
         # Keys on the formatted message, matching the rate-limiter's grouping.
-        if not _runtime.should_render(method, formatted_msg, runtime):
+        record_filter = runtime.record_filter
+        if record_filter is not None and not record_filter.allow(formatted_msg, method):
             return
 
         exc_info = kwargs.get("exc_info", self._opt_exc_info)
         name = self.name if self.name is not None else _caller_module_name()
-        fields = {
-            **self._bound,
-            **{k: v for k, v in kwargs.items() if k not in ("exc_info", "stack_info")},
-        }
-        # Contextvars append after (and never override) event fields,
-        # matching structlog's merge_contextvars setdefault semantics.
-        for key, value in get_contextvars().items():
-            fields.setdefault(key, value)
-        if _runtime.otel_enabled(runtime):
-            add_otel_context(None, method, fields)
-        if exc_info:
-            exception = _runtime.build_exception_field(exc_info, runtime)
-            if exception:
-                fields["exception"] = exception
-        # Stack capture is Python-owned (frame walking); rendering places
-        # "stack" between "service" and "message" like StackInfoRenderer.
+        # Exception and stack capture are Python-owned (frame walking). The
+        # renderer adds "exception" as the last field and places "stack"
+        # between "service" and "message" like StackInfoRenderer.
+        exception = (
+            (_runtime.build_exception_field(exc_info, runtime) or None) if exc_info else None
+        )
         if isinstance(stack_info, str):
             stack = stack_info
         elif stack_info:
             stack = _runtime.format_stack()
         else:
             stack = None
-        _runtime.notify_metrics(method, formatted_msg, fields, runtime)
+
+        # Contextvars append after (and never override) event fields, matching
+        # structlog's merge_contextvars setdefault semantics; the writer merges.
+        bound = self._bound
+        contextvars = _ctx.get()
+        field_names: tuple[str, ...] = ()
+        if runtime.enrich:
+            # A Python hook needs the merged mapping: build it once with the
+            # renderer's merge semantics, enrich it, then hand it over whole.
+            fields = _runtime.merge_fields(bound, kwargs, contextvars)
+            if runtime.otel:
+                add_otel_context(None, method, fields)
+            if exception is not None:
+                fields["exception"] = exception
+            _runtime.notify_metrics(method, formatted_msg, fields, runtime)
+            field_names = tuple(fields)
+            bound, kwargs, contextvars, exception = fields, _NO_FIELDS, _NO_FIELDS, None
         sentry_line = _runtime.render_and_enqueue(
-            fields,
-            name,
-            method,
-            formatted_msg,
-            stack=stack,
-            runtime=runtime,
+            runtime, name, method, formatted_msg, bound, kwargs, contextvars, exception, stack
         )
         if sentry_line is not None:
             _runtime.notify_sentry(
                 method,
                 sentry_line,
-                tuple(fields),
+                field_names,
                 exc_info=exc_info,
                 runtime=runtime,
             )

@@ -194,7 +194,7 @@ fn redact_patterns(value: &mut Value, patterns: &[RedactionPattern], replacement
 fn redact_text(
     key: &str,
     text: &str,
-    sensitive_keys: Option<&Vec<String>>,
+    sensitive_keys: Option<&[String]>,
     sensitive_patterns: Option<&[RedactionPattern]>,
     pattern_replacement: Option<&str>,
 ) -> String {
@@ -243,21 +243,21 @@ pub fn render_line(
     message: &str,
     timestamp: &str,
     stack: Option<&str>,
-    sensitive_keys: Option<Vec<String>>,
+    sensitive_keys: Option<&[String]>,
     sensitive_patterns: Option<&[RedactionPattern]>,
     pattern_replacement: Option<&str>,
 ) -> Result<String, serde_json::Error> {
     let redacted_message = redact_text(
         "message",
         message,
-        sensitive_keys.as_ref(),
+        sensitive_keys,
         sensitive_patterns,
         pattern_replacement,
     );
     // Redact against the caller's keys, or the static defaults with zero
     // per-record allocation (comparison is case-insensitive in `is_sensitive`).
     let mut root = Value::Map(fields);
-    match &sensitive_keys {
+    match sensitive_keys {
         Some(custom) => redact(&mut root, custom),
         None => redact(&mut root, DEFAULT_SENSITIVE_KEYS),
     }
@@ -287,7 +287,7 @@ pub fn render_line(
         Value::String(redact_text(
             "logger",
             logger,
-            sensitive_keys.as_ref(),
+            sensitive_keys,
             sensitive_patterns,
             pattern_replacement,
         )),
@@ -305,7 +305,7 @@ pub fn render_line(
             Value::String(redact_text(
                 "service",
                 service,
-                sensitive_keys.as_ref(),
+                sensitive_keys,
                 sensitive_patterns,
                 pattern_replacement,
             )),
@@ -317,7 +317,7 @@ pub fn render_line(
         let redacted_stack = redact_text(
             "stack",
             stack,
-            sensitive_keys.as_ref(),
+            sensitive_keys,
             sensitive_patterns,
             pattern_replacement,
         );
@@ -411,7 +411,7 @@ pub fn render_line_console(
     message: &str,
     colors: bool,
     timestamp: &str,
-    sensitive_keys: Option<Vec<String>>,
+    sensitive_keys: Option<&[String]>,
     sensitive_patterns: Option<&[RedactionPattern]>,
     pattern_replacement: Option<&str>,
     stack: Option<&str>,
@@ -419,12 +419,12 @@ pub fn render_line_console(
     let redacted_message = redact_text(
         "message",
         message,
-        sensitive_keys.as_ref(),
+        sensitive_keys,
         sensitive_patterns,
         pattern_replacement,
     );
     let mut root = Value::Map(fields);
-    match &sensitive_keys {
+    match sensitive_keys {
         Some(custom) => redact(&mut root, custom),
         None => redact(&mut root, DEFAULT_SENSITIVE_KEYS),
     }
@@ -480,7 +480,7 @@ pub fn render_line_console(
         let redacted_stack = redact_text(
             "stack",
             stack,
-            sensitive_keys.as_ref(),
+            sensitive_keys,
             sensitive_patterns,
             pattern_replacement,
         );
@@ -571,6 +571,7 @@ mod tests {
     fn stack_redaction_applies_patterns_and_custom_keys_in_both_formats() {
         let patterns = vec![RedactionPattern::linear(r"(token=)\w+").unwrap()];
         for keys in [None, Some(vec!["STACK".to_owned()])] {
+            let keys = keys.as_deref();
             let expected = if keys.is_some() {
                 "[REDACTED]"
             } else {
@@ -584,7 +585,7 @@ mod tests {
                 "trace",
                 "TS",
                 Some("frame\ntoken=REVIEW_SENTINEL"),
-                keys.clone(),
+                keys,
                 Some(&patterns),
                 Some("$1[MASKED]"),
             )
@@ -667,9 +668,18 @@ mod tests {
             ("ssn".to_owned(), Value::String("123".to_owned())),
             ("secret_sauce".to_owned(), Value::String("x".to_owned())),
         ];
-        let keys = Some(vec!["secret_sauce".to_owned()]);
+        let keys = vec!["secret_sauce".to_owned()];
         let line = render_line(
-            fields, "l", "info", "svc", "m", "TS", None, keys, None, None,
+            fields,
+            "l",
+            "info",
+            "svc",
+            "m",
+            "TS",
+            None,
+            Some(&keys),
+            None,
+            None,
         )
         .unwrap();
 
@@ -736,7 +746,7 @@ mod tests {
             "top secret",
             "TS",
             None,
-            Some(vec!["message".to_owned()]),
+            Some(&["message".to_owned()][..]),
             None,
             None,
         )

@@ -40,6 +40,10 @@ _LEVEL_NUM: dict[str, int] = {
     "fatal": 50,
 }
 
+# Outcome codes of the writer's fused ``log`` entry points (``Outcome`` in the
+# extension): accepted, dropped by a full queue, rejected by a closed writer.
+_ACCEPTED, _FULL, _CLOSED = 0, 1, 2
+
 
 class _NativeWriter(Protocol):
     def enqueue_outcome(self, message: str, blocking: bool) -> str: ...
@@ -57,6 +61,33 @@ class _NativeWriter(Protocol):
         stack: str | None = None,
         timestamp: str | None = None,
     ) -> str: ...
+
+    def log(
+        self,
+        config: Any,
+        logger: str,
+        level: str,
+        message: str,
+        bound: dict[str, Any],
+        kwargs: dict[str, Any],
+        contextvars: dict[str, Any],
+        exception: Any,
+        stack: str | None,
+    ) -> int: ...
+
+    def log_capture(
+        self,
+        config: Any,
+        logger: str,
+        level: str,
+        message: str,
+        bound: dict[str, Any],
+        kwargs: dict[str, Any],
+        contextvars: dict[str, Any],
+        exception: Any,
+        stack: str | None,
+        json_copy: bool,
+    ) -> tuple[int, str, str | None]: ...
 
     def flush(self) -> None: ...
 
@@ -139,6 +170,22 @@ class _RustModule(Protocol):
         allow_backtracking: bool = False,
     ) -> Any: ...
 
+    def RuntimeConfig(
+        self,
+        service: str,
+        sensitive_keys: list[str] | None = None,
+        sensitive_patterns: list[str] | None = None,
+        pattern_replacement: str | None = None,
+        allow_backtracking: bool = False,
+        console: bool = False,
+        colors: bool = False,
+        blocking: bool = True,
+    ) -> Any: ...
+
+    def merge_fields(
+        self, bound: dict[str, Any], kwargs: dict[str, Any], contextvars: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
     def NativeFilter(
         self,
         sample_rate: float = ...,
@@ -186,8 +233,10 @@ class _RuntimeState:
     """Coherent native configuration snapshot used for one complete log call."""
 
     writer: _NativeWriter
+    # Rust-owned per-record policy: service, redaction keys and compiled
+    # patterns, output format and colors, and the queue overflow policy.
+    config: Any
     settings: Settings
-    service: str
     maxsize: int
     target: str
     overflow: str
@@ -197,22 +246,36 @@ class _RuntimeState:
     also_stdout: bool
     level_threshold: int
     otel: bool
-    sensitive_keys: list[str] | None
-    sensitive_patterns: list[str] | None
-    redaction_config: Any
     record_filter: Any
     exception_config: dict[str, Any] | None
     exception_carets: bool
     metric_processor: Any
     sentry_processor: Any
-    console: bool
-    colors: bool
     stream_sink: Any
     callable_sinks: tuple[Callable[[str], None], ...]
     callable_queue_maxsize: int
-    # True when a record can be rendered and enqueued in one native call: JSON
-    # output with no synchronous stream sink and no Sentry line to hand back.
-    fused_json: bool
+    # True when a Python hook (OTel enrichment, metric or Sentry processor)
+    # needs the merged field mapping before the record is rendered.
+    enrich: bool
+    # True when nothing outside the writer needs the rendered line: no
+    # synchronous stream sink and no Sentry line to hand back. Callable sinks
+    # are checked per call, since they register and retire at runtime.
+    fused: bool
+
+    @property
+    def service(self) -> str:
+        """Service name rendered into every record (owned by ``config``)."""
+        return cast(str, self.config.service)
+
+    @property
+    def console(self) -> bool:
+        """True when records render in the console format."""
+        return bool(self.config.console)
+
+    @property
+    def colors(self) -> bool:
+        """True when console output carries ANSI colors."""
+        return bool(self.config.colors)
 
 
 _state_lock = threading.Lock()
@@ -270,7 +333,8 @@ def otel_enabled(runtime: _RuntimeState | None = None) -> bool:
 def sensitive_keys() -> list[str] | None:
     """Custom redaction keys for native mode, or None for the defaults."""
     state = current_runtime()
-    return state.sensitive_keys if state is not None else None
+    keys = state.settings.sensitive_keys if state is not None else None
+    return list(keys) if keys is not None else None
 
 
 def add_callable_sink(
@@ -303,7 +367,8 @@ def remove_callable_sink(token: int, *, finalizer: Callable[[], None] | None = N
 def sensitive_patterns() -> list[str] | None:
     """Custom regex value-patterns for native mode, or None if unset."""
     state = current_runtime()
-    return state.sensitive_patterns if state is not None else None
+    patterns = state.settings.sensitive_patterns if state is not None else None
+    return list(patterns) if patterns else None
 
 
 def should_render(
@@ -384,6 +449,19 @@ def notify_sentry(
         state.sentry_processor(None, method, event_dict)
     except Exception:  # noqa: BLE001 - hooks must never break logging
         pass
+
+
+def merge_fields(
+    bound: dict[str, Any], kwargs: dict[str, Any], contextvars: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge a record's field sources exactly as the fused native path does.
+
+    ``bound`` first, then ``kwargs`` (overriding in place; ``exc_info`` and
+    ``stack_info`` are never fields), then contextvars for keys still absent.
+    Used only when a Python hook must see the merged mapping before rendering.
+    """
+    assert _RUST is not None
+    return _RUST.merge_fields(bound, kwargs, contextvars)
 
 
 def build_exception_field(
@@ -666,37 +744,42 @@ def _apply_settings(settings: Settings, *, expected: _RuntimeState | None = None
     if _RUST is None:
         msg = "native extension is not available"
         raise RuntimeError(msg)
-    # Validate regex patterns against Rust's engine before enabling. Rust's
-    # `regex` guarantees linear-time matching and therefore rejects
-    # backreferences and look-around; fail loudly at setup time — redaction
-    # that silently differs from what was configured is worse than an error.
-    # `allow_backtracking_patterns` routes rejected patterns to the bounded
-    # backtracking engine instead (validated the same way).
-    if sensitive_patterns:
-        try:
-            _RUST.validate_patterns(list(sensitive_patterns), allow_backtracking_patterns)
-        except ValueError as exc:
-            if allow_backtracking_patterns:
-                msg = f"invalid sensitive_patterns regex ({exc})."
-            else:
-                msg = (
-                    f"unsupported sensitive_patterns regex ({exc}). Rust's regex engine "
-                    "guarantees linear-time matching and does not support backreferences "
-                    "or look-around. Rewrite the pattern with a capture group around "
-                    "the prefix you want to keep, e.g. lookbehind "
-                    "'(?<=password=)\\S+' becomes '(password=)\\S+' with "
-                    "pattern_replacement='$1[REDACTED]', or "
-                    "pass allow_backtracking_patterns=True to opt this pattern into a "
-                    "bounded backtracking engine (loses the linear-time guarantee)."
-                )
-            raise ValueError(msg) from exc
-        new_config = _RUST.RedactionConfig(
-            list(sensitive_patterns), pattern_replacement, allow_backtracking_patterns
+    # Resolve console/colors from the chosen format.
+    new_console = format == "console"
+    new_colors = colors if colors is not None else (sys.stdout.isatty() if new_console else False)
+
+    # Compile the per-record policy once: service, redaction keys and patterns,
+    # output format, overflow. Rust's `regex` guarantees linear-time matching
+    # and therefore rejects backreferences and look-around; fail loudly at
+    # setup time — redaction that silently differs from what was configured is
+    # worse than an error. `allow_backtracking_patterns` routes rejected
+    # patterns to the bounded backtracking engine instead (validated the same way).
+    try:
+        new_config = _RUST.RuntimeConfig(
+            service,
+            sensitive_keys=list(sensitive_keys) if sensitive_keys is not None else None,
+            sensitive_patterns=list(sensitive_patterns) if sensitive_patterns else None,
+            pattern_replacement=pattern_replacement,
+            allow_backtracking=allow_backtracking_patterns,
+            console=new_console,
+            colors=new_colors,
+            blocking=overflow == "block",
         )
-        new_patterns: list[str] | None = list(sensitive_patterns)
-    else:
-        new_config = None
-        new_patterns = None
+    except ValueError as exc:
+        if allow_backtracking_patterns:
+            msg = f"invalid sensitive_patterns regex ({exc})."
+        else:
+            msg = (
+                f"unsupported sensitive_patterns regex ({exc}). Rust's regex engine "
+                "guarantees linear-time matching and does not support backreferences "
+                "or look-around. Rewrite the pattern with a capture group around "
+                "the prefix you want to keep, e.g. lookbehind "
+                "'(?<=password=)\\S+' becomes '(password=)\\S+' with "
+                "pattern_replacement='$1[REDACTED]', or "
+                "pass allow_backtracking_patterns=True to opt this pattern into a "
+                "bounded backtracking engine (loses the linear-time guarantee)."
+            )
+        raise ValueError(msg) from exc
 
     new_exception_config: dict[str, Any] | None = None
     if structured_exceptions:
@@ -724,10 +807,6 @@ def _apply_settings(settings: Settings, *, expected: _RuntimeState | None = None
         if new_filter.is_empty():
             new_filter = None
 
-    # Resolve console/colors from the chosen format.
-    new_console = format == "console"
-    new_colors = colors if colors is not None else (sys.stdout.isatty() if new_console else False)
-
     # Construct every fallible native resource before touching the active
     # configuration. A bad target/path/value must not close a working logger.
     new_writer = _RUST._NativeStringWriter(
@@ -740,8 +819,8 @@ def _apply_settings(settings: Settings, *, expected: _RuntimeState | None = None
     )
     new_runtime = _RuntimeState(
         writer=new_writer,
+        config=new_config,
         settings=settings,
-        service=service,
         maxsize=maxsize,
         target=target,
         overflow=overflow,
@@ -751,20 +830,16 @@ def _apply_settings(settings: Settings, *, expected: _RuntimeState | None = None
         also_stdout=also_stdout,
         level_threshold=_level_number(level),
         otel=otel,
-        sensitive_keys=list(sensitive_keys) if sensitive_keys is not None else None,
-        sensitive_patterns=new_patterns,
-        redaction_config=new_config,
         record_filter=new_filter,
         exception_config=new_exception_config,
         exception_carets=exception_carets,
         metric_processor=metric_processor,
         sentry_processor=sentry_processor,
-        console=new_console,
-        colors=new_colors,
         stream_sink=stream_sink,
         callable_sinks=tuple(callable_sinks or ()),
         callable_queue_maxsize=callable_queue_maxsize,
-        fused_json=not new_console and sentry_processor is None and stream_sink is None,
+        enrich=otel or metric_processor is not None or sentry_processor is not None,
+        fused=sentry_processor is None and stream_sink is None,
     )
     with _state_lock:
         stale = expected is not None and _runtime is not expected
@@ -876,146 +951,78 @@ def shutdown() -> None:
     _sync_callable_dispatcher()
 
 
-def _render_json(
-    runtime: _RuntimeState,
-    fields: dict[str, Any],
-    logger: str,
-    level: str,
-    message: str,
-    stack: str | None,
-) -> str:
-    """Render a redacted JSON event, reusing compiled configuration."""
-    assert _RUST is not None
-    if runtime.redaction_config is not None:
-        return _RUST.render_line_with_config(
-            fields,
-            logger,
-            level,
-            runtime.service,
-            message,
-            runtime.redaction_config,
-            None,
-            runtime.sensitive_keys,
-            stack,
-        )
-    return _RUST.render_line(
-        fields,
-        logger,
-        level,
-        runtime.service,
-        message,
-        None,
-        runtime.sensitive_keys,
-        None,
-        stack,
-    )
-
-
 def render_and_enqueue(
-    fields: dict[str, Any],
+    runtime: _RuntimeState,
     logger: str,
     level: str,
     message: str,
-    stack: str | None = None,
-    runtime: _RuntimeState | None = None,
+    bound: dict[str, Any],
+    kwargs: dict[str, Any],
+    contextvars: dict[str, Any],
+    exception: Any,
+    stack: str | None,
 ) -> str | None:
-    """Render and enqueue one record; return redacted JSON for Sentry when enabled.
+    """Merge, render, and enqueue one record; return redacted JSON for Sentry when enabled.
 
-    The timestamp is generated inside the Rust core (cached per second), so no
-    Python-side time formatting happens on the hot path. When value-pattern
-    redaction is configured, the pre-built ``RedactionConfig`` is reused so no
-    per-record regex compilation occurs.
+    The writer merges ``bound``, ``kwargs`` (minus ``exc_info``/``stack_info``),
+    and ``contextvars`` with the facade's semantics, adds ``exception`` as a
+    field, redacts, timestamps (cached per second), renders in the configured
+    format, and pushes the line, all in one native call using the snapshot's
+    compiled ``config``. The common production shape never builds a Python
+    string; the line comes back only when a stream sink, callable sinks, or the
+    Sentry hook need it.
     """
-    state = runtime or current_runtime()
-    if _RUST is None or state is None:
-        return None
-    if state.fused_json and _callable_dispatcher.idle():
-        # Common production shape: JSON to the native writer and nothing else
-        # wants the rendered text. Render and enqueue in one call so the line
-        # never becomes a Python string (no PyString build, concat, or re-copy).
-        outcome = state.writer.render_enqueue_json_outcome(
-            fields,
-            logger,
-            level,
-            state.service,
-            message,
-            state.overflow == "block",
-            state.redaction_config,
-            state.sensitive_keys,
-            stack,
+    writer = runtime.writer
+    if runtime.fused and _callable_dispatcher.idle():
+        outcome = writer.log(
+            runtime.config, logger, level, message, bound, kwargs, contextvars, exception, stack
         )
-        if outcome != "accepted":
+        if outcome:
             _note_enqueue_outcome(outcome)
         return None
-    if state.console:
-        if state.redaction_config is not None:
-            rendered = _RUST.render_console_with_config(
-                fields,
-                logger,
-                level,
-                state.service,
-                message,
-                state.colors,
-                state.redaction_config,
-                None,
-                state.sensitive_keys,
-                stack,
-            )
-        else:
-            rendered = _RUST.render_line_console(
-                fields,
-                logger,
-                level,
-                state.service,
-                message,
-                state.colors,
-                None,
-                state.sensitive_keys,
-                None,
-                stack,
-            )
-    else:
-        rendered = _render_json(state, fields, logger, level, message, stack)
-    sentry_line = None
-    if state.sentry_processor is not None:
-        sentry_line = (
-            rendered
-            if not state.console
-            else _render_json(state, fields, logger, level, message, stack)
-        )
-    line = rendered + "\n"
+    outcome, line, sentry_line = writer.log_capture(
+        runtime.config,
+        logger,
+        level,
+        message,
+        bound,
+        kwargs,
+        contextvars,
+        exception,
+        stack,
+        runtime.sentry_processor is not None,
+    )
+    if outcome:
+        _note_enqueue_outcome(outcome)
     # Synchronous stream sink (configure(stream_sink=...)).
-    if state.stream_sink is not None:
+    if runtime.stream_sink is not None:
         try:
-            state.stream_sink.write(line)
+            runtime.stream_sink.write(line)
         except Exception:  # noqa: BLE001 - stream errors must never break logging
             pass
-    outcome = state.writer.enqueue_outcome(line, state.overflow == "block")
-    if outcome != "accepted":
-        _note_enqueue_outcome(outcome)
     # A retired writer rejects late records during configure/disable. That is a
     # lifecycle boundary, not queue overflow, and must not raise or emit a false
     # "queue full" warning from application code.
     active = current_runtime()
     # Level-only updates replace the snapshot, but keep its delivery resources.
-    still_active = active is not None and active.writer is state.writer
+    still_active = active is not None and active.writer is writer
     if still_active:
         _callable_dispatcher.enqueue(
             line,
             _LEVEL_NUM.get(level, _LEVEL_NUM["info"]),
-            overflow=state.overflow,
+            overflow=runtime.overflow,
         )
         return sentry_line
     return None
 
 
-def _note_enqueue_outcome(outcome: str) -> None:
+def _note_enqueue_outcome(outcome: int) -> None:
     """Account for the reason observed under the native queue lock."""
     global _lifecycle_rejected
-    if outcome == "closed":
+    if outcome == _CLOSED:
         with _drop_lock:
             _lifecycle_rejected += 1
-    elif outcome == "full":
+    elif outcome == _FULL:
         _note_drop()
 
 
