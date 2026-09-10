@@ -31,13 +31,13 @@ from typing import Any, Protocol, TypeAlias, TypeVar, cast
 
 from structguru import _runtime
 from structguru._contextvars import _ctx, bound_contextvars
+from structguru._levels import METHOD_LEVELS
 from structguru._native_dispatch import callback_scope, in_callback
 from structguru.config import _to_logging_level
 from structguru.otel import add_otel_context
 
 HandlerId: TypeAlias = int
 
-_LEVEL_NUM = _runtime._LEVEL_NUM
 # Stands in for an exhausted field source once Python has merged the fields
 # itself; the renderer only reads it, so one shared empty dict is safe.
 _NO_FIELDS: dict[str, Any] = {}
@@ -348,7 +348,7 @@ class _Catcher(ContextDecorator):
     ) -> None:
         self._logger = logger
         self._exception = exception
-        if not isinstance(level, str) or level.lower() not in _runtime._LEVEL_NUM:
+        if not isinstance(level, str) or level.lower() not in METHOD_LEVELS:
             raise ValueError(f"unknown catch level: {level!r}")
         self._level = level.lower()
         # Like Logger.trace(), catch uses DEBUG as TRACE's effective severity.
@@ -563,7 +563,7 @@ class Logger:
             return
 
         # Cheap disabled path: level-filter before any formatting.
-        if _LEVEL_NUM.get(method, 20) < runtime.level_threshold:
+        if METHOD_LEVELS.get(method, 20) < runtime.level_threshold:
             return
 
         stack_info = kwargs.get("stack_info") or self._opt_stack_info

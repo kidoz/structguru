@@ -8,21 +8,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from typing import Any, TypedDict, Unpack
 
+from structguru._levels import LEVELS as _LEVELS
 from structguru._native_env import native_options_from_env
-
-_LEVELS = {
-    "NOTSET": 0,
-    "TRACE": 5,
-    "DEBUG": 10,
-    "INFO": 20,
-    "SUCCESS": 20,
-    "WARNING": 30,
-    "WARN": 30,
-    "ERROR": 40,
-    "EXCEPTION": 40,
-    "CRITICAL": 50,
-    "FATAL": 50,
-}
 
 
 def _level_number(level: str | int) -> int:

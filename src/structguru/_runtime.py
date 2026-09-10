@@ -22,23 +22,10 @@ from dataclasses import dataclass, replace
 from types import TracebackType
 from typing import Any, Protocol, Unpack, cast
 
+from structguru._levels import METHOD_LEVELS
 from structguru._native_dispatch import CallableSinkDispatcher
 from structguru._native_env import autoconfigure_from_env
 from structguru.settings import Settings, SettingsChanges, _level_number
-
-# method name -> numeric level (mirrors logging levels; TRACE/SUCCESS folded)
-_LEVEL_NUM: dict[str, int] = {
-    "trace": 5,
-    "debug": 10,
-    "info": 20,
-    "success": 20,
-    "warning": 30,
-    "warn": 30,
-    "error": 40,
-    "exception": 40,
-    "critical": 50,
-    "fatal": 50,
-}
 
 # Outcome codes of the writer's fused ``log`` entry points (``Outcome`` in the
 # extension): accepted, dropped by a full queue, rejected by a closed writer.
@@ -307,7 +294,7 @@ def is_native_enabled() -> bool:
 def is_below_level(method: str, runtime: _RuntimeState | None = None) -> bool:
     """True when a call at *method* is below the native threshold (drop it)."""
     state = runtime or current_runtime()
-    return state is None or _LEVEL_NUM.get(method, _LEVEL_NUM["info"]) < state.level_threshold
+    return state is None or METHOD_LEVELS.get(method, 20) < state.level_threshold
 
 
 def set_level(level: str | int) -> None:
@@ -1009,7 +996,7 @@ def render_and_enqueue(
     if still_active:
         _callable_dispatcher.enqueue(
             line,
-            _LEVEL_NUM.get(level, _LEVEL_NUM["info"]),
+            METHOD_LEVELS.get(level, 20),
             overflow=runtime.overflow,
         )
         return sentry_line

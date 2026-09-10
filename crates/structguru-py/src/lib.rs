@@ -32,6 +32,13 @@ fn normalized_syslog_severity(level: &str) -> u8 {
     structguru_core::normalized_syslog_severity(level)
 }
 
+/// The core's level table: `(method name, numeric level)` pairs in display
+/// order, with the canonical method first for each number.
+#[pyfunction]
+fn level_table() -> Vec<(&'static str, u8)> {
+    structguru_core::LEVEL_TABLE.to_vec()
+}
+
 #[pyfunction]
 fn _convert_value_debug<'py>(
     py: Python<'py>,
@@ -1425,6 +1432,7 @@ fn rust_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(normalize_level, module)?)?;
     module.add_function(wrap_pyfunction!(syslog_severity, module)?)?;
     module.add_function(wrap_pyfunction!(normalized_syslog_severity, module)?)?;
+    module.add_function(wrap_pyfunction!(level_table, module)?)?;
     module.add_function(wrap_pyfunction!(_convert_value_debug, module)?)?;
     module.add_function(wrap_pyfunction!(_conversion_stats, module)?)?;
     module.add_function(wrap_pyfunction!(_render_json_debug, module)?)?;

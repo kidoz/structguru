@@ -23,6 +23,35 @@ pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// Every logger method name with the numeric level it emits at, in display
+/// order.
+///
+/// This is the single source of truth for level names: the Python package
+/// builds its lookup dicts from it at import, and the native filters rank
+/// levels with it. For a number with aliases the canonical method comes first
+/// (`warning` before `warn`), which the stdlib bridge relies on when mapping a
+/// numeric level back to a method.
+pub const LEVEL_TABLE: &[(&str, u8)] = &[
+    ("trace", 5),
+    ("debug", 10),
+    ("info", 20),
+    ("success", 20),
+    ("warning", 30),
+    ("warn", 30),
+    ("error", 40),
+    ("exception", 40),
+    ("critical", 50),
+    ("fatal", 50),
+];
+
+/// Numeric level for a method name, case-insensitively; `None` when unknown.
+pub fn level_number(method: &str) -> Option<u8> {
+    LEVEL_TABLE
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(method))
+        .map(|(_, number)| *number)
+}
+
 /// Normalize a structguru/loguru-style level name to the canonical field value.
 ///
 /// Unknown levels follow the current Python processor contract: uppercase the
@@ -61,6 +90,29 @@ pub fn normalized_syslog_severity(level: &str) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn level_table_ranks_methods_like_logging() {
+        assert_eq!(level_number("trace"), Some(5));
+        assert_eq!(level_number("WARN"), Some(30));
+        assert_eq!(level_number("exception"), Some(40));
+        assert_eq!(level_number("fatal"), Some(50));
+        assert_eq!(level_number("notice"), None);
+    }
+
+    #[test]
+    fn level_table_lists_the_canonical_method_first_per_number() {
+        let mut seen = std::collections::HashSet::new();
+        let canonical: Vec<&str> = LEVEL_TABLE
+            .iter()
+            .filter(|(_, number)| seen.insert(*number))
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(
+            canonical,
+            ["trace", "debug", "info", "warning", "error", "critical"]
+        );
+    }
 
     #[test]
     fn normalizes_known_level_aliases() {

@@ -22,17 +22,9 @@ pub trait RecordFilter: Send + Sync {
     fn allow(&self, key: &str, level: &str) -> Decision;
 }
 
-/// Numeric level for a method name (mirrors `_LEVEL_NUM` in `_runtime.py`).
+/// Numeric level for a method name; unknown names rank as `info`.
 fn method_level_num(method: &str) -> u8 {
-    match method {
-        "trace" => 5,
-        "debug" => 10,
-        "info" | "success" => 20,
-        "warning" | "warn" => 30,
-        "error" | "exception" => 40,
-        "critical" | "fatal" => 50,
-        _ => 20,
-    }
+    crate::level_number(method).unwrap_or(20)
 }
 
 /// Probabilistic sampler: keeps a record with probability `rate`.

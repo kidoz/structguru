@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from structguru.settings import _LEVELS
+from structguru._levels import LEVELS as _LEVELS
 
 
 def _to_logging_level(level_name: str) -> int:

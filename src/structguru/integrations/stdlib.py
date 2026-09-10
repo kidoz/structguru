@@ -27,6 +27,7 @@ import threading
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from structguru._levels import method_for_level_number
 from structguru.config import _to_logging_level
 from structguru.core import Logger, _set_stdlib_bridge_active
 from structguru.integrations._stdlib_env import (
@@ -64,19 +65,6 @@ _STANDARD_RECORD_ATTRS = frozenset(
         "asctime",
     }
 )
-
-
-def _method_for_level(levelno: int) -> str:
-    """Map a stdlib numeric level to the structguru method that emits it."""
-    if levelno >= logging.CRITICAL:
-        return "critical"
-    if levelno >= logging.ERROR:
-        return "error"
-    if levelno >= logging.WARNING:
-        return "warning"
-    if levelno >= logging.INFO:
-        return "info"
-    return "debug"
 
 
 @functools.lru_cache(maxsize=1024)
@@ -149,7 +137,7 @@ class StructguruHandler(logging.Handler):
                 target = target.bind(**extras)
             if record.exc_info:
                 target = target.opt(exception=record.exc_info)
-            emit_method = getattr(target, _method_for_level(record.levelno))
+            emit_method = getattr(target, method_for_level_number(record.levelno))
             if record.stack_info:
                 # A positional placeholder preserves the already-formatted text,
                 # even when stack_info introduces keyword arguments to _log().
