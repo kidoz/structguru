@@ -14,8 +14,8 @@ pub use filter::{Decision, FilterStats, Pipeline, RateLimiter, RecordFilter, Sam
 pub use render::{DEFAULT_SENSITIVE_KEYS, RedactionPattern, render_line, render_line_console};
 pub use value::{Value, ValueStats};
 pub use worker::{
-    MemorySink, MemorySinkHandle, MultiSink, RotatingFileSink, SinkError, StringSink, StringWriter,
-    WorkerMetrics, WriteSink,
+    EnqueueError, MemorySink, MemorySinkHandle, MultiSink, RotatingFileSink, SinkError, StringSink,
+    StringWriter, WorkerMetrics, WriteSink,
 };
 
 /// Return the Rust core crate version.

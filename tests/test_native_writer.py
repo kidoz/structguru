@@ -1,6 +1,30 @@
 from __future__ import annotations
 
+import pytest
 import structguru._rust as rust
+
+
+@pytest.mark.parametrize("fused", [False, True])
+def test_enqueue_outcome_distinguishes_full_from_closed(fused: bool) -> None:
+    writer = rust._NativeStringWriter(1, paused=True)
+
+    def enqueue(message: str, blocking: bool = False) -> str:
+        if fused:
+            return writer.render_enqueue_json_outcome(
+                {}, "logger", "info", "service", message, blocking
+            )
+        return writer.enqueue_outcome(message, blocking)
+
+    try:
+        assert enqueue("accepted") == "accepted"
+        assert enqueue("overflow") == "full"
+        writer.close()
+        assert enqueue("retired") == "closed"
+        assert enqueue("retired blocking", True) == "closed"
+        assert writer.metrics()["dropped"] == 1
+        assert writer.metrics()["written"] == 1
+    finally:
+        writer.close()
 
 
 def test_native_string_writer_drains_messages_in_order() -> None:

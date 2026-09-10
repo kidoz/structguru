@@ -338,7 +338,7 @@ update(otel=True)  # no-op injection when opentelemetry-api is absent
 ### Non-blocking logging
 
 Since v1.0, log I/O is offloaded to a background thread by default. The native
-Rust writer uses a bounded 8192-record queue with lossless backpressure. Set
+Rust writer uses a bounded 8192-record queue and waits for space while it is open. Set
 `overflow="drop"` to favor caller latency, or explicitly pass `maxsize=0` only
 when an unbounded queue is acceptable.
 
@@ -405,12 +405,13 @@ Public API:
 | `update(...)` | Change selected active options without rereading the environment. |
 | `shutdown()` | Stop the writer; logging is disabled until `configure()` is called. |
 | `set_level(level)` | Adjust the level threshold at runtime. |
-| `writer_metrics()` | Writer counters (enqueued/written/dropped/depth/...) plus filter counters (`sampled`/`rate_limited`) when active. |
+| `writer_metrics()` | Current writer counters (enqueued/written/dropped/depth/...) plus filter counters when active; `None` after shutdown. |
+| `lifecycle_metrics()` | Cumulative native deliveries rejected by closed writers; available after shutdown and across reconfiguration. |
 | `is_available()` | Whether the compiled extension is importable. |
 
 Behavior notes:
 
-- **Overflow**: the default `maxsize=8192` uses `overflow="block"` for bounded, lossless backpressure. Use `overflow="drop"` for drop-newest behavior with metrics and rate-limited warnings. `maxsize=0` explicitly opts into an unbounded queue.
+- **Overflow**: the default `maxsize=8192` uses `overflow="block"` to wait for queue space. Use `overflow="drop"` for drop-newest behavior with metrics and rate-limited warnings. `maxsize=0` explicitly opts into an unbounded queue.
 - **Redaction, level filtering, exceptions, and OpenTelemetry** injection are supported natively; redaction covers the message and all structured string values before rendering or Sentry export. `sensitive_keys` overrides the default redaction keys. Rust's linear-time regex engine rejects backreferences and look-around with `ValueError` at configuration time.
 - **Sampling & rate limiting** (`sample_rate`, `rate_limit_max`, `rate_limit_period`) are applied as native pre-render filters — dropped records cost zero rendering. `sampled` and `rate_limited` counters are distinct from the transport `dropped` counter. `sample_max_level` restricts sampling to records at or below that level; more severe records always pass.
 - **Metric hooks** (`metric_processor=...`) invoke a structlog-style processor (e.g. `MetricProcessor`) for every *kept* record on the caller's thread, with `(None, method, {"event": message, **fields})`. Dropped records (level/sampling/rate-limit) never reach it; hook errors are swallowed.
@@ -422,6 +423,14 @@ Behavior notes:
 - **Callable sinks** (`callable_sinks=[fn, ...]`): use a bounded queue (`callable_queue_maxsize=1024`). `overflow="block"` provides lossless backpressure; `overflow="drop"` reports `callable_dropped` metrics. Flush and lifecycle operations drain queued calls.
 - **Sentry integration** (`sentry_processor=SentryProcessor(...)`): receives the already-redacted event and raw `exc_info` only for exception capture.
 - **Scope**: the native renderer covers JSON and console rendering, file/stdout/callable sinks, redaction, sampling/rate limiting, metrics, exceptions, and stack information. `logger.add()` sinks receive native and stdlib records.
+
+Shutdown and reconfiguration drain records already accepted by the native queue.
+Calls still formatting or waiting for space may be rejected when their writer closes,
+even in block mode. `lifecycle_metrics()["rejected"]` counts these native deliveries
+without queue-full warnings and survives shutdown and configuration changes; forked
+children start at zero. Another destination, such as a synchronous stream, may already
+have received the event. Calls begun while logging is disabled are no-ops and are not
+counted. See the [lifecycle contract](docs/api/config.md#runtime-control) for details.
 
 ## Framework integrations
 

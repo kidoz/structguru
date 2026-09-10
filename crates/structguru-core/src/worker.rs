@@ -28,6 +28,13 @@ impl fmt::Display for SinkError {
 
 impl std::error::Error for SinkError {}
 
+/// Why one enqueue failed, captured while holding the queue lock.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EnqueueError {
+    Full(String),
+    Closed(String),
+}
+
 pub trait StringSink: Send {
     fn write(&mut self, message: String) -> Result<(), SinkError>;
 
@@ -651,13 +658,20 @@ impl StringWriter {
     }
 
     pub fn try_enqueue(&self, message: String) -> Result<(), String> {
+        self.try_enqueue_with_reason(message)
+            .map_err(|error| match error {
+                EnqueueError::Full(message) | EnqueueError::Closed(message) => message,
+            })
+    }
+
+    pub fn try_enqueue_with_reason(&self, message: String) -> Result<(), EnqueueError> {
         let mut state = self.lock_state();
         if state.closed {
-            return Err(message);
+            return Err(EnqueueError::Closed(message));
         }
         if self.shared.maxsize > 0 && state.queue.len() >= self.shared.maxsize {
             state.counters.dropped += 1;
-            return Err(message);
+            return Err(EnqueueError::Full(message));
         }
 
         state.queue.push_back(message);
@@ -986,6 +1000,23 @@ mod tests {
         writer.resume();
         writer.flush();
         writer.close();
+    }
+
+    #[test]
+    fn enqueue_reports_full_and_closed_at_the_queue_boundary() {
+        let writer = StringWriter::new_paused(1);
+        assert_eq!(writer.try_enqueue_with_reason("accepted".into()), Ok(()));
+        assert_eq!(
+            writer.try_enqueue_with_reason("overflow".into()),
+            Err(EnqueueError::Full("overflow".into()))
+        );
+        writer.close();
+        assert_eq!(
+            writer.try_enqueue_with_reason("retired".into()),
+            Err(EnqueueError::Closed("retired".into()))
+        );
+        assert_eq!(writer.metrics().dropped, 1);
+        assert_eq!(writer.metrics().written, 1);
     }
 
     #[test]

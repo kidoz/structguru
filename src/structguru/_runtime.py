@@ -42,11 +42,9 @@ _LEVEL_NUM: dict[str, int] = {
 
 
 class _NativeWriter(Protocol):
-    def try_enqueue(self, message: str) -> bool: ...
+    def enqueue_outcome(self, message: str, blocking: bool) -> str: ...
 
-    def enqueue_blocking(self, message: str) -> bool: ...
-
-    def render_enqueue_json(
+    def render_enqueue_json_outcome(
         self,
         fields: dict[str, Any],
         logger: str,
@@ -58,7 +56,7 @@ class _NativeWriter(Protocol):
         sensitive_keys: list[str] | None = None,
         stack: str | None = None,
         timestamp: str | None = None,
-    ) -> bool: ...
+    ) -> str: ...
 
     def flush(self) -> None: ...
 
@@ -230,6 +228,7 @@ _callable_dispatcher = CallableSinkDispatcher()
 _hooks_registered = False
 _drop_count = 0
 _drop_lock = threading.Lock()
+_lifecycle_rejected = 0
 
 
 def current_runtime() -> _RuntimeState | None:
@@ -824,10 +823,7 @@ def _register_lifecycle_hooks() -> None:
 
 def _atexit_close() -> None:
     """Drain native and callable sinks on interpreter shutdown."""
-    _callable_dispatcher.stop(drain=True)
-    state = current_runtime()
-    if state is not None:
-        state.writer.close()
+    shutdown()
 
 
 def _before_fork() -> None:
@@ -837,12 +833,13 @@ def _before_fork() -> None:
 
 def _after_in_child() -> None:
     """Respawn the writer in the child: its worker thread did not survive fork."""
-    global _runtime, _state_lock, _drop_lock
+    global _runtime, _state_lock, _drop_lock, _lifecycle_rejected
     state = _runtime
     # No other Python thread survives fork. Replace inherited synchronization
     # objects before touching state that may have been locked by a vanished thread.
     _state_lock = threading.Lock()
     _drop_lock = threading.Lock()
+    _lifecycle_rejected = 0
     if state is None or _RUST is None:
         _callable_dispatcher.after_fork(enabled=False)
         return
@@ -861,8 +858,15 @@ def _after_in_child() -> None:
 
 
 def shutdown() -> None:
-    """Turn native mode off and stop the background writer."""
+    """Drain accepted callbacks and native records, then disable logging.
+
+    Calls still formatting or waiting for queue space can be rejected by the
+    closing writer; :func:`lifecycle_metrics` counts these native deliveries.
+    Calls started after shutdown completes are disabled and are not counted.
+    """
     global _runtime, _lifecycle_generation
+    # Callback-generated logs need a live native writer until callbacks drain.
+    _callable_dispatcher.stop(drain=True)
     with _state_lock:
         old_runtime = _runtime
         _runtime = None
@@ -929,7 +933,7 @@ def render_and_enqueue(
         # Common production shape: JSON to the native writer and nothing else
         # wants the rendered text. Render and enqueue in one call so the line
         # never becomes a Python string (no PyString build, concat, or re-copy).
-        accepted = state.writer.render_enqueue_json(
+        outcome = state.writer.render_enqueue_json_outcome(
             fields,
             logger,
             level,
@@ -940,9 +944,8 @@ def render_and_enqueue(
             state.sensitive_keys,
             stack,
         )
-        active = current_runtime()
-        if not accepted and active is not None and active.writer is state.writer:
-            _note_drop()
+        if outcome != "accepted":
+            _note_enqueue_outcome(outcome)
         return None
     if state.console:
         if state.redaction_config is not None:
@@ -987,18 +990,15 @@ def render_and_enqueue(
             state.stream_sink.write(line)
         except Exception:  # noqa: BLE001 - stream errors must never break logging
             pass
-    if state.overflow == "block":
-        enqueued = state.writer.enqueue_blocking(line)
-    else:
-        enqueued = state.writer.try_enqueue(line)
+    outcome = state.writer.enqueue_outcome(line, state.overflow == "block")
+    if outcome != "accepted":
+        _note_enqueue_outcome(outcome)
     # A retired writer rejects late records during configure/disable. That is a
     # lifecycle boundary, not queue overflow, and must not raise or emit a false
     # "queue full" warning from application code.
     active = current_runtime()
     # Level-only updates replace the snapshot, but keep its delivery resources.
     still_active = active is not None and active.writer is state.writer
-    if not enqueued and still_active:
-        _note_drop()
     if still_active:
         _callable_dispatcher.enqueue(
             line,
@@ -1007,6 +1007,31 @@ def render_and_enqueue(
         )
         return sentry_line
     return None
+
+
+def _note_enqueue_outcome(outcome: str) -> None:
+    """Account for the reason observed under the native queue lock."""
+    global _lifecycle_rejected
+    if outcome == "closed":
+        with _drop_lock:
+            _lifecycle_rejected += 1
+    elif outcome == "full":
+        _note_drop()
+
+
+def lifecycle_metrics() -> dict[str, int]:
+    """Return cumulative native delivery rejections for this process.
+
+    ``rejected`` counts records rejected because their native writer was closed,
+    including producers interrupted by shutdown or reconfiguration. It excludes
+    queue-full drops, sink errors, filtered records, and calls begun while logging
+    is disabled. Another destination may already have received the record.
+
+    The counter survives configuration changes and shutdown; a forked child starts
+    at zero. Unlike :func:`writer_metrics`, this always returns a snapshot.
+    """
+    with _drop_lock:
+        return {"rejected": _lifecycle_rejected}
 
 
 def _note_drop() -> None:
@@ -1069,6 +1094,9 @@ def writer_metrics() -> dict[str, Any] | None:
     ``written`` counts records delivered to at least one native destination;
     ``sink_errors`` counts failed sink operations, including partial failures
     when another destination succeeds.
+
+    Returns ``None`` while logging is disabled. Use :func:`lifecycle_metrics`
+    for cumulative closed-writer rejections across configuration and shutdown.
     """
     state = current_runtime()
     if state is None:

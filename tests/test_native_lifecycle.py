@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import io
+import json
 import os
 import select
 import subprocess
 import sys
 import textwrap
 import threading
+import warnings
 from dataclasses import replace
 
 import pytest
@@ -19,6 +22,286 @@ pytestmark = pytest.mark.skipif(
     not _runtime.is_available(),
     reason="native extension not built",
 )
+
+
+@pytest.mark.parametrize("operation", ["configure", "shutdown"])
+@pytest.mark.parametrize("path", ["fused", "console", "stream"])
+@pytest.mark.parametrize("overflow", ["block", "drop"])
+def test_retired_writer_rejections_remain_observable(
+    operation: str, path: str, overflow: str
+) -> None:
+    entered, release = threading.Event(), threading.Event()
+    stream = io.StringIO()
+    _runtime.configure(
+        target="memory",
+        overflow=overflow,
+        colors=False,
+        format="console" if path == "console" else "json",
+        stream_sink=stream if path == "stream" else None,
+    )
+    state = _runtime.current_runtime()
+    assert state is not None
+    before = structguru.lifecycle_metrics()["rejected"]
+    structguru.logger.info("accepted")
+    errors: list[BaseException] = []
+
+    class PausedMessage:
+        def __str__(self) -> str:
+            entered.set()
+            assert release.wait(3)
+            return "late"
+
+    def produce() -> None:
+        try:
+            structguru.logger.info(PausedMessage())
+        except BaseException as error:
+            errors.append(error)
+
+    producer = threading.Thread(target=produce, daemon=True)
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        producer.start()
+        try:
+            assert entered.wait(2)
+            if operation == "shutdown":
+                structguru.shutdown()
+            else:
+                structguru.configure(target="memory")
+        finally:
+            release.set()
+            producer.join(3)
+    assert not producer.is_alive()
+    assert not errors
+    assert not captured
+    assert state.writer.metrics()["written"] == 1
+    assert state.writer.metrics()["dropped"] == 0
+    assert structguru.lifecycle_metrics() == {"rejected": before + 1}
+    if path == "stream":
+        # This is a rejected native delivery, not necessarily a lost event.
+        assert [json.loads(line)["message"] for line in stream.getvalue().splitlines()] == [
+            "accepted",
+            "late",
+        ]
+    structguru.shutdown()
+    snapshot = structguru.lifecycle_metrics()
+    structguru.logger.info("disabled")
+    assert structguru.writer_metrics() is None
+    assert structguru.lifecycle_metrics() == snapshot
+    snapshot["rejected"] = -1
+    structguru.configure(target="memory")
+    structguru.set_level("DEBUG")
+    structguru.update(level="INFO")
+    log = structguru.Logger()
+    token = log.add(io.StringIO())
+    log.remove(token)
+    structguru.logger.info("recovered")
+    structguru.flush()
+    assert structguru.lifecycle_metrics() == {"rejected": before + 1}
+    assert [json.loads(line)["message"] for line in _runtime.drain_messages()] == ["recovered"]
+
+
+@pytest.mark.parametrize("operation", ["shutdown", "_atexit_close"])
+def test_shutdown_drains_callback_logs_and_disables_runtime(operation: str) -> None:
+    # A subprocess bounds lifecycle deadlocks, including final interpreter cleanup.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+            import json, sys, threading, warnings
+            import structguru as sg
+            from structguru import _runtime
+            entered, release = threading.Event(), threading.Event()
+            def callback(line):
+                entered.set()
+                assert release.wait(3)
+                sg.logger.info('nested')
+            sg.configure(target='memory', callable_sinks=[callback])
+            state = _runtime.current_runtime()
+            sg.logger.info('accepted')
+            assert entered.wait(2)
+            original_stop = _runtime._callable_dispatcher.stop
+            def stop(*, drain):
+                release.set()
+                original_stop(drain=drain)
+            _runtime._callable_dispatcher.stop = stop
+            with warnings.catch_warnings(record=True) as captured:
+                getattr(_runtime, sys.argv[1])()
+                assert _runtime.current_runtime() is None
+                sg.logger.info('late')
+                assert not captured, captured
+            assert [json.loads(line)['message'] for line in state.writer.messages()] == [
+                'accepted', 'nested'
+            ]
+            assert sg.writer_metrics() is None
+            assert sg.lifecycle_metrics() == {'rejected': 0}
+        """),
+            operation,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=6,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_earlier_atexit_handler_sees_disabled_runtime() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+            import atexit, os, warnings
+            def late():
+                import structguru as sg
+                with warnings.catch_warnings(record=True) as captured:
+                    sg.logger.info('late handler')
+                    if sg.get_config() is not None or captured:
+                        os._exit(42)
+            atexit.register(late)
+            import structguru as sg
+            sg.configure(target='memory')
+            sg.logger.info('accepted')
+        """),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("operation", ["shutdown", "configure"])
+@pytest.mark.parametrize("format", ["json", "console"])
+def test_retirement_wakes_full_queue_producer_and_counts_rejection(
+    operation: str, format: str
+) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+            import sys, threading, warnings
+            from dataclasses import replace
+            import structguru as sg
+            from structguru import _runtime
+            sg.configure(target='memory', format=sys.argv[2], maxsize=1)
+            state = _runtime.current_runtime()
+            state.writer.close()
+            writer = _runtime._RUST._NativeStringWriter(1, paused=True)
+            _runtime._runtime = replace(state, writer=writer)
+            sg.logger.info('accepted')
+            assert writer.metrics()['depth'] == 1
+            entered, done = threading.Event(), threading.Event()
+            errors = []
+            def produce():
+                entered.set()
+                try:
+                    sg.logger.info('waiting')
+                except BaseException as error:
+                    errors.append(error)
+                finally:
+                    done.set()
+            producer = threading.Thread(target=produce, daemon=True)
+            with warnings.catch_warnings(record=True) as captured:
+                producer.start()
+                assert entered.wait(2)
+                assert not done.wait(0.05), 'full paused queue did not block'
+                if sys.argv[1] == 'configure':
+                    sg.configure(target='memory')
+                else:
+                    sg.shutdown()
+                producer.join(3)
+                assert not producer.is_alive()
+                assert not errors, errors
+                assert not captured, captured
+            assert writer.metrics()['written'] == 1
+            assert writer.metrics()['dropped'] == 0
+            assert sg.lifecycle_metrics() == {'rejected': 1}
+            sg.configure(target='memory')
+            sg.logger.info('recovered')
+            sg.flush()
+            assert sg.writer_metrics()['written'] == 1
+            assert sg.lifecycle_metrics() == {'rejected': 1}
+            sg.shutdown()
+        """),
+            operation,
+            format,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=7,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_full_queue_is_not_reclassified_when_writer_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _runtime.configure(target="memory", overflow="drop", format="console")
+    state = _runtime.current_runtime()
+    assert state is not None and _runtime._RUST is not None
+    state.writer.close()
+    writer = _runtime._RUST._NativeStringWriter(1, paused=True)
+    assert writer.enqueue_outcome("accepted", False) == "accepted"
+    before = structguru.lifecycle_metrics()
+
+    class ClosingWriter:
+        def __getattr__(self, name: str):
+            return getattr(writer, name)
+
+        def enqueue_outcome(self, message: str, blocking: bool) -> str:
+            outcome = writer.enqueue_outcome(message, blocking)
+            structguru.shutdown()
+            return outcome
+
+    monkeypatch.setattr(_runtime, "_runtime", replace(state, writer=ClosingWriter()))
+    _runtime._reset_drop_count()
+    with pytest.warns(UserWarning, match="queue full"):
+        structguru.logger.info("overflow")
+    assert writer.metrics()["dropped"] == 1
+    assert writer.metrics()["written"] == 1
+    assert structguru.lifecycle_metrics() == before
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_lifecycle_metrics_start_fresh_in_forked_child() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+            import os, signal, warnings
+            import structguru as sg
+            from structguru import _runtime
+            sg.configure(target='memory')
+            _runtime.current_runtime().writer.close()
+            with warnings.catch_warnings(record=True) as captured:
+                sg.logger.info('closed writer')
+                assert not captured
+            assert sg.lifecycle_metrics() == {'rejected': 1}
+            sg.configure(target='memory')
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', DeprecationWarning)
+                pid = os.fork()
+            if pid == 0:
+                signal.alarm(3)
+                if sg.lifecycle_metrics() != {'rejected': 0}:
+                    os._exit(42)
+                sg.logger.info('child')
+                sg.flush()
+                os._exit(0 if sg.writer_metrics()['written'] == 1 else 43)
+            _, status = os.waitpid(pid, 0)
+            assert os.waitstatus_to_exitcode(status) == 0, status
+            assert sg.lifecycle_metrics() == {'rejected': 1}
+            sg.shutdown()
+        """),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=6,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("operation", ["flush", "before_fork"])

@@ -44,6 +44,27 @@ booleans. Native regex and sink initialization errors leave the active runtime u
 
 ::: structguru.writer_metrics
 
+::: structguru.lifecycle_metrics
+
+An accepted native record has entered the writer queue; shutdown and reconfiguration
+drain those records. A call still formatting, running a hook, or waiting for queue
+space can reach its writer after closure. Its native delivery is rejected and
+increments `lifecycle_metrics()["rejected"]`, without a queue-full warning. This
+counter is cumulative across configuration changes and shutdown, starts at zero in
+a forked child, and excludes calls begun while logging is disabled. A synchronous
+stream may already have received a record whose native delivery was rejected.
+The snapshot can increase as concurrent calls finish; no delivery retry is performed.
+
+`writer_metrics()` describes the current writer and returns `None` after shutdown.
+Its `dropped` counter means queue overflow; `sink_errors` means sink-operation
+failures. These are separate from lifecycle rejections. Writer counters restart when
+a new writer is constructed; level-only updates retain them.
+
+Shutdown and interpreter exit drain accepted callable deliveries before closing the
+native writer, allowing their nested native logs to finish. A shutdown requested
+from inside a callback cannot wait for that callback itself; subsequent nested logs
+see the disabled runtime. Later calls remain disabled until `configure()` is called.
+
 ## Request-scoped context
 
 ::: structguru.bind_contextvars

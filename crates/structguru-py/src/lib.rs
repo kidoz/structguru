@@ -362,6 +362,30 @@ struct NativeStringWriter {
     writer: StringWriter,
 }
 
+impl NativeStringWriter {
+    fn enqueue_owned(&self, py: Python<'_>, message: String, blocking: bool) -> &'static str {
+        if !blocking {
+            return match self.writer.try_enqueue_with_reason(message) {
+                Ok(()) => "accepted",
+                Err(structguru_core::EnqueueError::Full(_)) => "full",
+                Err(structguru_core::EnqueueError::Closed(_)) => "closed",
+            };
+        }
+        // Keep the uncontended path attached; only a full/closed queue needs
+        // the blocking path, whose sole rejection reason is closure.
+        match self.writer.enqueue_if_space(message) {
+            Ok(()) => "accepted",
+            Err(message) => {
+                if py.detach(|| self.writer.enqueue_blocking(message).is_ok()) {
+                    "accepted"
+                } else {
+                    "closed"
+                }
+            }
+        }
+    }
+}
+
 #[pymethods]
 impl NativeStringWriter {
     #[new]
@@ -458,6 +482,11 @@ impl NativeStringWriter {
         }
     }
 
+    /// Return the enqueue outcome without racing a later close or reconfigure.
+    fn enqueue_outcome(&self, py: Python<'_>, message: &str, blocking: bool) -> &'static str {
+        self.enqueue_owned(py, message.to_owned(), blocking)
+    }
+
     /// Render one JSON record and hand it to the writer in a single call.
     ///
     /// Renders exactly like `render_line_with_config` (when `config` is given)
@@ -482,6 +511,37 @@ impl NativeStringWriter {
         stack: Option<&Bound<'_, PyString>>,
         timestamp: Option<&str>,
     ) -> PyResult<bool> {
+        Ok(self.render_enqueue_json_outcome(
+            py,
+            fields,
+            logger,
+            level,
+            service,
+            message,
+            blocking,
+            config,
+            sensitive_keys,
+            stack,
+            timestamp,
+        )? == "accepted")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (fields, logger, level, service, message, blocking, config=None, sensitive_keys=None, stack=None, timestamp=None))]
+    fn render_enqueue_json_outcome(
+        &self,
+        py: Python<'_>,
+        fields: &Bound<'_, PyDict>,
+        logger: &Bound<'_, PyString>,
+        level: &str,
+        service: &Bound<'_, PyString>,
+        message: &Bound<'_, PyString>,
+        blocking: bool,
+        config: Option<&RedactionConfig>,
+        sensitive_keys: Option<Vec<String>>,
+        stack: Option<&Bound<'_, PyString>>,
+        timestamp: Option<&str>,
+    ) -> PyResult<&'static str> {
         let entries = convert_fields(fields)?;
         let (logger, service, message, stack) = text_arguments(logger, service, message, stack);
         let (logger, service, message, stack) = (
@@ -520,13 +580,7 @@ impl NativeStringWriter {
         )
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
         line.push('\n');
-        if !blocking {
-            return Ok(self.writer.try_enqueue(line).is_ok());
-        }
-        Ok(match self.writer.enqueue_if_space(line) {
-            Ok(()) => true,
-            Err(line) => py.detach(|| self.writer.enqueue_blocking(line).is_ok()),
-        })
+        Ok(self.enqueue_owned(py, line, blocking))
     }
 
     fn flush(&self, py: Python<'_>) {
