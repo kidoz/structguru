@@ -12,6 +12,23 @@ All notable changes to this project are documented here. The format is based on
   writers, retaining counts across reconfiguration and shutdown and starting fresh
   in forked children.
 
+### Changed
+
+- The native writer merges bound fields, call kwargs, and contextvars, redacts,
+  renders, and enqueues a record in one call using a `RuntimeConfig` compiled at
+  configuration time, so no per-record configuration is marshalled and the
+  console format is fused like JSON. A simple `logger.info()` runs about 30
+  percent faster; records with fields about 20 percent. Output is unchanged.
+- Level names and numbers come from one table in the Rust core; the facade,
+  settings validation, the stdlib bridge, and native filters all read it.
+  Importing the package without the native extension now fails at import with
+  the existing "requires its native extension" error.
+- Callable-sink dispatch (`configure(callable_sinks=...)`, `logger.add()`) runs
+  in the native extension: the bounded queue, its worker thread, sink selection,
+  delivery accounting, and deferred handler closes. Caller cost with a sink
+  configured drops by a third to a half; lifecycle, backpressure, fork, and
+  callback-reentrancy semantics are unchanged.
+
 ### Fixed
 
 - Native queue overflow and closed-writer rejections are distinguished at enqueue
