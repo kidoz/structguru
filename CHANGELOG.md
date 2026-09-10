@@ -6,8 +6,20 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- `lifecycle_metrics()` reports cumulative native deliveries rejected by closed
+  writers, retaining counts across reconfiguration and shutdown and starting fresh
+  in forked children.
+
 ### Fixed
 
+- Native queue overflow and closed-writer rejections are distinguished at enqueue
+  time, so racing reconfiguration or shutdown cannot silently hide a rejection or
+  mislabel it as a full queue.
+- Shutdown drains callable deliveries before closing the native writer, allowing
+  their nested native logs to finish. Interpreter exit clears the active runtime,
+  so later atexit handlers see disabled logging instead of a closed writer.
 - `logger.catch(level="trace")` uses DEBUG severity consistently with
   `logger.trace()` for level filtering, sampling, and sink thresholds, including
   synchronous and coroutine decorators.
