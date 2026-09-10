@@ -141,34 +141,34 @@ class StructguruMiddleware:
         worker thread never inherits the previous request's fields.
         """
         clear_contextvars()
-
-        request_id = coerce_request_id(request.META.get("HTTP_X_REQUEST_ID", ""))
-
-        bind_contextvars(
-            request_id=request_id,
-            method=request.method,
-            path=request.path,
-            client_ip=request.META.get("REMOTE_ADDR", ""),
-        )
-
-        if hasattr(request, "user") and hasattr(request.user, "pk") and request.user.pk:
-            bind_contextvars(user_id=str(request.user.pk))
-
-        start_time = time.perf_counter()
-
         try:
-            response = self.get_response(request)
-        except Exception:
-            self.log.exception("Request failed")
-            raise
-        else:
-            duration_ms = (time.perf_counter() - start_time) * 1000
-            self.log.info(
-                "Request completed",
-                status_code=response.status_code,
-                duration_ms=round(duration_ms, 2),
+            request_id = coerce_request_id(request.META.get("HTTP_X_REQUEST_ID", ""))
+
+            bind_contextvars(
+                request_id=request_id,
+                method=request.method,
+                path=request.path,
+                client_ip=request.META.get("REMOTE_ADDR", ""),
             )
-            response["X-Request-ID"] = request_id
-            return response
+
+            if hasattr(request, "user") and hasattr(request.user, "pk") and request.user.pk:
+                bind_contextvars(user_id=str(request.user.pk))
+
+            start_time = time.perf_counter()
+
+            try:
+                response = self.get_response(request)
+            except Exception:
+                self.log.exception("Request failed")
+                raise
+            else:
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                self.log.info(
+                    "Request completed",
+                    status_code=response.status_code,
+                    duration_ms=round(duration_ms, 2),
+                )
+                response["X-Request-ID"] = request_id
+                return response
         finally:
             clear_contextvars()

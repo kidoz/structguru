@@ -6,11 +6,16 @@ import io
 import json
 import logging.config
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock
 
 import pytest
 from conftest import configure
 
+from structguru._contextvars import (
+    bind_contextvars,
+    clear_contextvars,
+    get_contextvars,
+)
 from structguru.integrations.django import StructguruMiddleware, build_logging_config
 
 
@@ -103,6 +108,90 @@ class TestBuildLoggingConfig:
 
 
 class TestStructguruMiddleware:
+    @pytest.mark.parametrize("stage", ["user", "pk", "user_id"])
+    @pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
+    def test_metadata_failure_clears_context(
+        self, stage: str, error_type: type[BaseException]
+    ) -> None:
+        buf = io.StringIO()
+        configure(service="test", stream=buf)
+        error = error_type("metadata unavailable")
+        request = MagicMock(method="GET", path="/failed")
+        request.META = {
+            "HTTP_X_REQUEST_ID": "failed-request",
+            "REMOTE_ADDR": "10.0.0.1",
+        }
+        if stage == "user":
+            type(request).user = PropertyMock(side_effect=error)
+        elif stage == "pk":
+            type(request.user).pk = PropertyMock(side_effect=error)
+        else:
+            request.user.pk.__str__.side_effect = error
+        response = MagicMock(status_code=200)
+        seen_contexts: list[dict[str, Any]] = []
+
+        def get_response(req: Any) -> Any:
+            seen_contexts.append(get_contextvars())
+            return response
+
+        mw = StructguruMiddleware(get_response)
+        bind_contextvars(stale="previous request")
+        try:
+            with pytest.raises(error_type) as caught:
+                mw(request)
+
+            assert caught.value is error
+            assert get_contextvars() == {}
+            assert seen_contexts == []
+            assert buf.getvalue() == ""
+
+            next_request = MagicMock(method="POST", path="/next")
+            next_request.META = {"HTTP_X_REQUEST_ID": "next-request"}
+            next_request.user.pk = None
+            assert mw(next_request) is response
+            assert seen_contexts == [
+                {
+                    "request_id": "next-request",
+                    "method": "POST",
+                    "path": "/next",
+                    "client_ip": "",
+                }
+            ]
+            assert get_contextvars() == {}
+            response.__setitem__.assert_called_once_with("X-Request-ID", "next-request")
+        finally:
+            clear_contextvars()
+
+    @pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
+    def test_application_failure_clears_context(self, error_type: type[BaseException]) -> None:
+        buf = io.StringIO()
+        configure(service="test", stream=buf)
+        request = MagicMock(method="GET", path="/failed")
+        request.META = {"HTTP_X_REQUEST_ID": "failed-request"}
+        request.user.pk = 42
+        error = error_type("application failed")
+
+        def get_response(req: Any) -> Any:
+            assert get_contextvars()["user_id"] == "42"
+            raise error
+
+        try:
+            with pytest.raises(error_type) as caught:
+                StructguruMiddleware(get_response)(request)
+
+            assert caught.value is error
+            assert get_contextvars() == {}
+            if error_type is RuntimeError:
+                record = json.loads(buf.getvalue())
+                assert record["message"] == "Request failed"
+                assert record["request_id"] == "failed-request"
+                assert record["user_id"] == "42"
+                assert "RuntimeError: application failed" in record["exception"]
+            else:
+                assert buf.getvalue() == ""
+        finally:
+            clear_contextvars()
+
     def test_binds_context_and_logs(self) -> None:
         buf = io.StringIO()
         configure(service="test", level="DEBUG", stream=buf)
