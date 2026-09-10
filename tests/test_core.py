@@ -24,15 +24,71 @@ from structguru.core import (
 )
 
 
-@pytest.mark.parametrize("level", ["ERROR", "Error", "error", "EXCEPTION"])
-def test_catch_normalizes_levels_before_filtering(level: str) -> None:
+@pytest.mark.parametrize(
+    "level, canonical",
+    [(level, "ERROR") for level in ("ERROR", "Error", "error", "EXCEPTION")]
+    + [(level, "DEBUG") for level in ("TRACE", "Trace", "trace")],
+)
+def test_catch_normalizes_levels_before_filtering(level: str, canonical: str) -> None:
     stream = io.StringIO()
-    configure(level="ERROR", stream=stream)
+    configure(level=canonical, stream=stream)
     with Logger().catch(level=level):
         raise ValueError("caught")
     record = json.loads(stream.getvalue())
-    assert record["level"] == "ERROR"
+    assert record["level"] == canonical
     assert "ValueError: caught" in record["exception"]
+
+
+@pytest.mark.parametrize("threshold", ["TRACE", "DEBUG", "INFO"])
+@pytest.mark.parametrize("sink_threshold", ["TRACE", "DEBUG", "INFO"])
+def test_catch_trace_matches_trace_thresholds(threshold: str, sink_threshold: str) -> None:
+    _runtime.configure(target="memory", level=threshold)
+    log = Logger()
+    delivered: list[str] = []
+    token = log.add(delivered.append, level=sink_threshold)
+    try:
+        log.trace("direct")
+        with log.catch(level="TrAcE", message="caught"):
+            raise ValueError("trace failure")
+        _runtime.flush()
+        records = [json.loads(line) for line in _runtime.drain_messages()]
+        expected = [] if threshold == "INFO" else ["direct", "caught"]
+        assert [record["message"] for record in records] == expected
+        assert all(record["level"] == "DEBUG" for record in records)
+        sink_records = [json.loads(line) for line in delivered]
+        assert [record["message"] for record in sink_records] == (
+            [] if sink_threshold == "INFO" else expected
+        )
+    finally:
+        log.remove(token)
+
+
+@pytest.mark.parametrize("reraise", [False, True])
+@pytest.mark.parametrize("threshold", ["DEBUG", "INFO"])
+def test_catch_trace_decorator_preserves_exception_behavior(reraise: bool, threshold: str) -> None:
+    stream = io.StringIO()
+    configure(level=threshold, stream=stream)
+    failure = ValueError("sync failure")
+
+    @Logger().catch(ValueError, level="trace", reraise=reraise)
+    def operation(fail: bool) -> int:
+        if fail:
+            raise failure
+        return 42
+
+    assert operation(False) == 42
+    if reraise:
+        with pytest.raises(ValueError) as caught:
+            operation(True)
+        assert caught.value is failure
+    else:
+        assert operation(True) is None
+    if threshold == "DEBUG":
+        record = json.loads(stream.getvalue())
+        assert record["level"] == "DEBUG"
+        assert "ValueError: sync failure" in record["exception"]
+    else:
+        assert stream.getvalue() == ""
 
 
 @pytest.mark.parametrize("level", ["TYPO", "", 40, None])
@@ -744,7 +800,8 @@ def test_format_warning_omits_exception_details() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reraise", [False, True])
-async def test_catch_coroutine_logs_awaited_exceptions(reraise: bool) -> None:
+@pytest.mark.parametrize("level", ["error", "TrAcE"])
+async def test_catch_coroutine_logs_awaited_exceptions(reraise: bool, level: str) -> None:
     import asyncio
     import inspect
 
@@ -753,7 +810,7 @@ async def test_catch_coroutine_logs_awaited_exceptions(reraise: bool) -> None:
     log = Logger()
     failure = ValueError("async failure")
 
-    @log.catch(ValueError, reraise=reraise)
+    @log.catch(ValueError, level=level, reraise=reraise)
     async def operation(fail: bool) -> int:
         await asyncio.sleep(0)
         if fail:
@@ -774,13 +831,14 @@ async def test_catch_coroutine_logs_awaited_exceptions(reraise: bool) -> None:
 
 
 @pytest.mark.asyncio
-async def test_catch_coroutine_preserves_unmatched_errors_and_cancellation() -> None:
+@pytest.mark.parametrize("level", ["error", "trace"])
+async def test_catch_coroutine_preserves_unmatched_errors_and_cancellation(level: str) -> None:
     import asyncio
 
     buf = io.StringIO()
     configure(stream=buf)
 
-    @Logger().catch(ValueError)
+    @Logger().catch(ValueError, level=level)
     async def operation(error: BaseException) -> None:
         raise error
 

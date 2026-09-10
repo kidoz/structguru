@@ -346,6 +346,9 @@ class _Catcher(ContextDecorator):
         if not isinstance(level, str) or level.lower() not in _runtime._LEVEL_NUM:
             raise ValueError(f"unknown catch level: {level!r}")
         self._level = level.lower()
+        # Like Logger.trace(), catch uses DEBUG as TRACE's effective severity.
+        if self._level == "trace":
+            self._level = "debug"
         self._message = message
         self._reraise = reraise
 
@@ -454,7 +457,8 @@ class Logger:
         Decorators support synchronous and coroutine functions; coroutine
         exceptions are handled while awaiting the decorated call.
         Level names are case-insensitive; unknown names raise ``ValueError``
-        when the catcher is constructed.
+        when the catcher is constructed. ``trace`` logs at ``DEBUG``, matching
+        :meth:`trace`.
         """
         return _Catcher(self, exception, level, message, reraise)
 

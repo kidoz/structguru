@@ -27,6 +27,23 @@ def _drain_last() -> dict[str, Any]:
     return json.loads(_runtime.drain_messages()[-1])
 
 
+@pytest.mark.parametrize("ceiling", ["TRACE", "DEBUG", "INFO"])
+def test_catch_trace_matches_trace_sampling_ceiling(ceiling: str) -> None:
+    _runtime.configure(target="memory", level="TRACE", sample_rate=0.0, sample_max_level=ceiling)
+    structguru.logger.trace("direct")
+    with structguru.logger.catch(level="trace", message="caught"):
+        raise ValueError("trace failure")
+    _runtime.flush()
+    records = [json.loads(line) for line in _runtime.drain_messages()]
+    assert [record["message"] for record in records] == (
+        ["direct", "caught"] if ceiling == "TRACE" else []
+    )
+    assert all(record["level"] == "DEBUG" for record in records)
+    metrics = _runtime.writer_metrics()
+    assert metrics is not None
+    assert metrics["sampled"] == (0 if ceiling == "TRACE" else 2)
+
+
 # -- value-pattern redaction -------------------------------------------------
 
 
