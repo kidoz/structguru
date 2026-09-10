@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Closing, reconfiguring, or shutting down the logger in a forked child on
+  Linux no longer panics with `failed to join thread: Invalid argument`. glibc
+  reuses the parent's dead worker thread identity for the child's respawned
+  worker, and releasing the abandoned parent writer detached that live thread;
+  the stale handle is now leaked instead of detached.
 - The stdlib bridge no longer holds its handler lock while waiting for callable
   queue space, preventing deadlocks when a sink callback logs through stdlib.
   Handler filters, including replacement records on Python 3.12+, still apply.
