@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Native sink construction releases the GIL while opening files and acquiring
+  sidecar locks, so other Python threads can keep running and logging during
+  configuration. Construction failures leave the previous runtime active.
 - Closing, reconfiguring, or shutting down the logger in a forked child on
   Linux no longer panics with `failed to join thread: Invalid argument`. glibc
   reuses the parent's dead worker thread identity for the child's respawned
