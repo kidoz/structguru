@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 from pathlib import Path
 
@@ -26,6 +27,99 @@ pytestmark = pytest.mark.skipif(
 
 
 # -- rotating-file sink -----------------------------------------------------
+
+
+@pytest.mark.skipif(os.name != "posix", reason="uses POSIX file locks and pipe polling")
+@pytest.mark.parametrize("fail_open", [False, True], ids=["success", "open-failure"])
+def test_file_sink_construction_releases_gil(tmp_path: Path, fail_open: bool) -> None:
+    import fcntl
+    import select
+
+    output = tmp_path / "output"
+    if fail_open:
+        output.mkdir()  # Lock acquisition succeeds, but opening a directory fails.
+    code = textwrap.dedent("""
+        import json
+        import sys
+        import threading
+        import structguru as sg
+        from structguru import _runtime
+
+        sg.configure(sg.Settings(target='memory', service='original'))
+        original = _runtime.current_runtime()
+        sg.logger.info('before construction')
+        entered = threading.Event()
+        errors = []
+
+        def progress():
+            entered.wait()
+            # Give the configuring thread time to enter the native constructor.
+            # The parent keeps the actual file lock until it receives this
+            # thread's acknowledgement; no timed lock release can hide a stall.
+            threading.Event().wait(0.05)
+            try:
+                sg.logger.info('during construction')
+                sg.flush()
+                print('progress', flush=True)
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=progress)
+        worker.start()
+        print('ready', flush=True)
+        entered.set()
+        try:
+            sg.configure(sg.Settings(file_path=sys.argv[1], service='replacement'))
+        except ValueError:
+            assert sys.argv[2] == 'True'
+            assert _runtime.current_runtime() is original
+        else:
+            assert sys.argv[2] == 'False'
+            assert _runtime.current_runtime() is not original
+        worker.join(2)
+        assert not worker.is_alive() and not errors, errors
+        sg.logger.info('after construction')
+        sg.flush()
+        messages = [json.loads(line)['message'] for line in original.writer.messages()]
+        expected = ['before construction', 'during construction']
+        if sys.argv[2] == 'True':
+            expected.append('after construction')
+            assert sg.get_config().service == 'original'
+        else:
+            assert sg.get_config().service == 'replacement'
+        assert messages == expected, messages
+        sg.shutdown()
+    """)
+    with Path(f"{output}.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        # Unbuffered pipes ensure select() cannot overlook a prefetched line.
+        child = subprocess.Popen(
+            [sys.executable, "-u", "-c", code, str(output), str(fail_open)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+        try:
+            assert child.stdout is not None
+            assert select.select([child.stdout], [], [], 3)[0], "child did not start"
+            assert child.stdout.readline() == b"ready\n"
+            progressed = bool(select.select([child.stdout], [], [], 2)[0])
+            acknowledgement = child.stdout.readline() if progressed else b""
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            try:
+                stdout, stderr = child.communicate(timeout=3)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.communicate()
+
+    assert child.returncode == 0, (stdout, stderr)
+    assert acknowledgement == b"progress\n", "sink construction blocked other Python threads"
+    if not fail_open:
+        [record] = [json.loads(line) for line in output.read_text().splitlines()]
+        assert record["message"] == "after construction"
+        assert record["service"] == "replacement"
 
 
 def test_file_sink_writes_records_to_file() -> None:

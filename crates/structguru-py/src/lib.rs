@@ -377,6 +377,7 @@ impl NativeStringWriter {
         also_stdout=false,
     ))]
     fn new(
+        py: Python<'_>,
         maxsize: usize,
         paused: bool,
         fail_after: Option<usize>,
@@ -386,50 +387,53 @@ impl NativeStringWriter {
         file_backup_count: usize,
         also_stdout: bool,
     ) -> PyResult<Self> {
-        use structguru_core::{MultiSink, RotatingFileSink, StringSink, WriteSink};
+        use structguru_core::{MultiSink, RotatingFileSink, SinkError, StringSink, WriteSink};
 
-        // Compose sinks. file_path (if set) drives real output; also_stdout
-        // mirrors to stdout as well. When no file_path is given, `target`
-        // selects stdout or a memory/test sink.
-        let mut sinks: Vec<Box<dyn StringSink>> = Vec::new();
+        // File creation and sidecar lock acquisition can block. Keep only
+        // Rust-owned arguments across detachment so other Python threads can
+        // keep running (and logging through the current runtime) during setup.
+        let target = target.to_owned();
+        let writer = py
+            .detach(move || -> Result<StringWriter, SinkError> {
+                // file_path drives real output; also_stdout mirrors to stdout.
+                // Otherwise target selects stdout or a memory/test sink.
+                let mut sinks: Vec<Box<dyn StringSink>> = Vec::new();
 
-        if let Some(path) = &file_path {
-            let file = RotatingFileSink::new(path, file_max_bytes, file_backup_count)
-                .map_err(|err| PyValueError::new_err(err.to_string()))?;
-            sinks.push(Box::new(file));
-        }
-        if also_stdout {
-            sinks.push(Box::new(WriteSink::new(std::io::stdout())));
-        }
+                if let Some(path) = &file_path {
+                    let file = RotatingFileSink::new(path, file_max_bytes, file_backup_count)?;
+                    sinks.push(Box::new(file));
+                }
+                if also_stdout {
+                    sinks.push(Box::new(WriteSink::new(std::io::stdout())));
+                }
 
-        let writer = if !sinks.is_empty() {
-            // Real output sink(s) composed.
-            if sinks.len() == 1 {
-                StringWriter::with_boxed_sink(maxsize, sinks.pop().unwrap())
-            } else {
-                StringWriter::with_boxed_sink(maxsize, Box::new(MultiSink::new(sinks)))
-            }
-        } else {
-            // No file_path and not also_stdout: memory/test targets.
-            match target {
-                "stdout" => StringWriter::new_stdout(maxsize),
-                "null" => StringWriter::new_null(maxsize),
-                "memory" => {
-                    if let Some(fail_after) = fail_after {
-                        StringWriter::new_failing(maxsize, fail_after, paused)
-                    } else if paused {
-                        StringWriter::new_paused(maxsize)
+                let writer = if !sinks.is_empty() {
+                    if sinks.len() == 1 {
+                        StringWriter::with_boxed_sink(maxsize, sinks.pop().unwrap())
                     } else {
-                        StringWriter::new(maxsize)
+                        StringWriter::with_boxed_sink(maxsize, Box::new(MultiSink::new(sinks)))
                     }
-                }
-                other => {
-                    return Err(PyValueError::new_err(format!(
-                        "unknown writer target: {other}"
-                    )));
-                }
-            }
-        };
+                } else {
+                    match target.as_str() {
+                        "stdout" => StringWriter::new_stdout(maxsize),
+                        "null" => StringWriter::new_null(maxsize),
+                        "memory" => {
+                            if let Some(fail_after) = fail_after {
+                                StringWriter::new_failing(maxsize, fail_after, paused)
+                            } else if paused {
+                                StringWriter::new_paused(maxsize)
+                            } else {
+                                StringWriter::new(maxsize)
+                            }
+                        }
+                        other => {
+                            return Err(SinkError::new(format!("unknown writer target: {other}")));
+                        }
+                    }
+                };
+                Ok(writer)
+            })
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
         Ok(Self { writer })
     }
 
