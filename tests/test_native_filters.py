@@ -59,6 +59,36 @@ def test_sensitive_keys_match_unicode_case_variants(
         assert record["nested"] == [{"PÄSSWORD": "[REDACTED]", "APIKEY": "[REDACTED]"}]
 
 
+@pytest.mark.parametrize("redaction", [False, True])
+@pytest.mark.parametrize("filter_kind", ["sampling", "rate_limit"])
+def test_filters_accept_surrogate_messages(filter_kind: str, redaction: bool) -> None:
+    _runtime.configure(
+        target="memory",
+        sample_rate=0.0 if filter_kind == "sampling" else 1.0,
+        sample_max_level="INFO",
+        rate_limit_max=1 if filter_kind == "rate_limit" else None,
+        sensitive_patterns=["sensitive-value"] if redaction else None,
+    )
+    message = "path=\udcff sensitive-value"
+    if filter_kind == "sampling":
+        structguru.logger.info(message)  # sampled out without conversion failure
+        structguru.logger.error(message, path="\udcff")  # above the sampling ceiling
+    else:
+        structguru.logger.error(message, path="\udcff")
+        structguru.logger.error(message, path="\udcff")  # same key is rate limited
+    _runtime.flush()
+    [line] = _runtime.drain_messages()
+    record = json.loads(line)
+    assert record["level"] == "ERROR"
+    expected_value = "[REDACTED]" if redaction else "sensitive-value"
+    assert record["path"] and set(record["path"]) == {"\ufffd"}
+    assert record["message"] == f"path={record['path']} {expected_value}"
+    metrics = _runtime.writer_metrics()
+    assert metrics is not None
+    assert metrics["sampled"] == (1 if filter_kind == "sampling" else 0)
+    assert metrics["rate_limited"] == (1 if filter_kind == "rate_limit" else 0)
+
+
 def test_pattern_redacts_matching_substring_in_string_value() -> None:
     email = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
     _runtime.configure(service="svc", target="memory", level="DEBUG", sensitive_patterns=[email])

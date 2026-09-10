@@ -163,17 +163,25 @@ def test_bridge_forwards_extra_fields(native_memory: None, clean_root: None) -> 
     assert rec["level"] == "WARN"
 
 
+@pytest.mark.parametrize("filter_kind", ["none", "sampling", "rate_limit"])
 def test_bridge_keeps_records_whose_message_carries_surrogates(
-    native_memory: None, clean_root: None
+    native_memory: None, clean_root: None, filter_kind: str
 ) -> None:
     # A filename from os.fsdecode() is not valid UTF-8; the record must still
     # ship (with U+FFFD) rather than fail inside the handler and be dropped.
     filename = os.fsdecode(b"/tmp/\xff")
+    _runtime.update(
+        sample_rate=0.0 if filter_kind == "sampling" else 1.0,
+        sample_max_level="INFO",
+        rate_limit_max=1 if filter_kind == "rate_limit" else None,
+    )
     bridge = install_stdlib_bridge(level="INFO")
     raise_exceptions = logging.raiseExceptions
     logging.raiseExceptions = False
     try:
-        logging.getLogger("third_party").warning("cannot open %s", filename)
+        logging.getLogger("third_party").warning(
+            "cannot open %s", filename, extra={filename: "retained"}
+        )
         _runtime.flush()
         lines = [line for line in _runtime.drain_messages() if "cannot open" in line]
     finally:
@@ -181,9 +189,11 @@ def test_bridge_keeps_records_whose_message_carries_surrogates(
         uninstall_stdlib_bridge(bridge)
     [line] = lines
     assert "\udcff" not in line
-    message = json.loads(line)["message"]
+    record = json.loads(line)
+    message = record["message"]
     prefix, _, rest = message.partition("cannot open /tmp/")
     assert not prefix and rest and set(rest) == {"\ufffd"}, message
+    assert record[f"/tmp/{rest}"] == "retained"
 
 
 def test_bridge_forwards_exc_info(native_memory: None, clean_root: None) -> None:

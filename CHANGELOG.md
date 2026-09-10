@@ -13,6 +13,8 @@ All notable changes to this project are documented here. The format is based on
   Handler filters, including replacement records on Python 3.12+, still apply.
 - Sensitive-key matching handles Unicode case variants, including nested fields,
   consistently with Python exception-locals redaction.
+- Sampling, rate limiting, and top-level field keys accept unpaired surrogates
+  using the renderer's U+FFFD replacement policy instead of losing the record.
 - A sink removed from inside a sink callback now closes its handler only after
   the native deliveries already queued for it have run. The callback cannot
   wait for the worker, and closing at once left those deliveries writing to a

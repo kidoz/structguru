@@ -83,11 +83,10 @@ fn convert_fields(fields: &Bound<'_, PyDict>) -> PyResult<Vec<(String, Value)>> 
         let pair = item.cast::<PyTuple>()?;
         let key = pair.get_item(0)?;
         let value = pair.get_item(1)?;
-        let key = key
-            .cast::<PyString>()
-            .map_err(|_| PyTypeError::new_err("field keys must be strings"))?
-            .to_str()?
-            .to_owned();
+        let key = string_to_owned(
+            key.cast::<PyString>()
+                .map_err(|_| PyTypeError::new_err("field keys must be strings"))?,
+        );
         entries.push((key, convert_py_value(&value)?));
     }
     Ok(entries)
@@ -618,8 +617,13 @@ impl NativeFilter {
     /// `key` is the rate-limit grouping key (usually the formatted message);
     /// `level` is the canonical method name.
     #[pyo3(signature = (key, level))]
-    fn allow(&self, key: &str, level: &str) -> bool {
-        self.pipeline.allow(key, level)
+    fn allow(&self, key: &Bound<'_, PyString>, level: &str) -> bool {
+        // Filter the same text the renderer emits, including surrogate
+        // replacement, while retaining a borrowed fast path for valid UTF-8.
+        match key.to_str() {
+            Ok(key) => self.pipeline.allow(key, level),
+            Err(_) => self.pipeline.allow(&key.to_string_lossy(), level),
+        }
     }
 
     /// Whether any filter stage is configured.

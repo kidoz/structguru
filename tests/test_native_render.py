@@ -459,7 +459,7 @@ def test_surrogates_in_text_arguments_are_replaced_not_rejected(
     try:
         log = structguru.Logger(name=f"app{surrogate}")
         log.opt(stack_info=f"Stack (most recent call last):\n  {surrogate}").info(
-            f"opened {surrogate}", path=surrogate
+            f"opened {surrogate}", path=surrogate, **{f"key{surrogate}": "retained"}
         )
         _runtime.flush()
         [line] = _runtime.drain_messages()
@@ -467,7 +467,9 @@ def test_surrogates_in_text_arguments_are_replaced_not_rejected(
         _runtime.shutdown()
     assert "\udcff" not in line
     assert "\ufffd" in line
+    assert "retained" in line
     if format == "json":
         record = json.loads(line)
         for key in ("message", "logger", "service", "stack", "path"):
             assert "\ufffd" in record[key], key
+        assert record[f"key{record['path']}"] == "retained"
