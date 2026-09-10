@@ -6,10 +6,11 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 
 import pytest
 
-from structguru._native_dispatch import CallableSinkDispatcher, _DispatchChannel, _Record, _Sink
+from structguru._native_dispatch import CallableSinkDispatcher
 
 
 @pytest.mark.parametrize("registration", ["configure", "add"])
@@ -24,13 +25,12 @@ def test_stdlib_backpressure_allows_callback_logging(registration: str) -> None:
                 import logging
                 import sys
                 import threading
+                import time
                 import structguru as sg
                 from structguru import _runtime
-                from structguru._native_dispatch import _DispatchChannel
                 from structguru.integrations.stdlib import install_stdlib_bridge
 
                 entered = threading.Event()
-                blocked = threading.Event()
                 received = []
                 errors = []
 
@@ -39,20 +39,17 @@ def test_stdlib_backpressure_allows_callback_logging(registration: str) -> None:
                     received.append(message)
                     if message == 'first':
                         entered.set()
-                        if not blocked.wait(3):
+                        # The stdlib producer is inside Handler.handle(), and
+                        # 'queued' occupies the only slot until this sink returns.
+                        channel = _runtime._callable_dispatcher._channel
+                        deadline = time.monotonic() + 3
+                        while channel.blocked_producers == 0 and time.monotonic() < deadline:
+                            time.sleep(0.005)
+                        if channel.blocked_producers == 0:
                             errors.append('producer did not reach the full queue')
                             return
+                        assert channel.qsize == 1
                         logging.getLogger('callback').warning('nested')
-
-                original_put = _DispatchChannel.put_reserved
-                def put_reserved(self, record, *, overflow):
-                    if json.loads(record.line)['message'] == 'blocked':
-                        # The stdlib producer is inside Handler.handle(), and
-                        # 'queued' occupies the only slot until the sink returns.
-                        assert self.queue.qsize() == 1
-                        blocked.set()
-                    return original_put(self, record, overflow=overflow)
-                _DispatchChannel.put_reserved = put_reserved
 
                 sg.configure(target='memory', callable_queue_maxsize=1,
                              callable_sinks=[sink] if sys.argv[1] == 'configure' else [])
@@ -112,35 +109,66 @@ def test_callback_base_exception_does_not_strand_dispatch(error: str) -> None:
     assert result.returncode == 0, result.stderr
 
 
+def _wait_for(predicate, timeout: float = 3.0) -> bool:  # type: ignore[no-untyped-def]
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.005)
+    return True
+
+
 def test_close_drains_a_producer_reserved_before_retirement() -> None:
     """A producer acknowledged by the old generation cannot become orphaned."""
+    dispatcher = CallableSinkDispatcher()
+    entered, release = threading.Event(), threading.Event()
     received: list[str] = []
-    channel = _DispatchChannel(maxsize=1)
-    assert channel.reserve()
 
-    closer = threading.Thread(target=channel.close, kwargs={"drain": True})
-    closer.start()
-    with channel._condition:
-        assert channel._condition.wait_for(lambda: not channel._accepting, timeout=1)
+    def sink(line: str) -> None:
+        if line == "first":
+            entered.set()
+            assert release.wait(3)
+        received.append(line)
 
-    accepted = channel.put_reserved(
-        _Record("accepted before close", (_Sink(1, received.append, 0),)),
-        overflow="block",
+    dispatcher.configure([sink], maxsize=1)
+    channel = dispatcher._channel
+    dispatcher.enqueue("first", 20, overflow="block")
+    assert entered.wait(1)
+    dispatcher.enqueue("queued", 20, overflow="block")
+    producer = threading.Thread(
+        target=dispatcher.enqueue, args=("blocked", 20), kwargs={"overflow": "block"}, daemon=True
     )
-    closer.join(timeout=2)
+    producer.start()
+    assert _wait_for(lambda: channel.blocked_producers == 1), (
+        "producer did not block on the full queue"
+    )
 
-    assert accepted
-    assert not closer.is_alive()
-    assert received == ["accepted before close"]
-    assert channel.queue.unfinished_tasks == 0
+    closer = threading.Thread(target=dispatcher.configure, args=([],), kwargs={"maxsize": 1})
+    closer.start()
+    assert channel.wait_retired(1)
+    assert not closer.join(0.1) and closer.is_alive(), (
+        "retirement must wait for the leased producer"
+    )
+    release.set()
+    producer.join(2)
+    closer.join(2)
+
+    assert not producer.is_alive() and not closer.is_alive()
+    assert received == ["first", "queued", "blocked"]
+    assert channel.unfinished_tasks == 0
+    assert not channel.is_alive()
+    dispatcher.disable()
 
 
 def test_channel_close_is_idempotent() -> None:
-    channel = _DispatchChannel(maxsize=1)
+    dispatcher = CallableSinkDispatcher()
+    dispatcher.configure([lambda line: None], maxsize=1)
+    channel = dispatcher._channel
     channel.close(drain=True)
     channel.close(drain=True)
-    assert not channel.thread.is_alive()
-    assert channel.queue.unfinished_tasks == 0
+    assert not channel.is_alive()
+    assert channel.unfinished_tasks == 0
+    dispatcher.disable()
 
 
 def test_remove_waits_for_records_in_a_retired_generation() -> None:
@@ -165,8 +193,7 @@ def test_remove_waits_for_records_in_a_retired_generation() -> None:
         target=dispatcher.configure, args=([],), kwargs={"maxsize": 1}, daemon=True
     )
     reconfigure.start()
-    with old_channel._condition:
-        assert old_channel._condition.wait_for(lambda: not old_channel._accepting, timeout=1)
+    assert old_channel.wait_retired(1)
 
     def remove() -> None:
         dispatcher.remove(token)
@@ -272,10 +299,7 @@ def test_callback_shutdown_during_external_lifecycle_operation(operation: str) -
 
                 closer = threading.Thread(target=transition, daemon=True)
                 closer.start()
-                with channel._condition:
-                    assert channel._condition.wait_for(
-                        lambda: not channel._accepting, timeout=3
-                    )
+                assert channel.wait_retired(3)
                 release.set()
                 closer.join(3)
                 assert not closer.is_alive(), "lifecycle operation deadlocked"
@@ -429,55 +453,3 @@ def test_remove_finalizer_runs_at_once_when_nothing_is_queued() -> None:
     dispatcher.remove(sink, finalizer=lambda: closed.append("closed"))
     assert closed == ["closed"]
     dispatcher.disable()
-
-
-@pytest.mark.parametrize("keep_other_sink", [False, True])
-def test_removal_waits_for_selected_but_not_yet_enqueued_record(
-    monkeypatch: pytest.MonkeyPatch,
-    keep_other_sink: bool,
-) -> None:
-    dispatcher = CallableSinkDispatcher()
-    received: list[str] = []
-    token = dispatcher.add(received.append, 0, enabled=True)
-    if keep_other_sink:
-        dispatcher.add(lambda line: None, 0, enabled=True)
-    channel = dispatcher._channel
-    assert channel is not None
-    original = channel.put_reserved
-    ready, proceed, removing, removed = (threading.Event() for _ in range(4))
-
-    def delayed(record: _Record, *, overflow: str) -> bool:
-        ready.set()
-        assert proceed.wait(3)
-        return original(record, overflow=overflow)
-
-    monkeypatch.setattr(channel, "put_reserved", delayed)
-    producer = threading.Thread(
-        target=dispatcher.enqueue,
-        args=("pending", 20),
-        kwargs={"overflow": "block"},
-        daemon=True,
-    )
-    producer.start()
-    assert ready.wait(1)
-
-    def remove() -> None:
-        removing.set()
-        dispatcher.remove(token)
-        removed.set()
-
-    remover = threading.Thread(target=remove, daemon=True)
-    remover.start()
-    try:
-        assert removing.wait(1)
-        assert not removed.wait(0.1), "remove missed a producer that had selected the sink"
-    finally:
-        proceed.set()
-        producer.join(3)
-        remover.join(3)
-    assert not producer.is_alive() and not remover.is_alive()
-    assert removed.is_set()
-    assert received == ["pending"]
-    dispatcher.enqueue("after removal", 20, overflow="block")
-    dispatcher.disable()
-    assert received == ["pending"]

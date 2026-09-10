@@ -23,7 +23,7 @@ from types import TracebackType
 from typing import Any, Protocol, Unpack, cast
 
 from structguru._levels import METHOD_LEVELS
-from structguru._native_dispatch import CallableSinkDispatcher
+from structguru._native_dispatch import CallableDispatcherProtocol, new_dispatcher
 from structguru._native_env import autoconfigure_from_env
 from structguru.settings import Settings, SettingsChanges, _level_number
 
@@ -270,7 +270,7 @@ _runtime: _RuntimeState | None = None
 _lifecycle_generation = 0
 
 
-_callable_dispatcher = CallableSinkDispatcher()
+_callable_dispatcher: CallableDispatcherProtocol = new_dispatcher()
 # Synchronous stream sink: when set (via configure(stream_sink=...)), rendered
 # lines are written to this stream synchronously on the caller's thread IN
 # ADDITION to the Rust writer, so logger output is available on the configured
@@ -895,7 +895,7 @@ def _before_fork() -> None:
 
 def _after_in_child() -> None:
     """Respawn the writer in the child: its worker thread did not survive fork."""
-    global _runtime, _state_lock, _drop_lock, _lifecycle_rejected
+    global _runtime, _state_lock, _drop_lock, _lifecycle_rejected, _callable_dispatcher
     state = _runtime
     # No other Python thread survives fork. Replace inherited synchronization
     # objects before touching state that may have been locked by a vanished thread.
@@ -903,7 +903,7 @@ def _after_in_child() -> None:
     _drop_lock = threading.Lock()
     _lifecycle_rejected = 0
     if state is None or _RUST is None:
-        _callable_dispatcher.after_fork(enabled=False)
+        _callable_dispatcher = _callable_dispatcher.fork_child(enabled=False)
         return
     state.writer.abandon()  # never join the parent's (now absent) worker thread
     # Replay the full sink config so file paths and stdout mirroring survive fork.
@@ -916,7 +916,9 @@ def _after_in_child() -> None:
         also_stdout=state.also_stdout,
     )
     _runtime = replace(state, writer=writer)
-    _callable_dispatcher.after_fork(enabled=True)
+    # The inherited dispatcher's worker thread and locks did not survive; a
+    # fresh one takes over the registrations and never touches the old state.
+    _callable_dispatcher = _callable_dispatcher.fork_child(enabled=True)
 
 
 def shutdown() -> None:
