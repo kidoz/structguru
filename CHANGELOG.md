@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Console stacks escape terminal control characters and indent every continuation
+  line, including stacks forwarded by the stdlib bridge. Stack redaction still
+  runs before escaping, and JSON output is unchanged.
 - Django middleware clears request context when lazy user evaluation or user-ID
   conversion fails, including interrupted requests, so fields cannot leak into
   later work on the same worker.
