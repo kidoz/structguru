@@ -116,9 +116,17 @@ pub const DEFAULT_SENSITIVE_KEYS: &[&str] = &[
 ];
 
 fn is_sensitive(key: &str, keys: &[impl AsRef<str>]) -> bool {
-    // Case-insensitive compare without allocating a lowercase copy per key.
-    keys.iter()
-        .any(|candidate| candidate.as_ref().eq_ignore_ascii_case(key))
+    keys.iter().any(|candidate| {
+        let candidate = candidate.as_ref();
+        if key.is_ascii() && candidate.is_ascii() {
+            // Default keys and ordinary fields need no lowercase allocation.
+            candidate.eq_ignore_ascii_case(key)
+        } else {
+            // Match the Unicode lowercasing used by Python locals redaction,
+            // including non-ASCII letters that lowercase to ASCII (e.g. K).
+            candidate.to_lowercase() == key.to_lowercase()
+        }
+    })
 }
 
 /// Recursively redact sensitive keys in place (key-based, matches the default

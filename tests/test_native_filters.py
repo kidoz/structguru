@@ -30,6 +30,35 @@ def _drain_last() -> dict[str, Any]:
 # -- value-pattern redaction -------------------------------------------------
 
 
+@pytest.mark.parametrize("format", ["json", "console"])
+@pytest.mark.parametrize("configured_uppercase", [False, True])
+def test_sensitive_keys_match_unicode_case_variants(
+    format: str, configured_uppercase: bool
+) -> None:
+    keys = ["пароль", "pässword", "apikey"]
+    if configured_uppercase:
+        keys = [key.upper() for key in keys]
+    _runtime.configure(target="memory", format=format, colors=False, sensitive_keys=keys)
+    structguru.logger.info(
+        "redaction probe",
+        **{
+            "ПАРОЛЬ": "REVIEW_SENTINEL",
+            "пароль": "REVIEW_SENTINEL",
+            "nested": [{"PÄSSWORD": "REVIEW_SENTINEL", "APIKEY": "REVIEW_SENTINEL"}],
+            "ordinary": "retained",
+        },
+    )
+    _runtime.flush()
+    [line] = _runtime.drain_messages()
+    assert "REVIEW_SENTINEL" not in line
+    assert line.count("[REDACTED]") == 4
+    assert "retained" in line
+    if format == "json":
+        record = json.loads(line)
+        assert record["ПАРОЛЬ"] == record["пароль"] == "[REDACTED]"
+        assert record["nested"] == [{"PÄSSWORD": "[REDACTED]", "APIKEY": "[REDACTED]"}]
+
+
 def test_pattern_redacts_matching_substring_in_string_value() -> None:
     email = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
     _runtime.configure(service="svc", target="memory", level="DEBUG", sensitive_patterns=[email])
