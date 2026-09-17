@@ -31,6 +31,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- The wheel no longer installs a stray top-level `LICENSE` file into
+  `site-packages`. The license ships in the wheel's `dist-info/licenses/`
+  directory and in the sdist, as before.
 - Native queue overflow and closed-writer rejections are distinguished at enqueue
   time, so racing reconfiguration or shutdown cannot silently hide a rejection or
   mislabel it as a full queue.
