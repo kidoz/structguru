@@ -494,12 +494,18 @@ def test_disable_during_in_flight_formatting_never_raises() -> None:
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork (POSIX)")
+@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
 def test_native_writer_survives_fork() -> None:
     """After fork, the child respawns its writer and logs without deadlocking.
 
     The parent's background writer thread does not exist in the child; if the
     child tried to use or join it, this test would hang (caught by the select
     timeout). The registered ``after_in_child`` hook must swap in a fresh writer.
+
+    CPython 3.12+ warns that forking a multi-threaded process may deadlock the
+    child. That is exactly the prefork-server situation this test exercises, so
+    ``os.fork()`` cannot be swapped for ``subprocess`` or a ``spawn`` context
+    without losing the inherited writer thread; the warning is filtered instead.
     """
     _runtime.configure(service="svc", target="memory")
     try:
