@@ -258,6 +258,42 @@ def test_callable_sink_errors_are_swallowed() -> None:
     assert len(good) == 1, "good sink must still receive despite bad_sink raising"
 
 
+def test_stream_sink_write_errors_never_reach_the_caller() -> None:
+    """A synchronous stream sink that raises loses only its own copy of the line."""
+
+    class FlakyStream:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+            self.failures = 0
+
+        def write(self, message: str, /) -> None:
+            if len(self.lines) == 1 and self.failures == 0:
+                self.failures += 1
+                raise OSError(28, "No space left on device")
+            self.lines.append(message)
+
+    stream = FlakyStream()
+    _runtime._reset_drop_count()
+    _runtime.configure(service="svc", target="memory", level="DEBUG", stream_sink=stream)
+    try:
+        with pytest.warns(UserWarning, match="stream sink write failed"):
+            for i in range(3):
+                structguru.logger.info("line {i}", i=i)
+        _runtime.flush_native()
+        rendered = _runtime.drain_messages()
+        metrics = _runtime.writer_metrics()
+    finally:
+        _runtime.shutdown()
+        _runtime._reset_drop_count()
+
+    assert stream.failures == 1
+    assert [json.loads(line)["message"] for line in stream.lines] == ["line 0", "line 2"]
+    # The native destinations keep every record; only the stream copy is lost,
+    # and the loss is visible instead of silent.
+    assert [json.loads(line)["message"] for line in rendered] == ["line 0", "line 1", "line 2"]
+    assert metrics is not None and metrics["stream_errors"] == 1
+
+
 def test_callable_sink_stopped_on_disable() -> None:
     received: list[str] = []
     lock = threading.Lock()

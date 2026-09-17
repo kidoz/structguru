@@ -282,6 +282,7 @@ _callable_dispatcher: CallableDispatcherProtocol = new_dispatcher()
 # stream immediately after the call (no flush needed).
 _hooks_registered = False
 _drop_count = 0
+_stream_error_count = 0
 # A callable sink that makes no progress for this long during flush() or
 # shutdown() is abandoned with a warning instead of blocking the process.
 _CALLABLE_STALL_TIMEOUT = 10.0
@@ -998,8 +999,8 @@ def render_and_enqueue(
     if runtime.stream_sink is not None:
         try:
             runtime.stream_sink.write(line)
-        except Exception:  # noqa: BLE001 - stream errors must never break logging
-            pass
+        except Exception as exc:  # noqa: BLE001 - stream errors must never break logging
+            _note_stream_error(exc)
     # A retired writer rejects late records during configure/disable. That is a
     # lifecycle boundary, not queue overflow, and must not raise or emit a false
     # "queue full" warning from application code.
@@ -1054,6 +1055,20 @@ def _note_drop() -> None:
         )
 
 
+def _note_stream_error(exc: BaseException) -> None:
+    """Count a synchronous stream sink failure and warn at a bounded rate."""
+    global _stream_error_count
+    with _drop_lock:
+        _stream_error_count += 1
+        errors = _stream_error_count
+    if errors == 1 or errors % 1000 == 0:
+        warnings.warn(
+            f"structguru stream sink write failed {errors} time(s), "
+            f"latest {type(exc).__name__}: {exc}",
+            stacklevel=3,
+        )
+
+
 def _note_abandoned(count: int) -> None:
     """Warn when a stalled callable sink forced deliveries to be abandoned."""
     if count:
@@ -1066,10 +1081,11 @@ def _note_abandoned(count: int) -> None:
 
 
 def _reset_drop_count() -> None:
-    """Reset the drop counter (used by tests)."""
-    global _drop_count
+    """Reset the drop and stream error counters (used by tests)."""
+    global _drop_count, _stream_error_count
     with _drop_lock:
         _drop_count = 0
+        _stream_error_count = 0
     _callable_dispatcher.reset_drop_count()
 
 
@@ -1111,7 +1127,9 @@ def writer_metrics() -> dict[str, Any] | None:
     added — these are distinct from the transport ``dropped`` counter.
     ``written`` counts records delivered to at least one native destination;
     ``sink_errors`` counts failed sink operations, including partial failures
-    when another destination succeeds.
+    when another destination succeeds. ``stream_errors`` counts ``write()``
+    calls on a synchronous ``stream_sink`` that raised; those lines reached the
+    native destinations but not the stream.
 
     Returns ``None`` while logging is disabled. Use :func:`lifecycle_metrics`
     for cumulative closed-writer rejections across configuration and shutdown.
@@ -1121,6 +1139,8 @@ def writer_metrics() -> dict[str, Any] | None:
         return None
     metrics = dict(state.writer.metrics())
     metrics.update(_callable_dispatcher.metrics())
+    with _drop_lock:
+        metrics["stream_errors"] = _stream_error_count
     if state.record_filter is not None:
         metrics.update(state.record_filter.stats())
     return metrics
