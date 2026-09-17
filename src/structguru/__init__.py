@@ -23,7 +23,7 @@ from structguru.otel import add_otel_context
 from structguru.redaction import DEFAULT_SENSITIVE_KEYS
 from structguru.settings import Settings
 
-__version__ = "1.2.3"
+__version__ = "1.3.0"
 
 __all__ = [
     "DEFAULT_SENSITIVE_KEYS",
