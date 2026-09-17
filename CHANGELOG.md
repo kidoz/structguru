@@ -8,12 +8,58 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- Frozen `Settings` with mapping/environment constructors, `get_config()`, and
+  incremental `update()`. Existing `configure()` keywords remain accepted through
+  a typed keyword wrapper; a Settings object can also be supplied as the base.
+  Level-only updates preserve writers, buffered records and rate-limit state.
+- `STRUCTGURU_LEVEL`, `STRUCTGURU_TARGET`, `STRUCTGURU_FORMAT`,
+  `STRUCTGURU_SAMPLE_RATE`, `STRUCTGURU_RATE_LIMIT`, and
+  `STRUCTGURU_AUTOCONFIGURE`; existing environment names remain supported.
+- `configure(exception_carets=False)` omits the PEP 657 position markers (the
+  `~~~^^^` lines under each frame) from formatted tracebacks. CPython computes
+  them per frame while formatting, and on 3.11+ they are most of the cost of
+  `logger.exception()`: a 22-frame traceback formats in 92 µs instead of
+  475 µs without them. The output is exactly what CPython prints under
+  `PYTHONNODEBUGRANGES=1`, including chained exceptions and exception groups.
+  The default is unchanged, and `structured_exceptions=True` never renders
+  the markers.
 - `lifecycle_metrics()` reports cumulative native deliveries rejected by closed
   writers, retaining counts across reconfiguration and shutdown and starting fresh
   in forked children.
 
 ### Changed
 
+- Explicit `configure()` calls now layer defaults, supported environment variables,
+  then explicit keywords. Pass `configure(Settings(...))` to ignore the environment.
+  `configure()` still replaces prior settings; `update()` retains omitted options.
+- Native configuration and `set_level()` reject unknown level names, booleans and
+  negative integers with `ValueError`, and accept non-negative integer thresholds.
+  Invalid selected environment values fail import unless autoconfiguration is disabled.
+  Settings also reject invalid scalar types instead of allowing coercion downstream.
+- The rotating file sink no longer closes, reopens, and stats the log file
+  before every record to detect a rotation by another process. It stats the
+  path once and compares the file identity with its open handle, reopening
+  only when the path names a new file. With rotation enabled (the default)
+  the writer thread handles 256 records in 0.63 ms instead of 5.08 ms, and a
+  caller throttled by a full queue waits 2.6 µs per record instead of 21 µs,
+  the same as with rotation disabled.
+- The blocking enqueue pushes under the GIL and releases it only when the
+  queue is actually full. Releasing it around every push forced a GIL
+  hand-off per record whenever another thread was runnable: four threads
+  logging concurrently now spend 3.0 ms instead of 5.6 ms per 1,000 records,
+  eight threads 6.0 ms instead of 10.5 ms. Single-threaded cost and the
+  release-while-blocked behaviour are unchanged.
+- A JSON record with no stream sink, callable sink, or Sentry processor is
+  rendered and enqueued in one native call, so the line never becomes a
+  Python string, and the callable-sink dispatcher is skipped entirely while
+  no sink is registered. `logger.info("Hello world")` takes 1.75 µs instead
+  of 2.42 µs; long or escaping-heavy messages gain more.
+- `Logger.bind()` and `Logger.opt()` copy the logger directly instead of
+  re-running the dataclass constructor: about 0.25 µs instead of 0.75 µs
+  each, which also speeds up every record that crosses the stdlib bridge.
+- Callable sinks cache the set of destinations admitting each level. Producer
+  reservations synchronize sink selection with removal before queue insertion;
+  blocking waits happen outside the sink registry lock.
 - The native writer merges bound fields, call kwargs, and contextvars, redacts,
   renders, and enqueues a record in one call using a `RuntimeConfig` compiled at
   configuration time, so no per-record configuration is marshalled and the
@@ -137,60 +183,6 @@ All notable changes to this project are documented here. The format is based on
   the configured service for tags.
 - `logger.catch()` handles awaited coroutine exceptions, including suppression and
   reraising. Stream sinks are represented in the public typing contract.
-
-### Added
-
-- Frozen `Settings` with mapping/environment constructors, `get_config()`, and
-  incremental `update()`. Existing `configure()` keywords remain accepted through
-  a typed keyword wrapper; a Settings object can also be supplied as the base.
-  Level-only updates preserve writers, buffered records and rate-limit state.
-- `STRUCTGURU_LEVEL`, `STRUCTGURU_TARGET`, `STRUCTGURU_FORMAT`,
-  `STRUCTGURU_SAMPLE_RATE`, `STRUCTGURU_RATE_LIMIT`, and
-  `STRUCTGURU_AUTOCONFIGURE`; existing environment names remain supported.
-
-- `configure(exception_carets=False)` omits the PEP 657 position markers (the
-  `~~~^^^` lines under each frame) from formatted tracebacks. CPython computes
-  them per frame while formatting, and on 3.11+ they are most of the cost of
-  `logger.exception()`: a 22-frame traceback formats in 92 µs instead of
-  475 µs without them. The output is exactly what CPython prints under
-  `PYTHONNODEBUGRANGES=1`, including chained exceptions and exception groups.
-  The default is unchanged, and `structured_exceptions=True` never renders
-  the markers.
-
-### Changed
-
-- Explicit `configure()` calls now layer defaults, supported environment variables,
-  then explicit keywords. Pass `configure(Settings(...))` to ignore the environment.
-  `configure()` still replaces prior settings; `update()` retains omitted options.
-- Native configuration and `set_level()` reject unknown level names, booleans and
-  negative integers with `ValueError`, and accept non-negative integer thresholds.
-  Invalid selected environment values fail import unless autoconfiguration is disabled.
-  Settings also reject invalid scalar types instead of allowing coercion downstream.
-
-- The rotating file sink no longer closes, reopens, and stats the log file
-  before every record to detect a rotation by another process. It stats the
-  path once and compares the file identity with its open handle, reopening
-  only when the path names a new file. With rotation enabled (the default)
-  the writer thread handles 256 records in 0.63 ms instead of 5.08 ms, and a
-  caller throttled by a full queue waits 2.6 µs per record instead of 21 µs,
-  the same as with rotation disabled.
-- The blocking enqueue pushes under the GIL and releases it only when the
-  queue is actually full. Releasing it around every push forced a GIL
-  hand-off per record whenever another thread was runnable: four threads
-  logging concurrently now spend 3.0 ms instead of 5.6 ms per 1,000 records,
-  eight threads 6.0 ms instead of 10.5 ms. Single-threaded cost and the
-  release-while-blocked behaviour are unchanged.
-- A JSON record with no stream sink, callable sink, or Sentry processor is
-  rendered and enqueued in one native call, so the line never becomes a
-  Python string, and the callable-sink dispatcher is skipped entirely while
-  no sink is registered. `logger.info("Hello world")` takes 1.75 µs instead
-  of 2.42 µs; long or escaping-heavy messages gain more.
-- `Logger.bind()` and `Logger.opt()` copy the logger directly instead of
-  re-running the dataclass constructor: about 0.25 µs instead of 0.75 µs
-  each, which also speeds up every record that crosses the stdlib bridge.
-- Callable sinks cache the set of destinations admitting each level. Producer
-  reservations synchronize sink selection with removal before queue insertion;
-  blocking waits happen outside the sink registry lock.
 
 ## [1.2.3] - 2026-09-06
 
