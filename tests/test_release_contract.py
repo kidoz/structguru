@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 
@@ -55,3 +56,12 @@ def test_ci_audits_dependencies_on_every_change() -> None:
     assert "uv audit --locked" in workflow
     assert "cargo deny --locked check advisories" in workflow
     assert Path("deny.toml").is_file()
+
+
+def test_license_is_included_in_the_sdist_only() -> None:
+    # PyPI rejects an sdist that lacks the declared License-File, but the wheel
+    # already bundles it under dist-info/licenses/; an unscoped include also
+    # dropped a stray top-level LICENSE into site-packages on install.
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+
+    assert pyproject["tool"]["maturin"]["include"] == [{"path": "LICENSE", "format": "sdist"}]
