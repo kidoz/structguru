@@ -156,6 +156,53 @@ def test_bench_native_sampling_drop_fast_path(benchmark: Any) -> None:
         _runtime.shutdown()
 
 
+_LATENCY_ROUNDS = 20_000
+_LATENCY_WARMUP_ROUNDS = 1_000
+
+
+def _percentile(sorted_data: list[float], fraction: float) -> float:
+    index = min(len(sorted_data) - 1, round(fraction * (len(sorted_data) - 1)))
+    return sorted_data[index]
+
+
+@pytest.mark.parametrize("sink", ["null", "file-backpressure"])
+def test_bench_native_per_record_latency(benchmark: Any, tmp_path: Any, sink: str) -> None:
+    """Time one record per round so the statistics describe single records.
+
+    The other benchmarks let pytest-benchmark batch many calls into a round, so
+    their ``max`` and quartiles describe a batch, not a record. Here every round
+    is one ``logger.info`` call; ``extra_info`` carries the p50, p99, and p99.9
+    in microseconds. ``file-backpressure`` puts a 64-slot blocking queue in
+    front of the rotating file sink at its ``configure()`` defaults; the writer
+    thread is slower than the caller there, so the queue fills and the tail of
+    the distribution is the wait for a free slot.
+    """
+    config: dict[str, Any] = {"service": "api", "target": "null", "level": "INFO"}
+    if sink == "file-backpressure":
+        config.update(maxsize=64, file_path=str(tmp_path / "app.log"))
+    _runtime.configure(**config)
+    try:
+        benchmark.pedantic(
+            logger.info,
+            args=("order accepted",),
+            kwargs={"order_id": 987, "status": "paid"},
+            rounds=_LATENCY_ROUNDS,
+            warmup_rounds=_LATENCY_WARMUP_ROUNDS,
+            iterations=1,
+        )
+        _runtime.flush()
+        metrics = _runtime.writer_metrics()
+        assert metrics is not None
+        assert metrics["written"] == metrics["enqueued"]
+        assert metrics["dropped"] == 0
+        timings = benchmark.stats.stats.sorted_data
+        assert len(timings) == _LATENCY_ROUNDS
+        for label, fraction in (("p50_us", 0.5), ("p99_us", 0.99), ("p999_us", 0.999)):
+            benchmark.extra_info[label] = round(_percentile(timings, fraction) * 1e6, 3)
+    finally:
+        _runtime.shutdown()
+
+
 def test_bench_native_writer_blocking_enqueue(benchmark: Any) -> None:
     """Benchmark the PyO3 boundary and bounded Rust queue enqueue operation."""
     writer = rust._NativeStringWriter(8192, target="null")
