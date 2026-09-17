@@ -94,7 +94,8 @@ All notable changes to this project are documented here. The format is based on
   worker 10 seconds to make progress, then abandon the generation, warn with
   the number of undelivered records, and disable callable delivery until the
   next `configure()`. Records already handed to the stuck callback cannot be
-  recovered, and the sink's own thread is left detached rather than killed.
+  recovered, and the sink's own thread is left detached rather than killed;
+  it stops without starting another delivery or re-entering the interpreter.
 - The rate limiter's key table is capped at 8192 messages, evicting the least
   recently seen when full. It keys on the formatted message, so messages that
   embed a counter or an ID create a new key per record; one million unique
