@@ -305,3 +305,59 @@ class TestBuildExceptionDict:
         result = build_exception_dict(exc_info)
         assert result is not None
         assert "cause" not in result
+
+    def test_only_kept_frames_are_extracted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A deep traceback must not pay for source lookup on frames it discards."""
+        import traceback
+
+        from structguru import exceptions
+
+        def recurse(n: int) -> int:
+            if n == 0:
+                raise ValueError("bottom")
+            return recurse(n - 1)
+
+        try:
+            recurse(200)
+        except ValueError:
+            exc_info = sys.exc_info()
+
+        extracted_depths: list[int] = []
+        original = traceback.extract_tb
+
+        def counting_extract_tb(tb: object, limit: int | None = None) -> object:
+            depth = 0
+            node = tb
+            while node is not None:
+                depth += 1
+                node = node.tb_next  # type: ignore[attr-defined]
+            extracted_depths.append(depth)
+            return original(tb, limit)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(exceptions.traceback, "extract_tb", counting_extract_tb)
+        result = build_exception_dict(exc_info, max_frames=5)
+        assert result is not None
+        assert len(result["frames"]) == 5
+        assert extracted_depths == [5], "extract_tb saw frames that were then discarded"
+        assert all(frame["name"] == "recurse" for frame in result["frames"])
+
+    def test_locals_and_source_line_are_both_captured(self) -> None:
+        """Enabling locals must not drop the source line the default path reports."""
+
+        def inner() -> None:
+            answer = 41
+            raise ValueError(f"value {answer}")
+
+        try:
+            inner()
+        except ValueError:
+            exc_info = sys.exc_info()
+
+        with_locals = build_exception_dict(exc_info, include_locals=True)
+        without = build_exception_dict(exc_info, include_locals=False)
+        assert with_locals is not None and without is not None
+        frame = with_locals["frames"][-1]
+        assert frame["line"] == 'raise ValueError(f"value {answer}")'
+        assert frame["locals"]["answer"] == "41"
+        stripped = [{k: v for k, v in f.items() if k != "locals"} for f in with_locals["frames"]]
+        assert stripped == without["frames"]

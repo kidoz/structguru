@@ -109,37 +109,48 @@ def _build_frames(
     max_local_repr: int,
     keys: frozenset[str],
 ) -> list[dict[str, Any]]:
-    """Collect bounded traceback frames using the same options for every member."""
-    frames = []
+    """Collect the last ``max_frames`` traceback frames with the same fields either way.
+
+    The traceback is walked to the first frame that will be kept *before*
+    ``traceback.extract_tb()`` runs: it reads and dedents source for every frame
+    it visits, so extracting the whole traceback and slicing afterwards paid for
+    frames that were then discarded, which made a ``RecursionError`` cost
+    hundreds of frames of source lookup for the twenty it reported. Locals, when
+    requested, come from the same selected frames, so the ``line`` field is
+    present whether or not locals are.
+    """
+    if max_frames <= 0:
+        return []
+    depth = 0
+    node = exc_tb
+    while node is not None:
+        depth += 1
+        node = node.tb_next
+    node = exc_tb
+    for _ in range(max(depth - max_frames, 0)):
+        node = node.tb_next
+
+    summaries = traceback.extract_tb(node)
+    raw_frames: list[Any] = []
     if include_locals:
-        # Walk raw traceback to capture local variables, since
-        # traceback.extract_tb() does not populate FrameSummary.locals.
-        raw_frames: list[tuple[Any, int]] = []
-        tb = exc_tb
-        while tb is not None:
-            raw_frames.append((tb.tb_frame, tb.tb_lineno))
-            tb = tb.tb_next
-        selected_frames = raw_frames[-max_frames:] if max_frames else []
-        for frame_obj, lineno in selected_frames:
-            frame_info: dict[str, Any] = {
-                "filename": frame_obj.f_code.co_filename,
-                "lineno": lineno,
-                "name": frame_obj.f_code.co_name,
-                "line": None,
-                "locals": _format_locals(frame_obj.f_locals, keys, max_local_repr),
-            }
-            frames.append(frame_info)
-    else:
-        extracted_frames = traceback.extract_tb(exc_tb)
-        selected_summaries = extracted_frames[-max_frames:] if max_frames else []
-        for fs in selected_summaries:
-            frame_info = {
-                "filename": fs.filename,
-                "lineno": fs.lineno,
-                "name": fs.name,
-                "line": fs.line,
-            }
-            frames.append(frame_info)
+        # ``FrameSummary`` never carries ``f_locals``; pair each summary with
+        # its live frame from the same starting node.
+        current = node
+        while current is not None:
+            raw_frames.append(current.tb_frame)
+            current = current.tb_next
+
+    frames: list[dict[str, Any]] = []
+    for index, summary in enumerate(summaries):
+        frame_info: dict[str, Any] = {
+            "filename": summary.filename,
+            "lineno": summary.lineno,
+            "name": summary.name,
+            "line": summary.line,
+        }
+        if include_locals:
+            frame_info["locals"] = _format_locals(raw_frames[index].f_locals, keys, max_local_repr)
+        frames.append(frame_info)
 
     return frames
 
