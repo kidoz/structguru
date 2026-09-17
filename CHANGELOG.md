@@ -33,6 +33,7 @@ All notable changes to this project are documented here. The format is based on
   group such as `(\w+)?` that does not participate in a match is no longer
   reported as an empty match, and patterns compile faster; matching
   behaviour is otherwise unchanged.
+- Building from the sdist requires maturin 1.15 or newer.
 
 ### Fixed
 
