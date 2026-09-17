@@ -12,6 +12,7 @@ import textwrap
 import threading
 import warnings
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -526,3 +527,112 @@ def test_native_writer_survives_fork() -> None:
         assert result == b"1", f"child failed to log natively after fork: {result!r}"
     finally:
         _runtime.shutdown()
+
+
+def test_flush_returns_while_other_threads_keep_logging(tmp_path: Path) -> None:
+    """flush() waits for records enqueued before it, not for a quiet moment.
+
+    Waiting for an empty queue never completes while several threads keep
+    logging to a sink slower than they are, which stalled the pre-fork drain
+    for tens of seconds.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+            import os, sys, threading, time
+            import structguru as sg
+            from structguru import _runtime
+
+            _runtime.configure(
+                service="svc",
+                target="stdout",
+                file_path=os.path.join(sys.argv[1], "app.log"),
+                level="INFO",
+                maxsize=64,
+            )
+            stop = threading.Event()
+
+            def produce():
+                while not stop.is_set():
+                    sg.logger.info("busy record with a payload", a=1, b="two")
+
+            threads = [threading.Thread(target=produce, daemon=True) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            time.sleep(0.3)
+            started = time.perf_counter()
+            _runtime.flush()
+            elapsed = time.perf_counter() - started
+            stop.set()
+            for thread in threads:
+                thread.join(5)
+            metrics = _runtime.writer_metrics()
+            assert metrics["dropped"] == 0, metrics
+            assert elapsed < 5, f"flush under load took {elapsed:.1f}s"
+            _runtime.shutdown()
+        """),
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_fork_is_bounded_while_other_threads_keep_logging(tmp_path: Path) -> None:
+    """The pre-fork drain must not block a prefork server under logging load."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+            import os, sys, threading, time
+            import structguru as sg
+            from structguru import _runtime
+
+            _runtime.configure(
+                service="svc",
+                target="stdout",
+                file_path=os.path.join(sys.argv[1], "app.log"),
+                level="INFO",
+                maxsize=64,
+            )
+            stop = threading.Event()
+
+            def produce():
+                while not stop.is_set():
+                    sg.logger.info("busy record with a payload", a=1, b="two")
+
+            threads = [threading.Thread(target=produce, daemon=True) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            time.sleep(0.3)
+            started = time.perf_counter()
+            pid = os.fork()
+            if pid == 0:
+                try:
+                    sg.logger.info("child")
+                    _runtime.flush()
+                    os._exit(0)
+                except BaseException:
+                    os._exit(7)
+            elapsed = time.perf_counter() - started
+            stop.set()
+            for thread in threads:
+                thread.join(5)
+            _, status = os.waitpid(pid, 0)
+            assert os.waitstatus_to_exitcode(status) == 0, status
+            assert elapsed < 5, f"fork under load took {elapsed:.1f}s"
+            _runtime.shutdown()
+        """),
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr

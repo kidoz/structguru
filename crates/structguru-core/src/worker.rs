@@ -511,12 +511,19 @@ struct WorkerCounters {
     dequeued: u64,
     written: u64,
     sink_errors: u64,
+    /// Records whose write finished, successfully or not.
+    completed: u64,
 }
 
 struct WorkerState {
     queue: VecDeque<String>,
     counters: WorkerCounters,
     in_flight: usize,
+    /// `completed` as of the last sink flush; a flusher waits for this to
+    /// reach the count enqueued when it began.
+    flushed_through: u64,
+    /// Highest `completed` count a waiting flusher needs a sink flush after.
+    flush_target: Option<u64>,
     closed: bool,
     worker_done: bool,
     paused: bool,
@@ -623,6 +630,8 @@ impl StringWriter {
                 queue: VecDeque::new(),
                 counters: WorkerCounters::default(),
                 in_flight: 0,
+                flushed_through: 0,
+                flush_target: None,
                 closed: false,
                 worker_done: false,
                 paused,
@@ -720,9 +729,20 @@ impl StringWriter {
         }
     }
 
+    /// Block until every record enqueued before this call has been written
+    /// and the sink flushed.
+    ///
+    /// Records other threads enqueue afterwards are not waited for, so a flush
+    /// under sustained load is bounded by the queue depth instead of waiting
+    /// for a moment when the queue happens to be empty.
     pub fn flush(&self) {
         let mut state = self.lock_state();
-        while !state.queue.is_empty() || state.in_flight > 0 {
+        let target = state.counters.enqueued;
+        if state.flushed_through >= target {
+            return;
+        }
+        state.flush_target = Some(state.flush_target.map_or(target, |t| t.max(target)));
+        while state.flushed_through < target && !state.worker_done {
             state = self
                 .shared
                 .drained
@@ -763,6 +783,11 @@ impl StringWriter {
 
     pub fn messages(&self) -> Vec<String> {
         self.memory_handle.messages()
+    }
+
+    #[cfg(test)]
+    fn flush_target(&self) -> Option<u64> {
+        self.lock_state().flush_target
     }
 
     pub fn metrics(&self) -> WorkerMetrics {
@@ -843,6 +868,8 @@ fn worker_loop(shared: Arc<WorkerShared>, mut sink: Box<dyn StringSink>) {
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     state.counters.sink_errors += errors;
+                    state.flushed_through = state.counters.completed;
+                    state.flush_target = None;
                     state.worker_done = true;
                     shared.drained.notify_all();
                     return;
@@ -864,7 +891,13 @@ fn worker_loop(shared: Arc<WorkerShared>, mut sink: Box<dyn StringSink>) {
         if result.is_ok() {
             state.counters.written += 1;
         }
-        let should_flush = state.queue.is_empty();
+        state.counters.completed += 1;
+        // Flush the sink when the queue is empty or a flusher's target record
+        // has just completed; `in_flight` stays raised until the sink flushed.
+        let should_flush = state.queue.is_empty()
+            || state
+                .flush_target
+                .is_some_and(|target| state.counters.completed >= target);
         if !should_flush {
             state.in_flight -= 1;
         }
@@ -878,6 +911,13 @@ fn worker_loop(shared: Arc<WorkerShared>, mut sink: Box<dyn StringSink>) {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.counters.sink_errors += errors;
+            state.flushed_through = state.counters.completed;
+            if state
+                .flush_target
+                .is_some_and(|target| target <= state.flushed_through)
+            {
+                state.flush_target = None;
+            }
             state.in_flight -= 1;
             shared.drained.notify_all();
         }
@@ -941,6 +981,62 @@ mod tests {
         assert!(!returned_early, "flush returned before the sink finished");
         assert_eq!(in_flight, 1);
         assert_eq!(errors, 1);
+    }
+
+    #[test]
+    fn flush_waits_only_for_records_enqueued_before_the_call() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct GatedSink {
+            tokens: mpsc::Receiver<()>,
+        }
+        impl StringSink for GatedSink {
+            fn write(&mut self, _: String) -> Result<(), SinkError> {
+                self.tokens.recv_timeout(Duration::from_secs(3)).unwrap();
+                Ok(())
+            }
+            fn flush(&mut self) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let (token_tx, token_rx) = mpsc::channel();
+        let writer = Arc::new(StringWriter::with_boxed_sink(
+            8,
+            Box::new(GatedSink { tokens: token_rx }),
+        ));
+        writer.try_enqueue("a".into()).unwrap();
+        writer.try_enqueue("b".into()).unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let flushing = Arc::clone(&writer);
+        let thread = thread::spawn(move || {
+            flushing.flush();
+            done_tx.send(()).unwrap();
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while writer.flush_target() != Some(2) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "flush never registered"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        // Enqueued after the flush began: the flusher must not wait for it.
+        writer.try_enqueue("c".into()).unwrap();
+        token_tx.send(()).unwrap();
+        token_tx.send(()).unwrap();
+        let returned = done_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        let metrics = writer.metrics();
+        token_tx.send(()).unwrap();
+        thread.join().unwrap();
+        writer.close();
+        assert!(
+            returned,
+            "flush waited for a record enqueued after it began"
+        );
+        assert_eq!(metrics.written, 2);
+        assert_eq!(metrics.enqueued, 3);
     }
 
     #[derive(Clone, Default)]
