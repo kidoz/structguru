@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.14,<2"]
+requires = ["maturin>=1.15.0,<2"]
 build-backend = "maturin"
 
 [project]
@@ -69,7 +69,7 @@ test = [
 ]
 lint = [
     "mypy>=2.3.1",
-    "ruff>=0.16.6",
+    "ruff>=0.16.8",
 ]
 docs = [
     "mkdocs>=1.6.1",
