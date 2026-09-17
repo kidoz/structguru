@@ -83,6 +83,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- `flush()`, and with it the pre-fork drain, no longer stalls while other
+  threads keep logging. The native writer waited for its queue to be empty,
+  a moment that never arrives when producers refill it faster than a file sink
+  drains it: `os.fork()` in a prefork server with four logging threads took
+  tens of seconds. A flush now waits only for the records enqueued before it
+  was called, so its cost is bounded by the queue depth.
 - The wheel no longer installs a stray top-level `LICENSE` file into
   `site-packages`. The license ships in the wheel's `dist-info/licenses/`
   directory and in the sdist, as before.
