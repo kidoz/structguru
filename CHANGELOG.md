@@ -28,6 +28,11 @@ All notable changes to this project are documented here. The format is based on
   delivery accounting, and deferred handler closes. Caller cost with a sink
   configured drops by a third to a half; lifecycle, backpressure, fork, and
   callback-reentrancy semantics are unchanged.
+- The opt-in backtracking redaction engine (`allow_backtracking_patterns=True`)
+  builds against fancy-regex 0.19.2 instead of 0.19.0. An optional capture
+  group such as `(\w+)?` that does not participate in a match is no longer
+  reported as an empty match, and patterns compile faster; matching
+  behaviour is otherwise unchanged.
 
 ### Fixed
 
