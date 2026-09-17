@@ -143,6 +143,51 @@ def test_file_sink_writes_records_to_file() -> None:
             os.unlink(path)
 
 
+def test_file_sink_reopens_after_external_rename(tmp_path: Path) -> None:
+    """A logrotate-style rename by another process must not capture later records."""
+    path = tmp_path / "app.log"
+    rotated = tmp_path / "app.log.1"
+    _runtime.configure(service="svc", target="memory", level="DEBUG", file_path=str(path))
+    try:
+        for i in range(50):
+            structguru.logger.info("before {i}", i=i)
+        _runtime.flush_native()
+        os.rename(path, rotated)
+        for i in range(50):
+            structguru.logger.info("after {i}", i=i)
+        _runtime.flush_native()
+        metrics = _runtime.writer_metrics()
+    finally:
+        _runtime.shutdown()
+
+    assert metrics is not None and metrics["sink_errors"] == 0
+    before = rotated.read_text().splitlines()
+    after = path.read_text().splitlines()
+    assert len(before) == 50 and all('"message":"before ' in line for line in before)
+    assert len(after) == 50 and all('"message":"after ' in line for line in after)
+
+
+def test_file_sink_recreates_a_deleted_file(tmp_path: Path) -> None:
+    """Deleting the log file out from under the sink must not lose later records."""
+    path = tmp_path / "app.log"
+    _runtime.configure(service="svc", target="memory", level="DEBUG", file_path=str(path))
+    try:
+        for i in range(50):
+            structguru.logger.info("before {i}", i=i)
+        _runtime.flush_native()
+        os.remove(path)
+        for i in range(50):
+            structguru.logger.info("after {i}", i=i)
+        _runtime.flush_native()
+        metrics = _runtime.writer_metrics()
+    finally:
+        _runtime.shutdown()
+
+    assert metrics is not None and metrics["sink_errors"] == 0
+    after = path.read_text().splitlines()
+    assert len(after) == 50 and all('"message":"after ' in line for line in after)
+
+
 def test_file_sink_rotates_at_max_bytes() -> None:
     with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as f:
         path = f.name
