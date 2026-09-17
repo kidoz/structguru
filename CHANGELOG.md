@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Structured exceptions extract source only for the frames they keep. The
+  frame builder ran `traceback.extract_tb()` over the whole traceback, reading
+  and dedenting source for every frame, and then sliced to the last
+  `exception_max_frames`: a `RecursionError` cost 1.7 ms to report twenty
+  frames and now costs 64 µs. Frames captured with
+  `exception_include_locals=True` now carry the `line` field like every other
+  frame instead of `null`, which makes that path pay for source lookup too
+  (about 50 µs instead of 10 µs for twenty frames); the two modes now produce
+  the same frames apart from `locals`.
+
 ## [1.3.0] - 2026-09-17
 
 ### Added
