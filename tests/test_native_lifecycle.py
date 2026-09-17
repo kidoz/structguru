@@ -122,9 +122,9 @@ def test_shutdown_drains_callback_logs_and_disables_runtime(operation: str) -> N
             sg.logger.info('accepted')
             assert entered.wait(2)
             original_stop = _runtime._callable_dispatcher.stop
-            def stop(*, drain):
+            def stop(*, drain, stall_timeout=None):
                 release.set()
-                original_stop(drain=drain)
+                return original_stop(drain=drain, stall_timeout=stall_timeout)
             _runtime._callable_dispatcher.stop = stop
             with warnings.catch_warnings(record=True) as captured:
                 getattr(_runtime, sys.argv[1])()
@@ -337,9 +337,9 @@ def test_final_native_drain_includes_callback_logs(
     dispatcher = _runtime._callable_dispatcher
     original_flush = dispatcher.flush
 
-    def release_and_drain() -> None:
+    def release_and_drain(stall_timeout: float | None = None) -> int:
         release.set()
-        original_flush()
+        return original_flush(stall_timeout)
 
     monkeypatch.setattr(dispatcher, "flush", release_and_drain)
     try:
@@ -630,6 +630,57 @@ def test_fork_is_bounded_while_other_threads_keep_logging(tmp_path: Path) -> Non
             _runtime.shutdown()
         """),
             str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_shutdown_abandons_a_callable_sink_that_never_returns() -> None:
+    """A sink stuck forever must not hold shutdown (and interpreter exit) open."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+            import threading, time, warnings
+            import structguru as sg
+            from structguru import _runtime
+
+            _runtime._CALLABLE_STALL_TIMEOUT = 0.3
+            never = threading.Event()
+            entered = threading.Event()
+
+            def hang(line):
+                entered.set()
+                never.wait()
+
+            _runtime.configure(
+                service="svc", target="memory", level="INFO", callable_sinks=[hang]
+            )
+            sg.logger.info("stuck")
+            sg.logger.info("queued behind the stuck delivery")
+            assert entered.wait(5)
+            started = time.perf_counter()
+            with warnings.catch_warnings(record=True) as captured:
+                warnings.simplefilter("always")
+                _runtime.shutdown()
+            elapsed = time.perf_counter() - started
+            assert elapsed < 5, f"shutdown blocked for {elapsed:.1f}s"
+            assert any("abandoned" in str(w.message) for w in captured), captured
+            assert _runtime.current_runtime() is None
+            # Logging still works after the stalled generation is abandoned.
+            _runtime.configure(service="svc", target="memory", level="INFO")
+            sg.logger.info("after recovery")
+            _runtime.flush()
+            assert any(
+                "after recovery" in line for line in _runtime.drain_messages()
+            )
+            _runtime.shutdown()
+            never.set()
+        """),
         ],
         capture_output=True,
         text=True,

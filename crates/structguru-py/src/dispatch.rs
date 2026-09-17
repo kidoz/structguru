@@ -19,7 +19,7 @@ use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pyo3::exceptions::PyUserWarning;
 use pyo3::prelude::*;
@@ -86,6 +86,16 @@ struct ChannelState {
     producers: usize,
     /// Producers waiting for a free slot in block mode (observability only).
     blocked_producers: usize,
+    /// Leases handed out by `reserve` and leases released, in total.
+    leases_issued: u64,
+    leases_settled: u64,
+    /// Records appended and records whose delivery finished, in total.
+    accepted: u64,
+    finished: u64,
+    /// Flushers currently waiting; they need a wake-up on every step.
+    flush_waiters: usize,
+    /// Set when a flush gave up on a worker that stopped making progress.
+    abandoned: bool,
 }
 
 /// One queue generation with producer-aware shutdown semantics.
@@ -112,6 +122,11 @@ struct Channel {
 
 /// Records the worker takes from the queue per lock acquisition.
 const DELIVERY_BATCH: usize = 64;
+
+/// Seconds from Python into a stall bound; `None` waits without limit.
+fn stall_duration(seconds: Option<f64>) -> Option<Duration> {
+    seconds.map(|s| Duration::try_from_secs_f64(s.max(0.0)).unwrap_or(Duration::MAX))
+}
 
 /// Result of offering a record to a generation without waiting.
 enum Offer {
@@ -158,15 +173,63 @@ impl Channel {
     fn append(&self, state: &mut ChannelState, record: Record) {
         state.queue.push_back(record);
         state.unfinished_tasks += 1;
+        state.accepted += 1;
         self.not_empty.notify_one();
     }
 
     fn release_lease(&self, state: &mut ChannelState) {
         state.producers -= 1;
-        if state.producers == 0 {
+        state.leases_settled += 1;
+        if state.producers == 0 || state.flush_waiters > 0 {
             self.condition.notify_all();
+        }
+        if state.producers == 0 {
             self.not_empty.notify_all();
         }
+    }
+
+    fn is_abandoned(&self) -> bool {
+        self.lock().abandoned
+    }
+
+    /// Wait until `done(state)`, or give up once `progress(state)` has not
+    /// advanced for `stall`. Returns the guard and whether `done` was reached.
+    fn wait_until<'a>(
+        &'a self,
+        mut state: MutexGuard<'a, ChannelState>,
+        stall: Option<Duration>,
+        done: impl Fn(&ChannelState) -> bool,
+        progress: impl Fn(&ChannelState) -> u64,
+    ) -> (MutexGuard<'a, ChannelState>, bool) {
+        let mut last = progress(&state);
+        let mut deadline = stall.map(|limit| Instant::now() + limit);
+        while !done(&state) {
+            match (stall, deadline) {
+                (Some(limit), Some(at)) => {
+                    let now = Instant::now();
+                    if now >= at {
+                        return (state, false);
+                    }
+                    let (next, _) = self
+                        .condition
+                        .wait_timeout(state, at - now)
+                        .unwrap_or_else(PoisonError::into_inner);
+                    state = next;
+                    let current = progress(&state);
+                    if current != last {
+                        last = current;
+                        deadline = Some(Instant::now() + limit);
+                    }
+                }
+                _ => {
+                    state = self
+                        .condition
+                        .wait(state)
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
+            }
+        }
+        (state, true)
     }
 
     /// Reserve one producer before a lifecycle transition can close the queue.
@@ -176,6 +239,7 @@ impl Channel {
             return false;
         }
         state.producers += 1;
+        state.leases_issued += 1;
         true
     }
 
@@ -196,41 +260,83 @@ impl Channel {
     }
 
     /// Wait for a slot, insert, and release the lease. Callers detach from the
-    /// interpreter first: the worker needs it to free a slot.
-    fn put_blocking(&self, record: Record) {
+    /// interpreter first: the worker needs it to free a slot. Returns `false`
+    /// when the generation was abandoned while waiting: the record is dropped.
+    fn put_blocking(&self, record: Record) -> bool {
         let mut state = self.lock();
         state.blocked_producers += 1;
-        while self.is_full(&state) {
+        while self.is_full(&state) && !state.abandoned {
             state = self
                 .condition
                 .wait(state)
                 .unwrap_or_else(PoisonError::into_inner);
         }
         state.blocked_producers -= 1;
+        if state.abandoned {
+            self.release_lease(&mut state);
+            return false;
+        }
         self.append(&mut state, record);
         self.release_lease(&mut state);
+        true
     }
 
-    /// Wait for producers already using this generation and all queued work.
-    /// Returns at once inside a sink callback: a callback cannot wait for its
-    /// own worker. Callers detach from the interpreter first.
-    fn flush(&self) {
+    /// Wait for producers that reserved delivery before this call, then for
+    /// every record accepted by then. Records other threads enqueue afterwards
+    /// are not waited for, so a flush under sustained load is bounded by the
+    /// queue instead of waiting for a moment when it happens to be empty.
+    ///
+    /// With `stall`, a worker that makes no progress for that long (a sink that
+    /// never returns) is abandoned: the generation stops accepting, blocked
+    /// producers drop their records, and the number of accepted records left
+    /// undelivered is returned. Returns at once inside a sink callback: a
+    /// callback cannot wait for its own worker. Callers detach from the
+    /// interpreter first.
+    fn flush(&self, stall: Option<Duration>) -> usize {
         if in_callback() {
-            return;
+            return 0;
         }
-        let retired = {
+        let (retired, abandoned) = {
             let mut state = self.lock();
-            while !(state.producers == 0 && state.unfinished_tasks == 0) {
-                state = self
-                    .condition
-                    .wait(state)
-                    .unwrap_or_else(PoisonError::into_inner);
+            if state.abandoned {
+                return 0;
             }
-            !state.accepting
+            state.flush_waiters += 1;
+            let lease_target = state.leases_issued;
+            let (next, mut drained) = self.wait_until(
+                state,
+                stall,
+                |state| state.leases_settled >= lease_target,
+                |state| state.leases_settled,
+            );
+            state = next;
+            if drained {
+                let accepted_target = state.accepted;
+                let (next, finished) = self.wait_until(
+                    state,
+                    stall,
+                    |state| state.finished >= accepted_target,
+                    |state| state.finished,
+                );
+                state = next;
+                drained = finished;
+            }
+            state.flush_waiters -= 1;
+            if drained {
+                (!state.accepting, 0)
+            } else {
+                state.abandoned = true;
+                state.accepting = false;
+                let abandoned = state.unfinished_tasks;
+                self.condition.notify_all();
+                self.not_empty.notify_all();
+                (false, abandoned)
+            }
         };
         if retired {
             self.join();
         }
+        abandoned
     }
 
     /// Reject new producers without waiting for callbacks or queue space.
@@ -242,18 +348,22 @@ impl Channel {
     }
 
     /// Reject new producers and stop after every accepted producer finishes.
-    fn close(&self, drain: bool) {
+    /// Both `drain` values wait behind every accepted record, as the Python
+    /// dispatcher always did; see `flush` for `stall` and the return value.
+    fn close(&self, drain: bool, stall: Option<Duration>) -> usize {
+        let _ = drain;
         self.retire();
         if in_callback() {
-            return;
+            return 0;
         }
-        if drain {
-            self.flush();
-        }
-        self.join();
+        self.flush(stall)
     }
 
     fn join(&self) {
+        if self.is_abandoned() {
+            // The worker is stuck in a sink; leave the handle to detach on drop.
+            return;
+        }
         let handle = self.lock_thread().take();
         if let Some(handle) = handle {
             let _ = handle.join();
@@ -322,7 +432,8 @@ impl Channel {
                         drop(record);
                         let mut state = self.lock();
                         state.unfinished_tasks -= 1;
-                        if state.unfinished_tasks == 0 {
+                        state.finished += 1;
+                        if state.unfinished_tasks == 0 || state.flush_waiters > 0 {
                             self.condition.notify_all();
                         }
                     }
@@ -399,13 +510,17 @@ impl DispatchChannel {
 
     /// Wait for producers and queued work; no-op inside a sink callback.
     fn flush(&self, py: Python<'_>) {
-        py.detach(|| self.inner.flush());
+        py.detach(|| {
+            self.inner.flush(None);
+        });
     }
 
     /// Retire, optionally drain, and join the worker; idempotent.
     #[pyo3(signature = (*, drain))]
     fn close(&self, py: Python<'_>, drain: bool) {
-        py.detach(|| self.inner.close(drain));
+        py.detach(|| {
+            self.inner.close(drain, None);
+        });
     }
 }
 
@@ -519,18 +634,29 @@ impl DispatcherInner {
     /// same handler blocks on that lock on the worker thread. Both cases are
     /// marked by the shared callback scope. An external lifecycle call will
     /// still find and drain every retired generation.
-    fn drain(&self, py: Python<'_>, channels: Vec<Arc<Channel>>) {
+    ///
+    /// Returns the number of accepted records abandoned because a worker made
+    /// no progress for `stall` (see `Channel::flush`).
+    fn drain(&self, py: Python<'_>, channels: Vec<Arc<Channel>>, stall: Option<Duration>) -> usize {
+        let mut abandoned = 0;
         if !in_callback() {
-            py.detach(|| {
-                for channel in &channels {
-                    channel.flush();
-                }
-            });
+            abandoned = py.detach(|| channels.iter().map(|channel| channel.flush(stall)).sum());
         }
         let mut registry = self.lock_registry();
-        registry
-            .channels
-            .retain(|channel| channel.get().inner.is_alive());
+        if registry
+            .channel
+            .as_ref()
+            .is_some_and(|channel| channel.get().inner.is_abandoned())
+        {
+            // Nothing can be delivered through a stuck worker: stop offering
+            // records to it until the next configure().
+            self.retire_active(&mut registry);
+        }
+        registry.channels.retain(|channel| {
+            let inner = &channel.get().inner;
+            inner.is_alive() && !inner.is_abandoned()
+        });
+        abandoned
     }
 
     /// Account for one finished (or dropped) delivery to each of `sinks`.
@@ -695,7 +821,7 @@ impl CallableDispatcher {
             self.inner.publish(py, &registry);
             (removed, channels, finalizer)
         };
-        self.inner.drain(py, channels);
+        self.inner.drain(py, channels, None);
         if let Some(finalizer) = finalizer {
             finalizer.bind(py).call0()?;
         }
@@ -729,7 +855,7 @@ impl CallableDispatcher {
             self.inner.publish(py, &registry);
             channels
         };
-        self.inner.drain(py, channels);
+        self.inner.drain(py, channels, None);
         Ok(())
     }
 
@@ -743,28 +869,36 @@ impl CallableDispatcher {
             self.inner.publish(py, &registry);
             registry.live_channels()
         };
-        self.inner.drain(py, channels);
+        self.inner.drain(py, channels, None);
     }
 
     /// Stop the active dispatch queue while preserving registrations.
     ///
     /// `drain` is accepted for API symmetry; both values join behind every
     /// accepted queue entry, as the Python dispatcher always did.
-    #[pyo3(signature = (*, drain))]
-    fn stop(&self, py: Python<'_>, drain: bool) {
+    ///
+    /// `stall_timeout` bounds the wait for a sink that stops returning; the
+    /// number of accepted records left undelivered is returned (zero when
+    /// every delivery completed).
+    #[pyo3(signature = (*, drain, stall_timeout=None))]
+    fn stop(&self, py: Python<'_>, drain: bool, stall_timeout: Option<f64>) -> usize {
         let _ = drain;
         let channels = {
             let mut registry = self.inner.lock_registry();
             self.inner.retire_active(&mut registry);
             registry.live_channels()
         };
-        self.inner.drain(py, channels);
+        self.inner
+            .drain(py, channels, stall_duration(stall_timeout))
     }
 
-    /// Block until all queued deliveries have completed.
-    fn flush(&self, py: Python<'_>) {
+    /// Block until all queued deliveries have completed; see `stop` for
+    /// `stall_timeout` and the return value.
+    #[pyo3(signature = (stall_timeout=None))]
+    fn flush(&self, py: Python<'_>, stall_timeout: Option<f64>) -> usize {
         let channels = self.inner.lock_registry().live_channels();
-        self.inner.drain(py, channels);
+        self.inner
+            .drain(py, channels, stall_duration(stall_timeout))
     }
 
     /// True when no callable sink can receive a line.
@@ -833,8 +967,7 @@ impl CallableDispatcher {
             Offer::WouldBlock(record) => {
                 // Only a full queue pays for detaching: the worker needs the
                 // interpreter to free a slot.
-                py.detach(|| channel.put_blocking(record));
-                true
+                py.detach(|| channel.put_blocking(record))
             }
         };
         if !accepted {

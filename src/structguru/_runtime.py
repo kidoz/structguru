@@ -282,6 +282,9 @@ _callable_dispatcher: CallableDispatcherProtocol = new_dispatcher()
 # stream immediately after the call (no flush needed).
 _hooks_registered = False
 _drop_count = 0
+# A callable sink that makes no progress for this long during flush() or
+# shutdown() is abandoned with a warning instead of blocking the process.
+_CALLABLE_STALL_TIMEOUT = 10.0
 _drop_lock = threading.Lock()
 _lifecycle_rejected = 0
 
@@ -935,7 +938,7 @@ def shutdown() -> None:
     """
     global _runtime, _lifecycle_generation
     # Callback-generated logs need a live native writer until callbacks drain.
-    _callable_dispatcher.stop(drain=True)
+    _note_abandoned(_callable_dispatcher.stop(drain=True, stall_timeout=_CALLABLE_STALL_TIMEOUT))
     with _state_lock:
         old_runtime = _runtime
         _runtime = None
@@ -1048,6 +1051,17 @@ def _note_drop() -> None:
         )
 
 
+def _note_abandoned(count: int) -> None:
+    """Warn when a stalled callable sink forced deliveries to be abandoned."""
+    if count:
+        warnings.warn(
+            f"structguru abandoned {count} callable sink delivery record(s): a sink "
+            f"did not return within {_CALLABLE_STALL_TIMEOUT:g}s; callable sinks are "
+            "disabled until the next configure()",
+            stacklevel=3,
+        )
+
+
 def _reset_drop_count() -> None:
     """Reset the drop counter (used by tests)."""
     global _drop_count
@@ -1070,7 +1084,7 @@ def flush() -> None:
     """
     # Callbacks may log to the native writer or replace it by reconfiguring.
     # Drain them first, then flush the resulting runtime's writer.
-    _callable_dispatcher.flush()
+    _note_abandoned(_callable_dispatcher.flush(stall_timeout=_CALLABLE_STALL_TIMEOUT))
     state = current_runtime()
     if state is not None:
         state.writer.flush()
