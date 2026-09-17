@@ -57,17 +57,23 @@ def test_bench_native_exception_traceback_string(benchmark: Any, depth: int, car
     _bench_exception(benchmark, depth, exception_carets=carets)
 
 
-@pytest.mark.parametrize("depth", [1, 20], ids=["shallow", "deep"])
+@pytest.mark.parametrize("depth", [1, 20, 200], ids=["shallow", "deep", "truncated"])
 def test_bench_native_exception_structured(benchmark: Any, depth: int) -> None:
-    """Benchmark the structured exception dict without locals."""
+    """Benchmark the structured exception dict without locals.
+
+    ``truncated`` raises through 200 frames while the default
+    ``exception_max_frames`` keeps 20, so it measures frame selection on a
+    traceback much deeper than the report, as a ``RecursionError`` produces.
+    """
     _bench_exception(benchmark, depth, structured_exceptions=True)
 
 
-def test_bench_native_exception_structured_with_locals(benchmark: Any) -> None:
+@pytest.mark.parametrize("depth", [20, 200], ids=["deep", "truncated"])
+def test_bench_native_exception_structured_with_locals(benchmark: Any, depth: int) -> None:
     """Benchmark the structured exception dict with per-frame locals captured."""
     _bench_exception(
         benchmark,
-        20,
+        depth,
         structured_exceptions=True,
         exception_include_locals=True,
     )
