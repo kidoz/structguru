@@ -69,20 +69,35 @@ impl RecordFilter for Sampler {
     }
 }
 
+/// Keys the limiter tracks at most; beyond this the least recently seen are
+/// evicted so a stream of unique messages cannot grow memory for a period.
+pub const RATE_LIMIT_MAX_KEYS: usize = 8192;
+
 /// Sliding-window rate limiter keyed by the formatted message.
 ///
 /// Allows at most `max_count` records per key within `period`. Stale buckets are
 /// pruned lazily on access and periodically garbage-collected, mirroring the
-/// Python `RateLimitingProcessor` semantics.
+/// Python `RateLimitingProcessor` semantics. The key table is capped at
+/// `max_keys` entries; when a new key would exceed it, stale buckets are swept
+/// and then the least recently seen tenth of the table is evicted.
 pub struct RateLimiter {
     max_count: usize,
     period: Duration,
+    max_keys: usize,
     buckets: Mutex<RateLimiterState>,
+}
+
+/// One key's sliding window plus when the key was last offered a record,
+/// dropped or kept, so eviction spares keys that are actively being limited.
+#[derive(Default)]
+struct Bucket {
+    hits: VecDeque<Instant>,
+    last_seen: Option<Instant>,
 }
 
 struct RateLimiterState {
     /// Per-key sliding-window timestamps.
-    timestamps: HashMap<String, VecDeque<Instant>>,
+    timestamps: HashMap<String, Bucket>,
     /// Bounded GC frequency so sweeping does not dominate the hot path.
     cleanup_counter: u64,
     cleanup_interval: u64,
@@ -91,9 +106,15 @@ struct RateLimiterState {
 impl RateLimiter {
     /// `max_count` records per `period`; both must be positive.
     pub fn new(max_count: usize, period: Duration) -> Self {
+        Self::with_max_keys(max_count, period, RATE_LIMIT_MAX_KEYS)
+    }
+
+    /// Like [`RateLimiter::new`] with an explicit key-table cap (at least 1).
+    pub fn with_max_keys(max_count: usize, period: Duration, max_keys: usize) -> Self {
         Self {
             max_count,
             period,
+            max_keys: max_keys.max(1),
             buckets: Mutex::new(RateLimiterState {
                 timestamps: HashMap::new(),
                 cleanup_counter: 0,
@@ -108,41 +129,74 @@ impl RateLimiter {
 
         // Prune the candidate bucket up to the window edge.
         if let Some(cutoff) = cutoff
-            && let Some(ts) = state.timestamps.get_mut(key)
+            && let Some(bucket) = state.timestamps.get_mut(key)
         {
-            while ts.front().is_some_and(|&t| t <= cutoff) {
-                ts.pop_front();
+            while bucket.hits.front().is_some_and(|&t| t <= cutoff) {
+                bucket.hits.pop_front();
             }
         }
 
+        if !state.timestamps.contains_key(key) && state.timestamps.len() >= self.max_keys {
+            if let Some(cutoff) = cutoff {
+                sweep_stale(&mut state, cutoff);
+            }
+            if state.timestamps.len() >= self.max_keys {
+                evict_least_recent(&mut state, self.max_keys - self.max_keys / 10);
+            }
+        }
         let bucket = state.timestamps.entry(key.to_owned()).or_default();
-        if bucket.len() >= self.max_count {
+        bucket.last_seen = Some(now);
+        if bucket.hits.len() >= self.max_count {
             return Decision::Drop;
         }
-        bucket.push_back(now);
+        bucket.hits.push_back(now);
 
         // Periodic GC of all stale buckets, mirroring the Python processor.
         state.cleanup_counter += 1;
         if state.cleanup_counter >= state.cleanup_interval {
             state.cleanup_counter = 0;
             if let Some(cutoff) = cutoff {
-                let stale: Vec<String> = state
-                    .timestamps
-                    .iter_mut()
-                    .filter_map(|(k, v)| {
-                        while v.front().is_some_and(|&t| t <= cutoff) {
-                            v.pop_front();
-                        }
-                        if v.is_empty() { Some(k.clone()) } else { None }
-                    })
-                    .collect();
-                for k in stale {
-                    state.timestamps.remove(&k);
-                }
+                sweep_stale(&mut state, cutoff);
             }
         }
 
         Decision::Keep
+    }
+
+    #[cfg(test)]
+    fn tracked_keys(&self) -> usize {
+        self.buckets
+            .lock()
+            .expect("rate limiter state poisoned")
+            .timestamps
+            .len()
+    }
+}
+
+/// Drop timestamps at or before `cutoff` from every bucket and remove empty buckets.
+fn sweep_stale(state: &mut RateLimiterState, cutoff: Instant) {
+    state.timestamps.retain(|_, bucket| {
+        while bucket.hits.front().is_some_and(|&t| t <= cutoff) {
+            bucket.hits.pop_front();
+        }
+        !bucket.hits.is_empty()
+    });
+}
+
+/// Shrink the key table to `keep` entries, dropping those seen least recently.
+fn evict_least_recent(state: &mut RateLimiterState, keep: usize) {
+    let excess = state.timestamps.len().saturating_sub(keep);
+    if excess == 0 {
+        return;
+    }
+    let mut by_age: Vec<(Option<Instant>, String)> = state
+        .timestamps
+        .iter()
+        .map(|(key, bucket)| (bucket.last_seen, key.clone()))
+        .collect();
+    by_age.sort_unstable_by_key(|(last, _)| *last);
+    for (_, key) in by_age.into_iter().take(excess) {
+        state.timestamps.remove(&key);
     }
 }
 
@@ -312,6 +366,33 @@ mod tests {
         // alpha is exhausted; beta is independent.
         assert_eq!(r.allow_key("alpha", now), Decision::Drop);
         assert_eq!(r.allow_key("beta", now), Decision::Drop);
+    }
+
+    #[test]
+    fn rate_limiter_key_table_is_capped_and_keeps_hot_keys() {
+        let limiter = RateLimiter::with_max_keys(2, Duration::from_secs(60), 100);
+        let start = Instant::now();
+        // A hot key seen throughout must survive eviction and stay limited.
+        assert_eq!(limiter.allow_key("hot", start), Decision::Keep);
+        for i in 0..1_000 {
+            let now = start + Duration::from_millis(i);
+            assert_eq!(
+                limiter.allow_key(&format!("unique {i}"), now),
+                Decision::Keep
+            );
+            if i % 50 == 0 {
+                limiter.allow_key("hot", now);
+            }
+        }
+        assert!(
+            limiter.tracked_keys() <= 100,
+            "table grew to {}",
+            limiter.tracked_keys()
+        );
+        assert_eq!(
+            limiter.allow_key("hot", start + Duration::from_secs(1)),
+            Decision::Drop
+        );
     }
 
     #[test]

@@ -604,7 +604,10 @@ def configure(settings: Settings | None = None, **changes: Unpack[SettingsChange
     Prefer the capture-group rewrite where possible.
 
     ``sample_rate`` (0.0–1.0) and ``rate_limit_max``/``rate_limit_period`` add
-    pre-render filters: dropped records cost zero rendering. ``sampled`` and
+    pre-render filters: dropped records cost zero rendering. The rate limiter
+    keys on the formatted message, so a message that embeds a counter or an ID
+    is never limited; its key table holds at most 8192 messages and evicts the
+    least recently seen when full. ``sampled`` and
     ``rate_limited`` counters are reported separately from the writer's transport
     ``dropped`` counter (see :func:`writer_metrics`). ``sample_max_level``
     restricts sampling to records at or below that level (more severe records
