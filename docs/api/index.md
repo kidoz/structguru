@@ -7,8 +7,9 @@ These pages are automatically generated from the source code docstrings using th
 Navigate through the sub-sections to explore the modules:
 
 *   **Core**: The main Loguru-style facade and logger implementation.
-*   **Configuration**: `configure()` plus the runtime-control functions
-    (`shutdown`, `is_available`, `set_level`, `writer_metrics`).
+*   **Configuration**: `configure()`, `Settings`, `get_config()`, and `update()`,
+    plus the runtime-control functions (`flush`, `shutdown`, `set_level`,
+    `writer_metrics`, `lifecycle_metrics`, `is_available`).
 *   **Native Processing**: How redaction, sampling, rate limiting, exceptions,
     metrics, and OpenTelemetry injection are configured through `configure()`.
 *   **Integrations**: Adapters for popular frameworks like ASGI, Celery, Django, Flask, etc.
