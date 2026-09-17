@@ -95,6 +95,11 @@ All notable changes to this project are documented here. The format is based on
   the number of undelivered records, and disable callable delivery until the
   next `configure()`. Records already handed to the stuck callback cannot be
   recovered, and the sink's own thread is left detached rather than killed.
+- The rate limiter's key table is capped at 8192 messages, evicting the least
+  recently seen when full. It keys on the formatted message, so messages that
+  embed a counter or an ID create a new key per record; one million unique
+  messages within a period previously grew the process by hundreds of
+  megabytes. Keys that are actively being limited are kept.
 - The wheel no longer installs a stray top-level `LICENSE` file into
   `site-packages`. The license ships in the wheel's `dist-info/licenses/`
   directory and in the sdist, as before.
