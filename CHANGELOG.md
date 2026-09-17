@@ -89,6 +89,12 @@ All notable changes to this project are documented here. The format is based on
   drains it: `os.fork()` in a prefork server with four logging threads took
   tens of seconds. A flush now waits only for the records enqueued before it
   was called, so its cost is bounded by the queue depth.
+- A callable sink that never returns no longer blocks `shutdown()` and
+  interpreter exit forever. `flush()` and `shutdown()` give a stalled dispatch
+  worker 10 seconds to make progress, then abandon the generation, warn with
+  the number of undelivered records, and disable callable delivery until the
+  next `configure()`. Records already handed to the stuck callback cannot be
+  recovered, and the sink's own thread is left detached rather than killed.
 - The wheel no longer installs a stray top-level `LICENSE` file into
   `site-packages`. The license ships in the wheel's `dist-info/licenses/`
   directory and in the sdist, as before.
