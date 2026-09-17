@@ -208,7 +208,12 @@ _RUST = _load_rust_module()
 
 
 def is_available() -> bool:
-    """Return whether the compiled native extension is importable."""
+    """Return whether the native extension is loaded.
+
+    Always ``True`` once the package has imported: a missing extension raises
+    ``RuntimeError`` at import time. Kept for callers written against releases
+    that could fall back to a pure-Python path.
+    """
     return _RUST is not None
 
 

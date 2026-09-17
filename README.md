@@ -346,7 +346,8 @@ when an unbounded queue is acceptable.
 ## Native runtime
 
 structguru ships a required Rust extension that renders and enqueues logging
-natively, off-thread. It is auto-enabled at import time. The runtime does not depend on `orjson`;
+natively, off-thread. It is auto-enabled at import time, and importing the package
+without the extension raises `RuntimeError`. The runtime does not depend on `orjson`;
 exotic values (`datetime`, `UUID`, `Enum`, dataclasses) are converted natively
 in Rust.
 
@@ -407,7 +408,7 @@ Public API:
 | `set_level(level)` | Adjust the level threshold at runtime. |
 | `writer_metrics()` | Current writer counters (enqueued/written/dropped/depth/...) plus filter counters when active; `None` after shutdown. |
 | `lifecycle_metrics()` | Cumulative native deliveries rejected by closed writers; available after shutdown and across reconfiguration. |
-| `is_available()` | Whether the compiled extension is importable. |
+| `is_available()` | Compatibility helper; always `True` once the package has imported, because a missing extension fails import. |
 
 Behavior notes:
 
