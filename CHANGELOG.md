@@ -100,6 +100,10 @@ All notable changes to this project are documented here. The format is based on
   embed a counter or an ID create a new key per record; one million unique
   messages within a period previously grew the process by hundreds of
   megabytes. Keys that are actively being limited are kept.
+- A synchronous `stream_sink` whose `write()` raises is now counted in
+  `writer_metrics()["stream_errors"]` and warned about at a bounded rate.
+  The failure is still contained, and the record still reaches the native
+  destinations, but the lost stream copies are no longer invisible.
 - The wheel no longer installs a stray top-level `LICENSE` file into
   `site-packages`. The license ships in the wheel's `dist-info/licenses/`
   directory and in the sdist, as before.
