@@ -671,6 +671,12 @@ def test_shutdown_abandons_a_callable_sink_that_never_returns() -> None:
             assert elapsed < 5, f"shutdown blocked for {elapsed:.1f}s"
             assert any("abandoned" in str(w.message) for w in captured), captured
             assert _runtime.current_runtime() is None
+            # Release the sink while the interpreter is alive: the abandoned
+            # worker must unwind without delivering anything else. Waking a
+            # Python thread during interpreter finalization aborts inside
+            # CPython, which is why the sink is never left parked here.
+            never.set()
+            time.sleep(0.2)
             # Logging still works after the stalled generation is abandoned.
             _runtime.configure(service="svc", target="memory", level="INFO")
             sg.logger.info("after recovery")
@@ -679,7 +685,6 @@ def test_shutdown_abandons_a_callable_sink_that_never_returns() -> None:
                 "after recovery" in line for line in _runtime.drain_messages()
             )
             _runtime.shutdown()
-            never.set()
         """),
         ],
         capture_output=True,

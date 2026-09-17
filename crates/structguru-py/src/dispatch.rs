@@ -403,6 +403,13 @@ impl Channel {
                     if !state.accepting && state.producers == 0 {
                         return;
                     }
+                    // A flush gave up on this generation. Whatever the stuck
+                    // callback was doing, stop here rather than attaching to
+                    // the interpreter again: by the time it returns the
+                    // interpreter may be finalizing.
+                    if state.abandoned {
+                        return;
+                    }
                     state = self
                         .not_empty
                         .wait(state)
@@ -414,12 +421,15 @@ impl Channel {
             // would hand the interpreter back and forth with a producer blocked
             // on a full queue for every slot freed. Callbacks run Python code,
             // so the interpreter's own switching still applies inside them.
+            if self.is_abandoned() {
+                return;
+            }
             Python::attach(|py| {
                 loop {
                     {
                         let mut state = self.lock();
                         let count = state.queue.len().min(DELIVERY_BATCH);
-                        if count == 0 {
+                        if count == 0 || state.abandoned {
                             break;
                         }
                         batch.extend(state.queue.drain(..count));
@@ -435,6 +445,11 @@ impl Channel {
                         state.finished += 1;
                         if state.unfinished_tasks == 0 || state.flush_waiters > 0 {
                             self.condition.notify_all();
+                        }
+                        // The delivery that just finished may be the one a
+                        // flush gave up on; stop before starting another.
+                        if state.abandoned {
+                            break;
                         }
                     }
                 }
