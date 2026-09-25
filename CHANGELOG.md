@@ -4,6 +4,167 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Free-threaded CPython 3.14t wheels for Linux x86_64, macOS arm64, and Windows
+  x64. pip never selects an abi3 wheel on a free-threaded interpreter, so a
+  3.14t install previously compiled the sdist and needed a Rust toolchain.
+- `writer_metrics()["callable_errors"]` counts exceptions raised by callable
+  sinks. They were discarded without a trace; the first failure and every
+  1000th now also emit a `UserWarning` from the delivery thread.
+
+### Changed
+
+- `logger.remove(handler_id)` accepts an id returned by any `Logger` instance,
+  and an unknown or already-removed id raises `ValueError` (a non-integer id
+  raises `TypeError`), as in loguru. It used to be ignored silently, which also
+  left a sink added through `Logger(name=...)` impossible to remove.
+- `logger.add(handler)` no longer rewrites the caller's `logging.Handler`: its
+  level and formatter are left alone, and its formatter now wraps the rendered
+  line. `add(level=...)` accepts integers and raises `ValueError` for an
+  unknown level instead of warning and falling back to INFO.
+- The message argument of the level methods and `self` on `bind()` and
+  `contextualize()` are positional-only, as in loguru. Extra `message=` and
+  `self=` keywords (`logger.info("m", self=x)`) become fields instead of
+  raising `TypeError`; passing the message itself by keyword
+  (`logger.info(message="m")`) now raises `TypeError`.
+- Callable sinks are called by one thread at a time, in log order, across
+  `configure()`, `update()` and `logger.add()`. `logger.add()` no longer waits
+  for queued deliveries, and the stall limit that `flush()` and `shutdown()`
+  apply to a sink that stops making progress now also bounds `configure()`,
+  `update()` and `logger.remove()`. After an abandonment, callable delivery
+  stays off until the next `configure()`, even if a sink is added.
+- A record rejected by a closed writer during reconfiguration or shutdown
+  reaches no other destination: the synchronous `stream_sink`, callable sinks
+  and Sentry now follow the native writer's outcome. The stream used to
+  receive it anyway.
+- The stdout sink (`target="stdout"` and `also_stdout=True`) writes each
+  record straight to file descriptor 1 on Unix, with no buffering and no
+  process-wide lock, and keeps following fd 1 after a later `dup2()`. A
+  closed or invalid stdout is counted in `sink_errors` instead of `written`.
+- A relative `file_path` is resolved to an absolute path at `configure()`, so
+  a later `os.chdir()` no longer splits the log or points the lock file and
+  backups elsewhere. With rotation disabled (`file_max_bytes=0` or
+  `file_backup_count=0`), a log file renamed or deleted by an external tool
+  such as logrotate is now reopened on Unix, as it already was with rotation
+  on.
+- If a forked child cannot start its writer, logging in that child is disabled
+  as after `shutdown()`, with one line on stderr; it used to keep the dead
+  writer, drop records uncounted and hang in `flush()`.
+- Console output: quoted values escape `"` and `\`, keys that contain spaces,
+  `=`, quotes or backslashes are quoted, and U+2028, U+2029 and bidirectional
+  controls are escaped, so a field key or value can no longer imitate another
+  field or line. Floats use the JSON renderer's text (`1.0`, `1e+300`, `-0.0`)
+  instead of Rust's (`1`, a 301-digit number, `-0`), a formatted `exception`
+  is an indented block like the stack, and user `service` and `stack` fields
+  are shown instead of dropped.
+- Standard-library records bridged into structguru are thresholded, sampled
+  and routed to `logger.add()` sinks by their real `levelno` rather than the
+  level band they render as, so a level-25 record passes `level=25`, is never
+  sampled away under `sample_max_level="INFO"`, and levels 5 to 9 fall below a
+  DEBUG threshold. Their `timestamp` is `record.created`, which keeps the
+  original time for records replayed through a `QueueListener`; a `created`
+  that is not a number falls back to the current time.
+- Integrations:
+  - Flask and Django bind the request context while a streamed body is
+    produced and log the request summary when it finishes, with the full
+    duration.
+  - Flask's context hook runs before every other `before_request` hook, a
+    propagated exception logs `Request failed` from teardown, and a request
+    whose later `after_request` hook fails logs one summary with the final
+    status instead of two.
+  - The ASGI middleware restores the context of outer middleware, echoes the
+    request id under `request_id_header`, stops `duration_ms` when the final
+    response body is sent, logs `BaseException`s as failures, bounds extracted
+    header values, and redacts credential headers.
+  - `setup_celery_logging()` warns when called again with different options,
+    and a failed first call no longer disables later ones.
+  - Django's console logging config includes the service name.
+
+### Fixed
+
+- A forked child could hang forever with `target="stdout"`: Rust's
+  `std::io::stdout()` lock was held by the parent's writer thread at `fork()`,
+  so the child's writer, `flush()`, exit and (once the queue filled) every log
+  call blocked on it.
+- A rotating file sink dropped a record when a signal interrupted its wait for
+  the shared lock file, and records it had counted as failed after a write
+  error were written later from its buffer; a partially written line is now
+  ended before the next record.
+- Exception locals no longer leak secrets through `repr()`. Values under a
+  sensitive key inside mappings, sequences, sets, dataclasses,
+  `SimpleNamespace` and `argparse.Namespace` are redacted at any depth, with
+  `bytes` and `Enum` keys and `(key, value)` pairs in a list matched too;
+  `sensitive_patterns` see the whole rendering before it is cut to
+  `exception_max_local_repr`; and a bound `Logger` no longer shows its bound
+  values in its `repr`.
+- A message placeholder that names a sensitive key (`{token}`,
+  `{creds[password]}`) is interpolated as `[REDACTED]`, and a placeholder that
+  interpolates a whole container (`logger.info("{}", {"password": ...})`)
+  renders it with the values under sensitive keys redacted, as exception
+  locals do. The value used to go into the message, and to Sentry, unredacted.
+- `sensitive_patterns` also apply to mapping keys at every depth and to
+  integers by their digits, so `{"alice@corp.com": 3}` or a card number passed
+  as an `int` is masked. Keys that become identical after redaction are
+  written once.
+- Celery context propagation can no longer make `task.delay()` fail: header
+  values are converted to transport-safe types and bounded, sensitive keys are
+  redacted before they reach the broker, and a failed export drops the header
+  instead of raising.
+- Records accepted by the writer just before `update()` or `configure()`
+  swapped the runtime were lost for callable sinks and Sentry without being
+  counted.
+- A slow callable sink that keeps delivering is no longer abandoned by the
+  stall limit: progress counts completed deliveries, not just released
+  producers. A producer released by an abandonment is counted as abandoned,
+  not as a queue-full drop.
+- `logger.add()` of an unrelated sink could block for the whole backlog, and
+  forever behind a stuck sink.
+- `callable_dropped` was reset by every `logger.add()`.
+- An infinite stall timeout panicked in `flush()` and at exit.
+- Logging diagnostics (queue-full, stream-error, sink-error, abandonment and
+  message-formatting warnings) never raise into the logging call under
+  `-W error`; a failure goes to `sys.unraisablehook`.
+- `@logger.catch()` used as a decorator logged under the `contextlib` or
+  `asyncio.events` logger name instead of the decorated function's module.
+- Leaving `contextualize()` or `bound_contextvars()` in a different
+  `contextvars.Context` (a generator iterated from a thread pool, an async
+  generator finalized by the garbage collector) raised `ValueError`. Exit now
+  restores the entry context only when the current context still holds the
+  block's own mapping, and leaves any other context untouched.
+- The exit drain is registered at import, so an `atexit` handler registered
+  before an explicit `configure()` can still log.
+- A message whose `str()` raises, or an argument whose `__format__` raises,
+  no longer propagates out of the logging call.
+- `LOG_LEVEL=10` and other numeric environment levels were rejected at import.
+- A field named `event` replaced the message that `metric_processor` matched.
+- Message templates longer than 512 characters are no longer cached, which
+  kept large dynamic messages alive.
+- `stack_info` hid the frames of user modules whose names start with
+  `structguru` (such as `structguru_ext`).
+- Brace formatting: nested format-spec fields (`{x:{width}}`) are consumed,
+  `}}` is unescaped whenever arguments are given, `logger.exception("{{x}}")`
+  renders like `logger.error("{{x}}")`, and an `{exc_info}` placeholder no
+  longer drops the exception.
+- An unpaired surrogate rendered as three U+FFFD characters and a split
+  surrogate pair as six; they now render as one U+FFFD and as the character.
+- `int` and `float` subclasses such as `numpy.float64` rendered as
+  `<unsupported: T>`.
+- Keys that render to the same text (a non-string key next to its string
+  form, lone surrogates) produced duplicate JSON keys.
+- Sentry events were silently dropped on sentry-sdk 1.x, which has no
+  `new_scope()`.
+- The gRPC interceptor never matched a mixed-case `request_id_key`, and a
+  `-bin` request-id key failed every RPC.
+- The requests adapter logged URLs without the `?` for `params=`, and logged
+  a `KeyboardInterrupt` as a completed request.
+- The SQLAlchemy "log all queries" recipe in the integrations guide logged
+  every query as a slow-query warning.
+- The golden parity tests compared the native renderer with itself; they run
+  against a real structlog and orjson pipeline again.
+
 ## [1.3.1] - 2026-09-17
 
 ### Fixed
