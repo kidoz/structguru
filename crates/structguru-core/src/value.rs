@@ -1,5 +1,6 @@
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
+use std::collections::HashMap;
 
 /// Owned structured value used by the Rust logging core.
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +68,49 @@ impl Value {
     }
 }
 
+/// Maps up to this size are collapsed by pairwise comparison; larger ones
+/// index their keys in a hash map first.
+const PAIRWISE_COLLAPSE_MAX: usize = 16;
+
+/// Merge map entries whose keys are the same text, so no key is emitted twice.
+///
+/// The first entry with a key keeps its position and takes the value of the
+/// last one, as repeated assignment into a Python `dict` would. Distinct
+/// Python keys can render alike — `1` and `"1"`, two lone surrogates that
+/// both become U+FFFD — so conversion calls this for any map holding a key
+/// that did not convert to itself.
+pub fn collapse_duplicate_keys(entries: &mut Vec<(String, Value)>) {
+    if entries.len() <= PAIRWISE_COLLAPSE_MAX {
+        let mut index = 1;
+        while index < entries.len() {
+            let key = &entries[index].0;
+            match entries[..index].iter().position(|(first, _)| first == key) {
+                Some(first) => entries[first].1 = entries.remove(index).1,
+                None => index += 1,
+            }
+        }
+        return;
+    }
+    let mut slots: HashMap<&str, usize> = HashMap::with_capacity(entries.len());
+    let mut slot_of = Vec::with_capacity(entries.len());
+    for (key, _) in entries.iter() {
+        let next = slots.len();
+        slot_of.push(*slots.entry(key.as_str()).or_insert(next));
+    }
+    let unique = slots.len();
+    if unique == entries.len() {
+        return;
+    }
+    let mut collapsed: Vec<Option<(String, Value)>> = (0..unique).map(|_| None).collect();
+    for (entry, slot) in entries.drain(..).zip(slot_of) {
+        match &mut collapsed[slot] {
+            Some((_, value)) => *value = entry.1,
+            empty => *empty = Some(entry),
+        }
+    }
+    entries.extend(collapsed.into_iter().flatten());
+}
+
 impl Serialize for Value {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -103,7 +147,7 @@ impl Serialize for Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{Value, ValueStats};
+    use super::{Value, ValueStats, collapse_duplicate_keys};
 
     #[test]
     fn stats_count_nested_value_nodes() {
@@ -157,5 +201,50 @@ mod tests {
             value.to_json_string().unwrap(),
             r#"{"message":"hello","ok":true,"tags":["api"],"none":null}"#,
         );
+    }
+
+    fn keyed(keys: &[&str]) -> Vec<(String, Value)> {
+        keys.iter()
+            .enumerate()
+            .map(|(index, key)| ((*key).to_owned(), Value::Int(index as i64)))
+            .collect()
+    }
+
+    #[test]
+    fn collapse_keeps_first_position_and_last_value() {
+        let mut entries = keyed(&["a", "b", "a", "c", "b", "a"]);
+        collapse_duplicate_keys(&mut entries);
+        assert_eq!(
+            entries,
+            vec![
+                ("a".to_owned(), Value::Int(5)),
+                ("b".to_owned(), Value::Int(4)),
+                ("c".to_owned(), Value::Int(3)),
+            ],
+        );
+    }
+
+    #[test]
+    fn collapse_leaves_distinct_keys_untouched() {
+        for size in [0, 1, 16, 17, 100] {
+            let keys: Vec<String> = (0..size).map(|index| index.to_string()).collect();
+            let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+            let mut entries = keyed(&keys);
+            let expected = entries.clone();
+            collapse_duplicate_keys(&mut entries);
+            assert_eq!(entries, expected, "size {size}");
+        }
+    }
+
+    #[test]
+    fn collapse_large_maps_like_small_ones() {
+        let keys: Vec<String> = (0..60).map(|index| (index % 20).to_string()).collect();
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let mut entries = keyed(&keys);
+        collapse_duplicate_keys(&mut entries);
+        let expected: Vec<(String, Value)> = (0..20)
+            .map(|index| (index.to_string(), Value::Int(index + 40)))
+            .collect();
+        assert_eq!(entries, expected);
     }
 }

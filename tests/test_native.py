@@ -433,6 +433,44 @@ def test_native_numeric_enums_and_bools_keep_their_conversion() -> None:
     assert rust._convert_value_debug([True, False]) == [True, False]
 
 
+def _json_pairs(rendered: str) -> list[tuple[str, object]]:
+    """Parse JSON keeping every object's key/value pairs, duplicates included."""
+    return json.loads(rendered, object_pairs_hook=list)
+
+
+def test_native_map_keys_rendering_alike_keep_the_later_value() -> None:
+    # Distinct keys that render to the same text collapse into one JSON key:
+    # the later value wins at the earlier key's position.
+    assert _json_pairs(rust._render_json_debug({1: "int", "1": "str"})) == [("1", "str")]
+    assert _json_pairs(rust._render_json_debug({"1": "str", 1: "int"})) == [("1", "int")]
+    assert _json_pairs(
+        rust._render_json_debug({"x": 0, None: "none", "y": 1, float("nan"): "nan"})
+    ) == [("x", 0), ("null", "nan"), ("y", 1)]
+    first, second = "id\udc80", "id\udc81"
+    assert _json_pairs(
+        rust._render_json_debug({"id\ufffd": 1, first: 2, "other": 3, second: 4})
+    ) == [("id\ufffd", 4), ("other", 3)]
+    assert rust._convert_value_debug({"outer": {2: "a", "2": "b"}}) == {"outer": {"2": "b"}}
+
+
+def test_native_large_maps_collapse_keys_rendering_alike() -> None:
+    mixed: dict[object, str] = {number: "int" for number in range(40)}
+    mixed.update({str(number): "str" for number in range(40)})
+
+    assert _json_pairs(rust._render_json_debug(mixed)) == [
+        (str(number), "str") for number in range(40)
+    ]
+
+
+def test_native_standalone_render_collapses_fields_rendering_alike() -> None:
+    first, second = "id\udc80", "id\udc81"
+    line = rust.render_line({first: 1, second: 2}, "app", "info", "svc", "sent", timestamp="t")
+
+    pairs = _json_pairs(line)
+    assert [key for key, _ in pairs].count("id\ufffd") == 1
+    assert dict(pairs)["id\ufffd"] == 2
+
+
 @pytest.mark.parametrize(
     "value",
     [

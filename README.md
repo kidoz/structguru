@@ -370,8 +370,10 @@ traceback still ship:
 Integers outside the 64-bit range are written as JSON numbers, `int` and
 `float` subclasses (such as `numpy.float64`) are written by value, non-string
 mapping keys are rendered as strings (`{200: 3}` becomes `{"200": 3}`), and
-unpaired surrogates in text become U+FFFD. Markers are redacted like any other
-string. The policy applies to native `logger` fields and to `extra=` fields
+each unpaired surrogate in text becomes one U+FFFD while a split surrogate pair
+decodes to its character. Keys that render to the same text never produce
+duplicate JSON keys: the later value wins at the earlier key's position.
+Markers are redacted like any other string. The policy applies to native `logger` fields and to `extra=` fields
 bridged from the standard library alike.
 
 ```python

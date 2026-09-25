@@ -77,6 +77,50 @@ def test_native_picks_up_integration_contextvars() -> None:
         structguru.shutdown()
 
 
+@pytest.mark.parametrize("enrich", [False, True], ids=["fused", "enriched"])
+def test_fields_rendering_alike_never_duplicate_json_keys(enrich: bool) -> None:
+    # Distinct keys whose lone surrogates both become U+FFFD merge by Python
+    # key first (kwargs override bound, contextvars fill absent keys); bound
+    # and kwargs keys that then render alike collapse, the later one winning
+    # at the earlier one's position. A contextvar never overrides a bound or
+    # kwargs key that renders like it. The enrichment path, which merges in
+    # Python before rendering, must agree with the fused native merge.
+    first, second = "id\udc80", "id\udc81"
+    rendered = "id\ufffd"
+    structguru.configure(
+        service="svc",
+        target="memory",
+        metric_processor=(lambda _logger, _method, fields: fields) if enrich else None,
+    )
+    log = structguru.logger
+    log.bind(**{first: "bound-1", second: "bound-2"}).info("bound")
+    log.info("kwargs", **{first: "kwarg-1", second: "kwarg-2"})
+    log.bind(before=0, **{first: "bound"}).info("mixed", after=1, **{second: "kwarg"})
+    with log.contextualize(**{second: "context"}, user="context"):
+        log.bind(**{first: "bound"}, user="bound").info("contextvars")
+    with log.contextualize(**{first: "context"}):
+        log.info("contextvars and kwargs", **{second: "kwarg"})
+    with log.contextualize(**{first: "context-1", second: "context-2"}):
+        log.info("contextvars only")
+    _runtime.flush()
+    records = [json.loads(line, object_pairs_hook=list) for line in _runtime.drain_messages()]
+
+    for pairs in records:
+        keys = [key for key, _ in pairs]
+        assert len(keys) == len(set(keys)), keys
+    values = [dict(pairs) for pairs in records]
+    assert [record[rendered] for record in values] == [
+        "bound-2",
+        "kwarg-2",
+        "kwarg",
+        "bound",
+        "kwarg",
+        "context-2",
+    ]
+    assert [key for key, _ in records[2]][:3] == ["before", rendered, "after"]
+    assert values[3]["user"] == "bound"
+
+
 def test_env_var_auto_enable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STRUCTGURU_NATIVE_TARGET", "memory")
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")

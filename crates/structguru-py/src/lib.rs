@@ -6,6 +6,7 @@ use pyo3::types::{
     PyTuple, PyTupleMethods,
 };
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::time::Duration;
 use structguru_core::{Pipeline, RedactionPattern, StringWriter, Value};
 
@@ -87,17 +88,21 @@ fn validate_patterns(patterns: Vec<String>, allow_backtracking: bool) -> PyResul
 /// the hot path, prefer `render_line_with_config` + `RedactionConfig`, which
 /// compile patterns once at enable time.
 /// Convert a Python field mapping into owned `(key, Value)` entries for the core renderer.
+///
+/// Keys that render alike (see [`is_plain_key`]) collapse into one entry, the
+/// later value winning at the earlier key's position.
 fn convert_fields(fields: &Bound<'_, PyDict>) -> PyResult<Vec<(String, Value)>> {
     let mut entries: Vec<(String, Value)> = Vec::with_capacity(fields.len());
+    let mut plain = true;
     for item in fields.items().iter() {
         let pair = item.cast::<PyTuple>()?;
         let key = pair.get_item(0)?;
         let value = pair.get_item(1)?;
-        let key = string_to_owned(
-            key.cast::<PyString>()
-                .map_err(|_| PyTypeError::new_err("field keys must be strings"))?,
-        );
-        entries.push((key, convert_py_value(&value)?));
+        plain &= is_plain_key(&key);
+        entries.push((field_key(&key)?, convert_py_value(&value)?));
+    }
+    if !plain {
+        structguru_core::collapse_duplicate_keys(&mut entries);
     }
     Ok(entries)
 }
@@ -109,6 +114,15 @@ fn field_key(key: &Bound<'_, PyAny>) -> PyResult<String> {
     key.cast::<PyString>()
         .map(string_to_owned)
         .map_err(|_| PyTypeError::new_err("field keys must be strings"))
+}
+
+/// Whether `key` converts to exactly its own text: an exact `str` that is
+/// valid UTF-8. Distinct plain keys can never render alike, so only a mapping
+/// holding some other key — a lone surrogate, a `str` subclass with its own
+/// equality, a non-string key — needs its rendered keys de-duplicated.
+fn is_plain_key(key: &Bound<'_, PyAny>) -> bool {
+    key.cast_exact::<PyString>()
+        .is_ok_and(|text| text.to_str().is_ok())
 }
 
 /// Replace the value of an existing `key` in place, or append the entry.
@@ -124,32 +138,42 @@ fn upsert_entry(entries: &mut Vec<(String, Value)>, key: String, value: Value) {
 /// Reproduces the facade's dict merge: `{**bound, **kwargs}` keeps a bound
 /// key's position while taking the kwargs value, contextvars only fill keys
 /// that are still absent (`setdefault`), and `exception` is assigned last.
+/// Distinct keys that then render alike collapse, the later one in merge
+/// order winning at the earlier one's position, except that a contextvar
+/// never replaces a bound or kwargs key that renders like it.
 ///
-/// Each source dict is iterated with no Python code running in between: its
-/// pairs are collected before any value is converted, because conversion may
-/// run `isoformat()` or a dataclass property. The library never mutates a
-/// source in place — `bind()` replaces `_bound`, `kwargs` is private to the
-/// call, and the contextvars mapping is copy-on-write — so the iteration can
-/// never observe a size change.
+/// The pairs of every source are collected before any value is converted,
+/// because conversion may run `isoformat()` or a dataclass property. The
+/// library never mutates a source in place — `bind()` replaces `_bound`,
+/// `kwargs` is private to the call, and the contextvars mapping is
+/// copy-on-write — so the iteration can never observe a size change.
 fn merge_record_fields(
     bound: &Bound<'_, PyDict>,
     kwargs: &Bound<'_, PyDict>,
     contextvars: &Bound<'_, PyDict>,
     exception: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Vec<(String, Value)>> {
-    let mut entries: Vec<(String, Value)> = Vec::with_capacity(
-        bound.len() + kwargs.len() + contextvars.len() + usize::from(exception.is_some()),
-    );
     let mut pairs: Vec<(Bound<'_, PyAny>, Bound<'_, PyAny>)> =
-        Vec::with_capacity(bound.len().max(kwargs.len()).max(contextvars.len()));
-
-    // Bound keys are unique, so no position lookup is needed.
+        Vec::with_capacity(bound.len() + kwargs.len() + contextvars.len());
     pairs.extend(bound.iter());
-    for (key, value) in pairs.drain(..) {
+    let bound_end = pairs.len();
+    pairs.extend(kwargs.iter());
+    let kwargs_end = pairs.len();
+    pairs.extend(contextvars.iter());
+    // With plain keys, rendered-text equality is Python key equality, so the
+    // merge can run on the converted keys.
+    if !pairs.iter().all(|(key, _)| is_plain_key(key)) {
+        return merge_rendered_alike_fields(bound, kwargs, contextvars, exception);
+    }
+
+    let mut entries: Vec<(String, Value)> =
+        Vec::with_capacity(pairs.len() + usize::from(exception.is_some()));
+    let mut pairs = pairs.into_iter();
+    // Bound keys are unique, so no position lookup is needed.
+    for (key, value) in pairs.by_ref().take(bound_end) {
         entries.push((field_key(&key)?, convert_py_value(&value)?));
     }
-    pairs.extend(kwargs.iter());
-    for (key, value) in pairs.drain(..) {
+    for (key, value) in pairs.by_ref().take(kwargs_end - bound_end) {
         let key = field_key(&key)?;
         if RESERVED_FIELD_KEYS.contains(&key.as_str()) {
             continue;
@@ -157,8 +181,7 @@ fn merge_record_fields(
         let value = convert_py_value(&value)?;
         upsert_entry(&mut entries, key, value);
     }
-    pairs.extend(contextvars.iter());
-    for (key, value) in pairs.drain(..) {
+    for (key, value) in pairs {
         let key = field_key(&key)?;
         if entries.iter().any(|(existing, _)| *existing == key) {
             continue;
@@ -173,11 +196,35 @@ fn merge_record_fields(
     Ok(entries)
 }
 
+/// [`merge_record_fields`] for sources holding a key that is not plain (see
+/// [`is_plain_key`]): merge by Python key equality exactly as the Python-side
+/// [`merge_fields`] does for the enrichment hooks, then convert the merged
+/// mapping, collapsing keys that render alike. Both paths therefore render
+/// the same record.
+fn merge_rendered_alike_fields(
+    bound: &Bound<'_, PyDict>,
+    kwargs: &Bound<'_, PyDict>,
+    contextvars: &Bound<'_, PyDict>,
+    exception: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<(String, Value)>> {
+    let mut entries = convert_fields(&merge_fields(bound, kwargs, contextvars)?)?;
+    if let Some(exception) = exception {
+        let value = convert_py_value(exception)?;
+        upsert_entry(&mut entries, "exception".to_owned(), value);
+    }
+    Ok(entries)
+}
+
 /// Merge a record's field sources into a Python dict.
 ///
 /// Same semantics as the merge inside the fused `log` entry points, for the
 /// path where a Python hook (OpenTelemetry enrichment, the metric or Sentry
 /// processor) needs the merged mapping before rendering.
+///
+/// A contextvar fills only a key that is still absent. When some key is not
+/// plain (see [`is_plain_key`]), absent also means that no bound or kwargs
+/// key renders alike: rendering collapses such keys with the later one
+/// winning, which would otherwise let the contextvar override the call.
 #[pyfunction]
 fn merge_fields<'py>(
     bound: &Bound<'py, PyDict>,
@@ -194,10 +241,30 @@ fn merge_fields<'py>(
         }
         merged.set_item(key, value)?;
     }
+    if contextvars.is_empty() {
+        return Ok(merged);
+    }
+    let plain = merged.iter().all(|(key, _)| is_plain_key(&key))
+        && contextvars.iter().all(|(key, _)| is_plain_key(&key));
+    let taken: HashSet<String> = if plain {
+        HashSet::new()
+    } else {
+        merged
+            .iter()
+            .filter_map(|(key, _)| key.cast::<PyString>().ok().map(string_to_owned))
+            .collect()
+    };
     for (key, value) in contextvars.iter() {
-        if !merged.contains(&key)? {
-            merged.set_item(key, value)?;
+        if merged.contains(&key)? {
+            continue;
         }
+        if !plain
+            && let Ok(text) = key.cast::<PyString>()
+            && taken.contains(&string_to_owned(text))
+        {
+            continue;
+        }
+        merged.set_item(key, value)?;
     }
     Ok(merged)
 }
@@ -1303,6 +1370,7 @@ fn convert_dict(
     containers: &mut ContainerStack,
 ) -> PyResult<Value> {
     let mut entries = Vec::with_capacity(dict.len());
+    let mut plain = true;
     // Snapshot before conversion invokes Python (isoformat/dataclass properties
     // can mutate this dict, including from another free-threaded worker).
     // Iterating the live dict would panic when its size changes.
@@ -1310,8 +1378,13 @@ fn convert_dict(
         let pair = item.cast::<PyTuple>()?;
         let key = pair.get_item(0)?;
         let value = pair.get_item(1)?;
-        let key = convert_map_key(&key, depth, containers)?;
+        let (key, plain_key) = convert_map_key(&key, depth, containers)?;
+        plain &= plain_key;
         entries.push((key, convert_py_value_inner(&value, depth + 1, containers)?));
+    }
+    // `1` and `"1"`, or `None` and NaN, are distinct keys that render alike.
+    if !plain {
+        structguru_core::collapse_duplicate_keys(&mut entries);
     }
     Ok(Value::Map(entries))
 }
@@ -1321,22 +1394,28 @@ fn convert_dict(
 /// Strings are used as-is. Any other key goes through the value conversion: a
 /// string result (Enum, datetime, UUID) is used directly, a scalar result uses
 /// its JSON text (`1`, `1.5`, `true`, `null`), and a container result — a
-/// tuple, a dataclass — becomes `<unsupported: T>`.
+/// tuple, a dataclass — becomes `<unsupported: T>`. Also returns whether the
+/// key is plain (see [`is_plain_key`]); the caller collapses keys that render
+/// alike.
 fn convert_map_key(
     key: &Bound<'_, PyAny>,
     depth: usize,
     containers: &mut ContainerStack,
-) -> PyResult<String> {
+) -> PyResult<(String, bool)> {
     if let Ok(text) = key.cast::<PyString>() {
-        return Ok(string_to_owned(text));
+        return Ok(match text.to_str() {
+            Ok(valid) => (valid.to_owned(), key.is_exact_instance_of::<PyString>()),
+            Err(_) => (decode_surrogates(text), false),
+        });
     }
-    Ok(match convert_py_value_inner(key, depth + 1, containers)? {
+    let text = match convert_py_value_inner(key, depth + 1, containers)? {
         Value::String(text) => text,
         Value::List(_) | Value::Map(_) => marker_text("unsupported", key),
         scalar => scalar
             .to_json_string()
             .unwrap_or_else(|_| marker_text("unsupported", key)),
-    })
+    };
+    Ok((text, false))
 }
 
 fn convert_items<'py>(

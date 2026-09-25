@@ -12,7 +12,7 @@ mod worker;
 pub use clock::now_iso8601;
 pub use filter::{Decision, FilterStats, Pipeline, RateLimiter, RecordFilter, Sampler};
 pub use render::{DEFAULT_SENSITIVE_KEYS, RedactionPattern, render_line, render_line_console};
-pub use value::{Value, ValueStats};
+pub use value::{Value, ValueStats, collapse_duplicate_keys};
 pub use worker::{
     EnqueueError, MemorySink, MemorySinkHandle, MultiSink, RotatingFileSink, SinkError, StdoutSink,
     StringSink, StringWriter, WorkerMetrics, WriteSink,
