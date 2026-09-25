@@ -899,6 +899,12 @@ logger.add(io.StringIO())
     assert status == 1 and "arg-type" in stdout, stdout + stderr
 
 
+def test_logger_repr_hides_bound_and_option_values() -> None:
+    log = Logger(name="svc").bind(access_token="CANARY-BOUND").opt(exception=ValueError("CANARY"))
+    assert "CANARY" not in repr(log)
+    assert "svc" in repr(log)
+
+
 class TestRemoveById:
     def test_ids_are_process_wide(self) -> None:
         _runtime.configure(target="null")

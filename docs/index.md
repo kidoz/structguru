@@ -102,7 +102,11 @@ update(otel=True, structured_exceptions=True)
 ```
 
 OpenTelemetry support is optional and becomes a no-op when its extra is not
-installed. Structured exceptions can include bounded, redacted local values.
+installed. Structured exceptions can include bounded, redacted local values:
+a local named like a sensitive key is redacted, as is any value under a
+sensitive key inside a mapping, list, tuple, set, dataclass, or
+`SimpleNamespace`. Other objects' own `repr()` text is covered by
+`sensitive_patterns`, which see each local whole before it is truncated.
 
 ## Next steps
 

@@ -67,7 +67,7 @@ impl RedactionPattern {
     /// limit exceeded) fails CLOSED: the entire string becomes `[REDACTED]`.
     /// Emitting a value the configured pattern could not check risks leaking
     /// exactly the data redaction exists to mask.
-    fn replace_all<'t>(&self, text: &'t str, replacement: &str) -> Cow<'t, str> {
+    pub fn replace_all<'t>(&self, text: &'t str, replacement: &str) -> Cow<'t, str> {
         match self {
             Self::Linear(re) if re.is_match(text) => re.replace_all(text, replacement),
             Self::Linear(_) => Cow::Borrowed(text),

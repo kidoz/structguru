@@ -437,6 +437,14 @@ class Logger:
     _handlers: dict[HandlerId, logging.Handler] = field(default_factory=dict)
     _lock: _SinkLock = field(default_factory=_SinkLock, repr=False)
 
+    def __repr__(self) -> str:
+        """Name the logger without its bound values, ``opt()`` state, or sinks.
+
+        A logger held in a local reaches exception locals and debugging output
+        through its ``repr()``.
+        """
+        return f"<{type(self).__module__}.{type(self).__qualname__} name={self.name!r}>"
+
     # -- context helpers ----------------------------------------------------
 
     def _clone(self, **overrides: Any) -> Logger:

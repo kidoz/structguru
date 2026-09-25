@@ -672,6 +672,21 @@ impl RuntimeConfig {
     fn pattern_count(&self) -> usize {
         self.patterns.len()
     }
+
+    /// Apply the compiled value patterns to `text` in declaration order, as
+    /// the renderer does to every string field.
+    ///
+    /// Structured exception locals call this on each whole rendering before
+    /// truncating it, so a match that straddles the cut is still redacted.
+    fn redact_patterns(&self, text: &str) -> String {
+        self.patterns
+            .iter()
+            .fold(text.to_owned(), |current, pattern| {
+                pattern
+                    .replace_all(&current, &self.replacement)
+                    .into_owned()
+            })
+    }
 }
 
 /// Merge, redact, and render one record in the configured format.

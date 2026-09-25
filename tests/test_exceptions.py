@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import argparse
+import enum
 import json
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from types import MappingProxyType, SimpleNamespace
+from typing import Any, NamedTuple
 
 import pytest
 
@@ -361,3 +367,237 @@ class TestBuildExceptionDict:
         assert frame["locals"]["answer"] == "41"
         stripped = [{k: v for k, v in f.items() if k != "locals"} for f in with_locals["frames"]]
         assert stripped == without["frames"]
+
+
+@dataclass
+class _Account:
+    name: str
+    password: str
+
+
+@dataclass
+class _MaskedDsn:
+    dsn: str
+
+    def __repr__(self) -> str:
+        return "_MaskedDsn(<hidden>)"
+
+
+@dataclass
+class _PartialRepr:
+    name: str
+    internal: str = field(repr=False)
+
+
+class _Credentials(NamedTuple):
+    user: str
+    token: str
+
+
+class _LoudDict(dict[str, Any]):
+    def __repr__(self) -> str:
+        raise AssertionError("a walked container's own __repr__ must not run")
+
+
+class _Field(enum.Enum):
+    PASSWORD = "pw"  # matched by name
+    CREDENTIAL = "token"  # matched by value
+    USER = "user"
+
+
+class _Flag(enum.Flag):
+    A = 1
+    B = 2
+
+
+def _frame_locals(fn: Callable[[], None], **kwargs: Any) -> dict[str, str]:
+    try:
+        fn()
+    except ValueError as exc:
+        result = build_exception_dict(exc, include_locals=True, **kwargs)
+    else:
+        raise AssertionError("fn did not raise")
+    assert result is not None
+    locals_: dict[str, str] = result["frames"][-1]["locals"]
+    return locals_
+
+
+class TestLocalRedaction:
+    """Values under sensitive keys stay redacted however deeply a local nests them."""
+
+    def test_sensitive_keys_inside_values_are_redacted(self) -> None:
+        def handler() -> None:
+            creds = {"password": "CANARY-PW", "user": "alice"}
+            headers = {"Authorization": "Bearer CANARY-HDR", "Accept": "json"}
+            nested = [({"inner": {"api_key": "CANARY-KEY"}},), "visible"]
+            account = _Account("alice", "CANARY-DC")
+            namespace = SimpleNamespace(token="CANARY-NS", region="eu")
+            pair = _Credentials("alice", "CANARY-NT")
+            proxy = MappingProxyType({"secret": "CANARY-MP"})
+            loud = _LoudDict(cookie="CANARY-LD")
+            _ = (creds, headers, nested, account, namespace, pair, proxy, loud)
+            raise ValueError("x")
+
+        locals_ = _frame_locals(handler)
+        assert "CANARY" not in json.dumps(locals_)
+        assert locals_["creds"] == "{'password': [REDACTED], 'user': 'alice'}"
+        assert locals_["headers"] == "{'Authorization': [REDACTED], 'Accept': 'json'}"
+        assert locals_["nested"] == "[({'inner': {'api_key': [REDACTED]}},), 'visible']"
+        assert locals_["account"] == "_Account(name='alice', password=[REDACTED])"
+        assert locals_["namespace"] == "namespace(token=[REDACTED], region='eu')"
+        assert locals_["pair"] == "_Credentials(user='alice', token=[REDACTED])"
+        assert locals_["proxy"] == "mappingproxy({'secret': [REDACTED]})"
+        assert locals_["loud"] == "_LoudDict({'cookie': [REDACTED]})"
+
+    def test_namespaces_byte_and_enum_keys_and_pairs_are_redacted(self) -> None:
+        def handler() -> None:
+            args = argparse.Namespace(user="alice", password="CANARY-AP")
+            raw = {b"Token": "CANARY-BK", b"\xff": "kept", b"user": "alice"}
+            by_enum = {
+                _Field.PASSWORD: "CANARY-EN",
+                _Field.CREDENTIAL: "CANARY-EV",
+                _Field.USER: 1,
+            }
+            flags = {_Flag.A | _Flag.B: "kept"}
+            headers = [("Authorization", "CANARY-PR"), ("Accept", "json"), ("x", "y", "z")]
+            parser = argparse.ArgumentParser(prog="tool", add_help=False)
+            _ = (args, raw, by_enum, flags, headers, parser)
+            raise ValueError("x")
+
+        locals_ = _frame_locals(handler)
+        assert "CANARY" not in json.dumps(locals_)
+        assert locals_["args"] == "Namespace(user='alice', password=[REDACTED])"
+        assert locals_["raw"] == "{b'Token': [REDACTED], b'\\xff': 'kept', b'user': 'alice'}"
+        assert locals_["by_enum"] == (
+            "{<_Field.PASSWORD: 'pw'>: [REDACTED], <_Field.CREDENTIAL: 'token'>: [REDACTED], "
+            "<_Field.USER: 'user'>: 1}"
+        )
+        assert locals_["flags"].endswith(": 'kept'}")
+        assert locals_["headers"] == (
+            "[('Authorization', [REDACTED]), ('Accept', 'json'), ('x', 'y', 'z')]"
+        )
+        assert locals_["parser"].startswith("ArgumentParser(prog='tool'")
+
+    def test_custom_sensitive_keys_replace_the_defaults(self) -> None:
+        def handler() -> None:
+            payload = {"pin": "CANARY", "password": "shown"}
+            _ = payload
+            raise ValueError("x")
+
+        locals_ = _frame_locals(handler, sensitive_keys=frozenset({"pin"}))
+        assert locals_["payload"] == "{'pin': [REDACTED], 'password': 'shown'}"
+
+    def test_dataclass_repr_choices_are_honoured(self) -> None:
+        def handler() -> None:
+            masked = _MaskedDsn("postgres://user:CANARY@db")
+            partial = _PartialRepr("visible", "CANARY")
+            _ = (masked, partial)
+            raise ValueError("x")
+
+        locals_ = _frame_locals(handler)
+        assert locals_["masked"] == "_MaskedDsn(<hidden>)"
+        assert locals_["partial"] == "_PartialRepr(name='visible')"
+
+    def test_walk_is_cycle_safe_and_bounded(self) -> None:
+        def handler() -> None:
+            loop: dict[str, Any] = {"token": "CANARY"}
+            loop["self"] = loop
+            chain: list[Any] = []
+            chain.append(chain)
+            deep: dict[str, Any] = {}
+            current = deep
+            for _ in range(100):
+                current["next"] = current = {}
+            wide = list(range(10_000))
+            _ = (loop, chain, deep, wide)
+            raise ValueError("x")
+
+        locals_ = _frame_locals(handler, max_local_repr=100_000)
+        assert locals_["loop"] == "{'token': [REDACTED], 'self': ...}"
+        assert locals_["chain"] == "[...]"
+        assert locals_["deep"].count("{") < 20
+        assert locals_["deep"].endswith("...}}}}}}}}")
+        assert locals_["wide"].endswith(", ...]")
+        assert len(locals_["wide"]) < 1_000
+
+    def test_oversized_values_are_truncated_without_rendering_them_whole(self) -> None:
+        def handler() -> None:
+            text = "x" * 1_000_000
+            _ = text
+            raise ValueError("x")
+
+        rendered = _frame_locals(handler, max_local_repr=10)["text"]
+        assert rendered.startswith("'xxxxxxxxx...<")
+        assert rendered.endswith("+ more>")
+
+    def test_patterns_see_the_whole_repr_before_truncation(self) -> None:
+        seen: list[str] = []
+
+        def redact(text: str) -> str:
+            seen.append(text)
+            return text.replace("CANARY-SECRET", "[REDACTED]")
+
+        def handler() -> None:
+            note = "prefix.. CANARY-SECRET and more text after it"
+            _ = note
+            raise ValueError("x")
+
+        rendered = _frame_locals(handler, max_local_repr=16, redact=redact)["note"]
+        assert "'prefix.. CANARY-SECRET and more text after it'" in seen
+        assert rendered == "'prefix.. [REDAC...<28 more>"
+
+    def test_failing_pattern_callback_fails_closed(self) -> None:
+        def redact(text: str) -> str:
+            raise RuntimeError("boom")
+
+        def handler() -> None:
+            note = "CANARY"
+            _ = note
+            raise ValueError("x")
+
+        assert _frame_locals(handler, redact=redact)["note"] == "[REDACTED]"
+
+
+def test_runtime_locals_redact_patterns_before_truncation_and_hide_bound_loggers() -> None:
+    from structguru import _runtime
+    from structguru.core import Logger
+
+    _runtime.configure(
+        target="memory",
+        structured_exceptions=True,
+        exception_include_locals=True,
+        exception_max_local_repr=30,
+        sensitive_patterns=[r"tok_[A-Za-z0-9]{24}"],
+    )
+
+    def handler() -> None:
+        log = Logger().bind(access_token="CANARY-BOUND")
+        creds = {"password": "CANARY-PW"}
+        note = "prefix........ tok_ABCDEFGHIJKLMNOPQRSTUVWX"
+        _ = (log, creds, note)
+        raise ValueError("x")
+
+    try:
+        handler()
+    except ValueError:
+        Logger().exception("boom")
+    _runtime.flush()
+    line = _runtime.drain_messages()[-1]
+    frame_locals = json.loads(line)["exception"]["frames"][-1]["locals"]
+    assert "CANARY" not in line
+    assert "tok_ABC" not in line
+    assert frame_locals["note"] == "'prefix........ [REDACTED]'"
+    assert frame_locals["creds"] == "{'password': [REDACTED]}"
+
+
+def test_locals_pattern_pass_is_wired_only_when_patterns_are_configured() -> None:
+    from structguru import _runtime
+
+    _runtime.configure(target="null", structured_exceptions=True, exception_include_locals=True)
+    state = _runtime.current_runtime()
+    assert state is not None and state.exception_config is not None
+    assert state.exception_config["redact"] is None
+    _runtime.update(sensitive_patterns=[r"tok_\w+"], pattern_replacement="<tok>")
+    state = _runtime.current_runtime()
+    assert state is not None and state.exception_config is not None
+    assert state.exception_config["redact"]("a tok_123 b") == "a <tok> b"

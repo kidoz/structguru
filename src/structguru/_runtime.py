@@ -636,9 +636,10 @@ def configure(settings: Settings | None = None, **changes: Unpack[SettingsChange
     ``structured_exceptions=True`` renders the ``exception`` field as the
     structured dict produced by
     :func:`structguru.exceptions.build_exception_dict` (with the
-    ``exception_*`` knobs mirroring the processor's parameters and
-    ``sensitive_keys`` reused for locals redaction) instead of the formatted
-    traceback string.
+    ``exception_*`` knobs mirroring the processor's parameters,
+    ``sensitive_keys`` reused for locals redaction, and ``sensitive_patterns``
+    applied to each local's whole rendering before it is truncated) instead of
+    the formatted traceback string.
 
     ``exception_carets=False`` omits the PEP 657 position markers (the
     ``~~~^^^`` lines under each frame) from formatted tracebacks. CPython
@@ -809,6 +810,8 @@ def _apply_settings(settings: Settings, *, expected: _RuntimeState | None = None
                 if sensitive_keys is not None
                 else None
             ),
+            # Patterns must see each local's whole rendering before truncation.
+            "redact": new_config.redact_patterns if new_config.pattern_count else None,
         }
 
     new_filter: Any = None
