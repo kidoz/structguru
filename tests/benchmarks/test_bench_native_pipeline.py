@@ -195,6 +195,8 @@ def test_bench_native_per_record_latency(benchmark: Any, tmp_path: Any, sink: st
         assert metrics is not None
         assert metrics["written"] == metrics["enqueued"]
         assert metrics["dropped"] == 0
+        if benchmark.disabled:  # --benchmark-disable runs each round once, with no stats
+            return
         timings = benchmark.stats.stats.sorted_data
         assert len(timings) == _LATENCY_ROUNDS
         for label, fraction in (("p50_us", 0.5), ("p99_us", 0.99), ("p999_us", 0.999)):
