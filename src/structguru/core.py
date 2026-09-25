@@ -33,8 +33,8 @@ from structguru import _runtime
 from structguru._contextvars import _ctx, bound_contextvars
 from structguru._levels import METHOD_LEVELS
 from structguru._native_dispatch import callback_scope, in_callback
-from structguru.config import _to_logging_level
 from structguru.otel import add_otel_context
+from structguru.settings import _level_number
 
 HandlerId: TypeAlias = int
 
@@ -200,9 +200,10 @@ class _RootRelay(logging.Handler):
     raw deliveries already in progress.
     """
 
-    def __init__(self, sink: logging.Handler) -> None:
+    def __init__(self, sink: logging.Handler, threshold: int) -> None:
         super().__init__()
         self._sink = sink
+        self._threshold = threshold
         self._condition = threading.Condition()
         self._active = 0
         self._detached = False
@@ -212,8 +213,9 @@ class _RootRelay(logging.Handler):
 
     def handle(self, record: logging.LogRecord) -> bool:
         # The relay stays at NOTSET so the root logger offers every record;
-        # the sink's own level applies here, as ``callHandlers`` would apply it.
-        if record.levelno < self._sink.level or in_callback():
+        # the ``add()`` level applies here, as ``callHandlers`` would apply it.
+        # A caller's handler keeps its own level for the loggers it serves.
+        if record.levelno < self._threshold or in_callback():
             return False
         with self._condition:
             if self._detached:
@@ -259,13 +261,18 @@ _root_attach_lock = threading.Lock()
 _stdlib_bridge_active = False
 
 
-def _attach_to_root(handler: logging.Handler) -> None:
-    """Register *handler* for third-party records, unless the bridge supersedes it."""
+def _attach_to_root(handler: logging.Handler, threshold: int) -> None:
+    """Register *handler* for third-party records, unless the bridge supersedes it.
+
+    *threshold* is the ``add()`` level; the latest ``add()`` of a handler sets
+    it, and the handler's own level is left alone.
+    """
     with _root_attach_lock:
         relay = _root_relays.get(handler)
         if relay is None:
-            relay = _RootRelay(handler)
+            relay = _RootRelay(handler, threshold)
             _root_relays[handler] = relay
+        relay._threshold = threshold
         if _stdlib_bridge_active:
             return
         logging.getLogger().addHandler(relay)
@@ -642,7 +649,7 @@ class Logger:
 
     # -- sink (handler) management ------------------------------------------
 
-    def add(self, sink: Sink, *, level: str | None = None) -> HandlerId:
+    def add(self, sink: Sink, *, level: str | int | None = None) -> HandlerId:
         """Add a sink that receives rendered log lines.
 
         Parameters
@@ -652,7 +659,9 @@ class Logger:
             a file path (``str``/``Path``), a stream-like object with ``.write``,
             or a :class:`logging.Handler` (for third-party stdlib interop).
         level:
-            Minimum level for this sink. Applies to every sink type — it gates
+            Minimum level for this sink: a case-insensitive name or a
+            non-negative integer, validated like ``configure(level=...)``
+            (``ValueError`` otherwise). Applies to every sink type — it gates
             native delivery at the dispatcher. Defaults to all levels.
 
         Returns
@@ -671,6 +680,12 @@ class Logger:
         ``BaseException`` subclasses, are isolated on the worker so later
         records and lifecycle operations can complete.
 
+        A :class:`logging.Handler` is used as given: its own formatter and
+        filters apply to each record, whose message is the rendered line, and
+        its level and formatter are left unchanged for the loggers it already
+        serves. Only ``level`` gates what this sink receives.
+        :meth:`remove` closes it.
+
         Third-party records arrive raw (unrendered) via the stdlib root logger.
         Install the bridge (``structguru.integrations.stdlib``) to receive them
         rendered and redacted through the native path instead; while it is
@@ -678,14 +693,17 @@ class Logger:
         sees the same record twice. :meth:`remove` waits for raw deliveries in
         progress as it does for native ones.
         """
+        # Validate before opening a file or registering anything. Unset means
+        # NOTSET (0) — "all levels", as documented. Inheriting the root logger's
+        # level instead would silently gate the stdlib path at WARNING (the
+        # default on an unconfigured root) while the native path still
+        # delivered everything.
+        threshold = logging.NOTSET if level is None else _level_number(level)
         handler = _make_handler(sink)
-        # One threshold for both delivery paths. Unset means NOTSET (0) — "all
-        # levels", as documented. Inheriting the root logger's level here instead
-        # would silently gate the stdlib path at WARNING (the default on an
-        # unconfigured root) while the native path still delivered everything.
-        threshold = _to_logging_level(level) if level else logging.NOTSET
-        handler.setLevel(threshold)
-        handler.setFormatter(logging.Formatter("%(message)s"))
+        if handler is not sink:
+            # Handlers built here pass the rendered line through verbatim.
+            handler.setLevel(threshold)
+            handler.setFormatter(logging.Formatter("%(message)s"))
 
         native_callback = (
             sink
@@ -702,7 +720,7 @@ class Logger:
             ),
         )
 
-        _attach_to_root(handler)
+        _attach_to_root(handler, threshold)
 
         with _id_counter_lock:
             handler_id = next(_id_counter)

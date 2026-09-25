@@ -77,7 +77,7 @@ sink receives structguru records and is attached to the stdlib root logger for
 third-party records. Native delivery uses a bounded queue and is drained on
 flush, reconfiguration, `shutdown()`, fork handling, and interpreter exit.
 Handler ids are process-wide, so any logger can remove any sink; an unknown id
-raises `ValueError`.
+raises `ValueError`. A stdlib handler keeps its own level and formatter.
 
 For a primary rotating file sink, configure it directly:
 

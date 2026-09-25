@@ -928,3 +928,47 @@ class TestRemoveById:
         owner.remove()
         assert owner._handlers == {}
         Logger().remove(kept_elsewhere)
+
+
+def test_add_leaves_a_user_handler_unmodified() -> None:
+    _runtime.configure(target="null")
+    buffer = io.StringIO()
+    handler = logging.StreamHandler(buffer)
+    formatter = logging.Formatter("APP %(levelname)s: %(message)s")
+    handler.setFormatter(formatter)
+    handler.setLevel(logging.ERROR)
+    handler_id = Logger().add(handler)
+    try:
+        assert handler.level == logging.ERROR
+        assert handler.formatter is formatter
+        logging.getLogger("third.party").warning("raw warning")
+        Logger().info("native info")
+        _runtime.flush()
+    finally:
+        Logger().remove(handler_id)
+    assert handler.level == logging.ERROR
+    assert handler.formatter is formatter
+    output = buffer.getvalue()
+    assert "APP WARNING: raw warning" in output
+    assert 'APP INFO: {"logger"' in output
+
+
+class TestAddLevelValidation:
+    @pytest.mark.parametrize("level, threshold", [(30, 30), ("warning", 30), (0, 0)])
+    def test_levels_parse_like_configure(self, level: str | int, threshold: int) -> None:
+        _runtime.configure(target="null")
+        log = Logger()
+        handler_id = log.add(io.StringIO(), level=level)
+        try:
+            assert log._handlers[handler_id].level == threshold
+        finally:
+            log.remove(handler_id)
+
+    @pytest.mark.parametrize("level", ["TYPO", -1, True, 2.5])
+    def test_invalid_levels_raise_before_registering(self, level: object) -> None:
+        log = Logger()
+        before = dict(core._sinks)
+        with pytest.raises(ValueError, match="level must be"):
+            log.add(io.StringIO(), level=level)  # type: ignore[arg-type]
+        assert core._sinks == before
+        assert log._handlers == {}
