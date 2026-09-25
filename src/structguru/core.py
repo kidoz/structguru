@@ -581,16 +581,40 @@ class _Catcher(ContextDecorator):
 
     def __call__(self, func: _F) -> _F:
         """Wrap synchronous calls or the awaited execution of a coroutine."""
+        catcher = self._for_function(func)
         if inspect.iscoroutinefunction(func):
 
             @functools.wraps(func)
             async def wrapped(*args: Any, **kwargs: Any) -> Any:
-                with self._recreate_cm():
+                with catcher:
                     return await func(*args, **kwargs)
                 return None
 
             return cast(_F, wrapped)
-        return super().__call__(func)
+
+        @functools.wraps(func)
+        def wrapped_sync(*args: Any, **kwargs: Any) -> Any:
+            with catcher:
+                return func(*args, **kwargs)
+            return None
+
+        return cast(_F, wrapped_sync)
+
+    def _for_function(self, func: Callable[..., Any]) -> _Catcher:
+        """Log under the decorated function's module when the logger has no name.
+
+        Frame walking would find the event loop (coroutines) or a wrapper's
+        module instead of the code that owns the failure.
+        """
+        module = getattr(func, "__module__", None)
+        if (
+            self._logger.name is not None
+            or not isinstance(module, str)
+            or not (inspect.isroutine(func) or inspect.isclass(func))
+        ):
+            return self
+        logger = self._logger._clone(name=module)
+        return _Catcher(logger, self._exception, self._level, self._message, self._reraise)
 
     def __exit__(
         self,

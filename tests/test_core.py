@@ -1005,6 +1005,30 @@ class TestPlaceholderRedaction:
         assert _memory_records()[-1]["message"] == "{'password': 'shown'}"
 
 
+class TestCatchLoggerName:
+    @pytest.fixture
+    def target(self) -> dict[str, Any]:
+        namespace: dict[str, Any] = {"__name__": "catch_target"}
+        exec(
+            "def fail():\n    raise ValueError('sync')\n"
+            "async def afail():\n    raise ValueError('async')\n",
+            namespace,
+        )
+        return namespace
+
+    def test_decorators_use_the_decorated_function_module(self, target: dict[str, Any]) -> None:
+        import asyncio
+
+        _runtime.configure(target="memory")
+        Logger().catch()(target["fail"])()
+        asyncio.run(Logger().catch()(target["afail"])())
+        with Logger().catch():
+            raise ValueError("block")
+        Logger(name="explicit").catch()(target["fail"])()
+        names = [record["logger"] for record in _memory_records()]
+        assert names == ["catch_target", "catch_target", __name__, "explicit"]
+
+
 class TestRemoveById:
     def test_ids_are_process_wide(self) -> None:
         _runtime.configure(target="null")
