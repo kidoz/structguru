@@ -511,7 +511,11 @@ def format_stack() -> str:
     instead of at structguru internals.
     """
     frame: Any = sys._getframe()
-    while frame is not None and frame.f_globals.get("__name__", "").startswith("structguru"):
+    while frame is not None:
+        # Only the package itself: ``structguru_ext`` and friends are user code.
+        module = frame.f_globals.get("__name__", "")
+        if module != "structguru" and not module.startswith("structguru."):
+            break
         frame = frame.f_back
     sio = io.StringIO()
     sio.write("Stack (most recent call last):\n")

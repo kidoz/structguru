@@ -1252,3 +1252,13 @@ class TestBraceEdgeCases:
         record = _memory_records()[-1]
         assert record["message"] == "val True 1"
         assert "ValueError: kept" in record["exception"]
+
+
+def test_stack_keeps_frames_of_modules_sharing_the_package_prefix() -> None:
+    _runtime.configure(target="memory")
+    namespace: dict[str, Any] = {"__name__": "structguru_ext", "logger": Logger()}
+    exec("def helper():\n    logger.info('from ext', stack_info=True)\n", namespace)
+    namespace["helper"]()
+    record = _memory_records()[-1]
+    assert record["logger"] == "structguru_ext"
+    assert record["stack"].splitlines()[-1].strip() == 'File "<string>", line 2, in helper'
