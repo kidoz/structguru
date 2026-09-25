@@ -51,9 +51,11 @@ drain those records. A call still formatting, running a hook, or waiting for que
 space can reach its writer after closure. Its native delivery is rejected and
 increments `lifecycle_metrics()["rejected"]`, without a queue-full warning. This
 counter is cumulative across configuration changes and shutdown, starts at zero in
-a forked child, and excludes calls begun while logging is disabled. A synchronous
-stream may already have received a record whose native delivery was rejected.
-The snapshot can increase as concurrent calls finish; no delivery retry is performed.
+a forked child, and excludes calls begun while logging is disabled. The synchronous
+stream, callable sinks, and the Sentry hook follow the native writer's outcome: a
+rejected record reaches none of them, and a record accepted just before a
+reconfiguration reaches all of them. The snapshot can increase as concurrent calls
+finish; no delivery retry is performed.
 
 `writer_metrics()` describes the current writer and returns `None` after shutdown.
 Its `dropped` counter means queue overflow; `sink_errors` means sink-operation

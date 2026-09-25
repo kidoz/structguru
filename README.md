@@ -421,7 +421,7 @@ Behavior notes:
 - **`stack_info` is supported natively**: the stack is captured in Python and rendered in the same position as `StackInfoRenderer` (`stack` between `service` and `message`). Unlike the standard path, the stack ends at the *user's* calling frame (structguru-internal frames are skipped, the way structlog skips its own).
 - **Console mode** (`format="console"`): renders colored, human-readable lines instead of JSON — structguru's own stable dev format (`<timestamp> [<LEVEL>] <message>  k=v`), with ANSI colors by default on a TTY. Override with `colors=True/False`.
 - **File sinks** (`file_path=...`): write to a rotating file natively. Defaults mirror `RotatingFileHandler` (50 MB, 5 backups); configure via `file_max_bytes`/`file_backup_count`. Set `also_stdout=True` to mirror output to both file and stdout (e.g. container + persistent log).
-- **Callable sinks** (`callable_sinks=[fn, ...]`): use a bounded queue (`callable_queue_maxsize=1024`). `overflow="block"` provides lossless backpressure; `overflow="drop"` reports `callable_dropped` metrics. Flush and lifecycle operations drain queued calls.
+- **Callable sinks** (`callable_sinks=[fn, ...]`): use a bounded queue (`callable_queue_maxsize=1024`). `overflow="block"` provides lossless backpressure; `overflow="drop"` reports `callable_dropped` metrics. One background thread at a time calls the sinks, in log order, also across reconfiguration; `logger.add()` never waits for the queue. Sink exceptions are counted in `callable_errors` with a rate-limited warning. Flush and lifecycle operations drain queued calls; a sink that makes no progress for 10 seconds is abandoned with a warning instead of blocking them.
 - **Sentry integration** (`sentry_processor=SentryProcessor(...)`): receives the already-redacted event and raw `exc_info` only for exception capture.
 - **Scope**: the native renderer covers JSON and console rendering, file/stdout/callable sinks, redaction, sampling/rate limiting, metrics, exceptions, and stack information. `logger.add()` sinks receive native and stdlib records.
 
@@ -429,9 +429,9 @@ Shutdown and reconfiguration drain records already accepted by the native queue.
 Calls still formatting or waiting for space may be rejected when their writer closes,
 even in block mode. `lifecycle_metrics()["rejected"]` counts these native deliveries
 without queue-full warnings and survives shutdown and configuration changes; forked
-children start at zero. Another destination, such as a synchronous stream, may already
-have received the event. Calls begun while logging is disabled are no-ops and are not
-counted. See the [lifecycle contract](docs/api/config.md#runtime-control) for details.
+children start at zero. A rejected record reaches no other destination either: the
+synchronous stream, callable sinks, and Sentry follow the native writer's outcome.
+Calls begun while logging is disabled are no-ops and are not counted. See the [lifecycle contract](docs/api/config.md#runtime-control) for details.
 
 ## Framework integrations
 

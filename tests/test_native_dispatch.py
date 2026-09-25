@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import textwrap
 import threading
 import time
+import warnings
 
 import pytest
 
+import structguru
+from structguru import _runtime
 from structguru._native_dispatch import CallableSinkDispatcher
 
 
@@ -453,3 +457,394 @@ def test_remove_finalizer_runs_at_once_when_nothing_is_queued() -> None:
     dispatcher.remove(sink, finalizer=lambda: closed.append("closed"))
     assert closed == ["closed"]
     dispatcher.disable()
+
+
+def test_reconfiguration_delivers_from_one_thread_in_enqueue_order() -> None:
+    """A replacement generation accepts at once but waits for its predecessor."""
+    lock = threading.Lock()
+    entered, release = threading.Event(), threading.Event()
+    running = 0
+    overlaps: list[str] = []
+    delivered: list[str] = []
+
+    def sink(line: str) -> None:
+        nonlocal running
+        message = json.loads(line)["message"]
+        with lock:
+            running += 1
+            if running > 1:
+                overlaps.append(message)
+        if message == "r0":
+            entered.set()
+            release.wait(5)
+        with lock:
+            delivered.append(message)
+            running -= 1
+
+    _runtime.configure(target="null")
+    token = structguru.logger.add(sink)
+    dispatcher = _runtime._callable_dispatcher
+    updater = threading.Thread(target=structguru.update, kwargs={"service": "next"}, daemon=True)
+    try:
+        structguru.logger.info("r0")
+        assert entered.wait(3)
+        for i in range(1, 4):
+            structguru.logger.info(f"r{i}")
+        old = dispatcher._channel
+        updater.start()
+        assert _wait_for(lambda: dispatcher._channel is not old), "update() kept the generation"
+        for i in range(4, 7):
+            structguru.logger.info(f"r{i}")
+        # The new generation must not overtake the blocked backlog.
+        assert not _wait_for(lambda: len(delivered) > 0, timeout=0.2), delivered
+    finally:
+        release.set()
+        updater.join(5)
+    assert not updater.is_alive()
+    structguru.flush()
+    assert delivered == [f"r{i}" for i in range(7)]
+    assert overlaps == []
+    structguru.logger.remove(token)
+
+
+def test_add_neither_waits_for_the_backlog_nor_replaces_the_generation() -> None:
+    entered, release = threading.Event(), threading.Event()
+    received: list[str] = []
+    added: list[int] = []
+
+    def sink(line: str) -> None:
+        message = json.loads(line)["message"]
+        if message == "blocked":
+            entered.set()
+            release.wait(5)
+        received.append(message)
+
+    _runtime.configure(target="null", callable_sinks=[sink])
+    adder = threading.Thread(
+        target=lambda: added.append(structguru.logger.add(lambda line: None)), daemon=True
+    )
+    try:
+        structguru.logger.info("blocked")
+        assert entered.wait(3)
+        structguru.logger.info("backlog")
+        channel = _runtime._callable_dispatcher._channel
+        adder.start()
+        adder.join(2)
+        assert not adder.is_alive(), "logger.add() waited for the callable backlog"
+        assert _runtime._callable_dispatcher._channel is channel
+        structguru.logger.info("after add")
+    finally:
+        release.set()
+        adder.join(3)
+    structguru.flush()
+    assert received == ["blocked", "backlog", "after add"]
+    structguru.logger.remove(added[0])
+
+
+def test_slow_sink_that_keeps_progressing_is_not_abandoned() -> None:
+    """Finished deliveries count as progress while a producer waits for a slot."""
+    dispatcher = CallableSinkDispatcher()
+    entered, release = threading.Event(), threading.Event()
+    received: list[str] = []
+
+    def slow(line: str) -> None:
+        if line == "r0":
+            entered.set()
+            release.wait(5)
+        else:
+            time.sleep(0.005)
+        received.append(line)
+
+    dispatcher.configure([slow], maxsize=64)
+    channel = dispatcher._channel
+    producer = threading.Thread(
+        target=dispatcher.enqueue, args=("r129", 20), kwargs={"overflow": "block"}, daemon=True
+    )
+    try:
+        dispatcher.enqueue("r0", 20, overflow="block")
+        assert entered.wait(3)
+        for i in range(1, 65):
+            dispatcher.enqueue(f"r{i}", 20, overflow="block")
+        release.set()
+        # The worker now holds r1..r64 as one batch (about 0.3 s of work) and
+        # the queue refills, so the producer's slot frees only after the batch.
+        for i in range(65, 129):
+            dispatcher.enqueue(f"r{i}", 20, overflow="block")
+        producer.start()
+        assert _wait_for(lambda: channel.blocked_producers == 1)
+        assert dispatcher.flush(stall_timeout=0.15) == 0
+    finally:
+        release.set()
+        producer.join(5)
+    assert received == [f"r{i}" for i in range(130)]
+    dispatcher.disable()
+
+
+def test_producer_released_by_abandonment_is_not_a_queue_full_drop() -> None:
+    dispatcher = CallableSinkDispatcher()
+    entered, release = threading.Event(), threading.Event()
+    results: list[bool] = []
+
+    def stuck(line: str) -> None:
+        entered.set()
+        release.wait(5)
+
+    dispatcher.configure([stuck], maxsize=1)
+    channel = dispatcher._channel
+    producer = threading.Thread(
+        target=lambda: results.append(dispatcher.enqueue("blocked", 20, overflow="block")),
+        daemon=True,
+    )
+    try:
+        dispatcher.enqueue("first", 20, overflow="block")
+        assert entered.wait(3)
+        dispatcher.enqueue("queued", 20, overflow="block")
+        producer.start()
+        assert _wait_for(lambda: channel.blocked_producers == 1)
+        # In flight, queued, and the producer the abandonment releases.
+        assert dispatcher.flush(stall_timeout=0.1) == 3
+        producer.join(3)
+        assert results == [False]
+        assert dispatcher.metrics()["callable_dropped"] == 0
+    finally:
+        release.set()
+        producer.join(3)
+        dispatcher.disable()
+
+
+@pytest.mark.parametrize("operation", ["configure", "update", "remove"])
+def test_lifecycle_waits_for_a_stuck_sink_are_bounded(
+    operation: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_runtime, "_CALLABLE_STALL_TIMEOUT", 0.2)
+    entered, release = threading.Event(), threading.Event()
+    received: list[str] = []
+    captured: list[str] = []
+
+    def stuck(line: str) -> None:
+        entered.set()
+        release.wait(10)
+        received.append(json.loads(line)["message"])
+
+    _runtime.configure(target="null")
+    stuck_token = structguru.logger.add(stuck)
+    other = structguru.logger.add(lambda line: None)
+
+    def transition() -> None:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            if operation == "configure":
+                structguru.configure(target="null")
+            elif operation == "update":
+                structguru.update(service="next")
+            else:
+                structguru.logger.remove(other)
+        captured.extend(str(warning.message) for warning in caught)
+
+    closer = threading.Thread(target=transition, daemon=True)
+    try:
+        structguru.logger.info("stuck")
+        assert entered.wait(3)
+        structguru.logger.info("queued")
+        closer.start()
+        closer.join(3)
+        assert not closer.is_alive(), f"{operation} waited without a stall limit"
+    finally:
+        release.set()
+        closer.join(5)
+    assert any("abandoned 2 callable sink delivery" in message for message in captured), captured
+    # The abandoned worker finishes its stuck call but never delivers again.
+    time.sleep(0.1)
+    assert received == ["stuck"]
+    structguru.logger.remove(stuck_token)
+    if operation != "remove":  # removing an id twice raises
+        structguru.logger.remove(other)
+
+
+@pytest.mark.parametrize("operation", ["configure", "disable", "remove"])
+def test_dispatcher_lifecycle_drains_report_abandoned_records(operation: str) -> None:
+    dispatcher = CallableSinkDispatcher()
+    entered, release = threading.Event(), threading.Event()
+
+    def stuck(line: str) -> None:
+        entered.set()
+        release.wait(5)
+
+    token = dispatcher.add(stuck, 0, enabled=True)
+    dispatcher.add(lambda line: None, 0, enabled=True)
+    try:
+        dispatcher.enqueue("first", 20, overflow="block")
+        assert entered.wait(3)
+        dispatcher.enqueue("queued", 20, overflow="block")
+        if operation == "configure":
+            abandoned = dispatcher.configure([], maxsize=4, stall_timeout=0.1)
+        elif operation == "disable":
+            abandoned = dispatcher.disable(stall_timeout=0.1)
+        else:
+            removed, abandoned = dispatcher.remove(token, stall_timeout=0.1)
+            assert removed
+        assert abandoned == 2
+    finally:
+        release.set()
+        dispatcher.disable()
+
+
+@pytest.mark.parametrize("stall", [float("inf"), 1e300])
+def test_stall_timeout_beyond_the_clock_range_means_no_limit(stall: float) -> None:
+    dispatcher = CallableSinkDispatcher()
+    received: list[str] = []
+    dispatcher.configure([received.append], maxsize=4)
+    dispatcher.enqueue("line", 20, overflow="block")
+    assert dispatcher.flush(stall_timeout=stall) == 0
+    assert received == ["line"]
+    assert dispatcher.stop(drain=True, stall_timeout=stall) == 0
+    dispatcher.disable()
+
+
+def test_abandoned_dispatch_stays_disabled_until_the_next_configure() -> None:
+    dispatcher = CallableSinkDispatcher()
+    entered, release = threading.Event(), threading.Event()
+    received: list[str] = []
+
+    def stuck(line: str) -> None:
+        entered.set()
+        release.wait(5)
+
+    dispatcher.configure([stuck], maxsize=4)
+    try:
+        dispatcher.enqueue("stuck", 20, overflow="block")
+        assert entered.wait(3)
+        assert dispatcher.flush(stall_timeout=0.1) == 1
+        assert dispatcher.idle()
+        dispatcher.add(received.append, 0, enabled=True)
+        assert dispatcher.idle(), "registering a sink restarted abandoned dispatch"
+        dispatcher.sync([stuck], maxsize=4)
+        assert dispatcher.idle(), "sync() restarted abandoned dispatch"
+        dispatcher.enqueue("while disabled", 20, overflow="block")
+    finally:
+        release.set()
+    dispatcher.configure([], maxsize=4)
+    assert not dispatcher.idle()
+    dispatcher.enqueue("after configure", 20, overflow="block")
+    assert dispatcher.flush() == 0
+    assert received == ["after configure"]
+    dispatcher.disable()
+
+
+@pytest.mark.parametrize("halt", ["sync", "disable", "stop"])
+def test_sync_with_callbacks_resumes_dispatch_halted_by_a_lifecycle_call(halt: str) -> None:
+    dispatcher = CallableSinkDispatcher()
+    received: list[str] = []
+    dispatcher.configure([received.append], maxsize=4)
+    if halt == "sync":
+        dispatcher.sync(None, maxsize=0)
+    elif halt == "disable":
+        dispatcher.disable()
+    else:
+        dispatcher.stop(drain=True)
+    assert dispatcher.idle()
+    # The stale halt lost a race with configure(): the enabled runtime's
+    # callbacks must bring dispatch back.
+    dispatcher.sync([received.append], maxsize=4)
+    assert not dispatcher.idle()
+    dispatcher.enqueue("resumed", 20, overflow="block")
+    assert dispatcher.flush() == 0
+    assert received == ["resumed"]
+    dispatcher.disable()
+
+
+def test_shutdown_losing_a_race_with_configure_keeps_callable_dispatch() -> None:
+    received: list[str] = []
+    _runtime.configure(target="null", callable_sinks=[received.append])
+    dispatcher = _runtime._callable_dispatcher
+    real_disable = dispatcher.disable
+    entered, proceed = threading.Event(), threading.Event()
+
+    def stale_disable(**kwargs: object) -> int:
+        # shutdown() already chose to disable; configure() runs meanwhile.
+        entered.set()
+        assert proceed.wait(5)
+        return int(real_disable(**kwargs))
+
+    dispatcher.disable = stale_disable
+    closer = threading.Thread(target=_runtime.shutdown)
+    try:
+        closer.start()
+        assert entered.wait(5)
+        _runtime.configure(target="null", callable_sinks=[received.append])
+    finally:
+        proceed.set()
+        closer.join(5)
+        del dispatcher.disable
+    assert _runtime.current_runtime() is not None
+    assert not dispatcher.idle()
+    structguru.logger.info("after race")
+    _runtime.flush()
+    assert [json.loads(line)["message"] for line in received] == ["after race"]
+
+
+def test_add_losing_a_race_with_the_first_configure_keeps_callable_dispatch() -> None:
+    _runtime.shutdown()  # logging not configured yet
+    dispatcher = _runtime._callable_dispatcher
+    real_sync = dispatcher.sync
+    entered, proceed = threading.Event(), threading.Event()
+
+    def stale_sync(callbacks: object, **kwargs: object) -> None:
+        if callbacks is None and not entered.is_set():
+            # add() saw logging disabled; the first configure() runs meanwhile.
+            entered.set()
+            assert proceed.wait(5)
+        real_sync(callbacks, **kwargs)
+
+    added: list[str] = []
+    configured: list[str] = []
+    handler_ids: list[int] = []
+    dispatcher.sync = stale_sync
+    adder = threading.Thread(
+        target=lambda: handler_ids.append(structguru.logger.add(added.append))
+    )
+    try:
+        adder.start()
+        assert entered.wait(5)
+        _runtime.configure(target="null", callable_sinks=[configured.append])
+    finally:
+        proceed.set()
+        adder.join(5)
+        del dispatcher.sync
+    try:
+        assert not dispatcher.idle()
+        structguru.logger.info("after race")
+        _runtime.flush()
+        assert len(configured) == 1
+        assert len(added) == 1
+    finally:
+        for handler_id in handler_ids:
+            structguru.logger.remove(handler_id)
+
+
+def test_concurrent_flushes_report_an_abandoned_generation_once() -> None:
+    dispatcher = CallableSinkDispatcher()
+    entered, release = threading.Event(), threading.Event()
+
+    def stuck(line: str) -> None:
+        entered.set()
+        release.wait(5)
+
+    dispatcher.configure([stuck], maxsize=16)
+    results: list[int] = []
+    flushers = [
+        threading.Thread(target=lambda: results.append(dispatcher.flush(stall_timeout=0.3)))
+        for _ in range(2)
+    ]
+    try:
+        for index in range(5):
+            dispatcher.enqueue(f"r{index}", 20, overflow="drop")
+        assert entered.wait(3)
+        for flusher in flushers:
+            flusher.start()
+        for flusher in flushers:
+            flusher.join(5)
+        assert sorted(results) == [0, 5]
+    finally:
+        release.set()
+        dispatcher.disable()

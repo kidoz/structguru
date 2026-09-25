@@ -150,6 +150,8 @@ class _RustModule(Protocol):
 
     def validate_patterns(self, patterns: list[str], allow_backtracking: bool = False) -> int: ...
 
+    def report_unraisable(self, error: BaseException) -> None: ...
+
     def RedactionConfig(
         self,
         patterns: list[str],
@@ -342,12 +344,13 @@ def add_callable_sink(
     """Register a runtime callable sink and return its stable token.
 
     The sink is invoked with each rendered line on the dispatch thread.
-    If the dispatch infrastructure is not running, it is started.
+    If the dispatch infrastructure is not running, it is started. Registration
+    never replaces the active queue generation or waits for its backlog.
     """
     token = _callable_dispatcher.add(
         fn, min_level, enabled=is_native_enabled(), level_callback=level_callback
     )
-    _sync_callable_dispatcher()
+    _sync_callable_dispatcher(reconfigured=False)
     return token
 
 
@@ -355,9 +358,15 @@ def remove_callable_sink(token: int, *, finalizer: Callable[[], None] | None = N
     """Drain prior records, then remove exactly one runtime sink token.
 
     ``finalizer`` runs once no queued delivery references the sink; inside a
-    sink callback that is on the worker after the last such delivery.
+    sink callback that is on the worker after the last such delivery. A sink
+    that stops returning is abandoned after ``_CALLABLE_STALL_TIMEOUT``, as in
+    :func:`flush`.
     """
-    return _callable_dispatcher.remove(token, finalizer=finalizer)
+    removed, abandoned = _callable_dispatcher.remove(
+        token, finalizer=finalizer, stall_timeout=_CALLABLE_STALL_TIMEOUT
+    )
+    _note_abandoned(abandoned)
+    return removed
 
 
 def sensitive_patterns() -> list[str] | None:
@@ -648,9 +657,12 @@ def configure(settings: Settings | None = None, **changes: Unpack[SettingsChange
     the file and stdout (e.g. container + persistent log).
 
     ``callable_sinks`` is a list of ``Callable[[str], None]`` invoked with each
-    *rendered* line. They run on a dedicated daemon thread. Their queue is bounded
+    *rendered* line. They run on a dedicated daemon thread, one record at a time
+    and in log order, also across reconfiguration. Their queue is bounded
     by ``callable_queue_maxsize``; ``overflow="block"`` applies backpressure when
     full, while ``overflow="drop"`` drops and counts the callable delivery.
+    Exceptions they raise are counted in ``callable_errors`` (see
+    :func:`writer_metrics`) and reported by a rate-limited warning.
     Logs emitted inside these callbacks still reach the native writer but skip
     callable sinks, preventing feedback loops and worker self-deadlocks.
 
@@ -861,22 +873,40 @@ def _apply_settings(settings: Settings, *, expected: _RuntimeState | None = None
     return True
 
 
-def _sync_callable_dispatcher() -> None:
-    """Converge callable dispatch on the newest runtime generation."""
+def _sync_callable_dispatcher(*, reconfigured: bool = True) -> None:
+    """Converge callable dispatch on the newest runtime generation.
+
+    After configure(), update(), or shutdown() (``reconfigured``), the active
+    queue generation is replaced or stopped, and the records queued before are
+    drained, bounded by ``_CALLABLE_STALL_TIMEOUT``. After a sink registration
+    dispatch only converges: nothing is replaced or waited for when it already
+    matches the runtime. Retries after a concurrent transition converge too;
+    that transition applies its own change.
+    """
+    replacing = reconfigured
     while True:
         with _state_lock:
             generation = _lifecycle_generation
             state = _runtime
-        if state is None:
-            _callable_dispatcher.disable()
+        if not replacing:
+            _callable_dispatcher.sync(
+                None if state is None else state.callable_sinks,
+                maxsize=0 if state is None else state.callable_queue_maxsize,
+            )
+        elif state is None:
+            _note_abandoned(_callable_dispatcher.disable(stall_timeout=_CALLABLE_STALL_TIMEOUT))
         else:
-            _callable_dispatcher.configure(
-                state.callable_sinks,
-                maxsize=state.callable_queue_maxsize,
+            _note_abandoned(
+                _callable_dispatcher.configure(
+                    state.callable_sinks,
+                    maxsize=state.callable_queue_maxsize,
+                    stall_timeout=_CALLABLE_STALL_TIMEOUT,
+                )
             )
         with _state_lock:
             if generation == _lifecycle_generation:
                 return
+        replacing = False
 
 
 def _register_lifecycle_hooks() -> None:
@@ -1023,26 +1053,29 @@ def render_and_enqueue(
     )
     if outcome:
         _note_enqueue_outcome(outcome)
-    # Synchronous stream sink (configure(stream_sink=...)).
+        # A writer retired by configure/update/shutdown rejected the record: a
+        # lifecycle boundary, counted by lifecycle_metrics(), not queue
+        # overflow. No other destination receives it either.
+        if outcome == _CLOSED:
+            return None
+    # Every destination follows the native writer's outcome. A record the
+    # writer accepted just before a reconfiguration swapped the runtime still
+    # reaches the stream, the callable sinks (through the replacement queue
+    # generation, which delivers after its predecessors), and Sentry.
     if runtime.stream_sink is not None:
         try:
             runtime.stream_sink.write(line)
         except Exception as exc:  # noqa: BLE001 - stream errors must never break logging
             _note_stream_error(exc)
-    # A retired writer rejects late records during configure/disable. That is a
-    # lifecycle boundary, not queue overflow, and must not raise or emit a false
-    # "queue full" warning from application code.
-    active = current_runtime()
-    # Level-only updates replace the snapshot, but keep its delivery resources.
-    still_active = active is not None and active.writer is writer
-    if still_active:
-        _callable_dispatcher.enqueue(
-            line,
-            METHOD_LEVELS.get(level, 20),
-            overflow=runtime.overflow,
-        )
-        return sentry_line
-    return None
+    # A stopped dispatcher ignores the line, so callable sinks receive nothing
+    # once shutdown() has begun.
+    _callable_dispatcher.enqueue(
+        line,
+        METHOD_LEVELS.get(level, 20),
+        overflow=runtime.overflow,
+    )
+    # Nor does Sentry, once shutdown() has disabled logging.
+    return sentry_line if current_runtime() is not None else None
 
 
 def _note_enqueue_outcome(outcome: int) -> None:
@@ -1061,13 +1094,29 @@ def lifecycle_metrics() -> dict[str, int]:
     ``rejected`` counts records rejected because their native writer was closed,
     including producers interrupted by shutdown or reconfiguration. It excludes
     queue-full drops, sink errors, filtered records, and calls begun while logging
-    is disabled. Another destination may already have received the record.
+    is disabled. A rejected record reaches no destination: the stream sink,
+    callable sinks, and Sentry follow the native writer's outcome.
 
     The counter survives configuration changes and shutdown; a forked child starts
     at zero. Unlike :func:`writer_metrics`, this always returns a snapshot.
     """
     with _drop_lock:
         return {"rejected": _lifecycle_rejected}
+
+
+def _warn(message: str, *, stacklevel: int) -> None:
+    """Issue a diagnostic ``UserWarning`` that never interrupts the caller.
+
+    Diagnostics must not make logging fail. When a warnings filter turns the
+    warning into an exception (``-W error``), the exception is reported through
+    ``sys.unraisablehook`` instead, as CPython reports errors it cannot raise.
+    ``stacklevel`` counts from the caller of this function.
+    """
+    try:
+        warnings.warn(message, stacklevel=stacklevel + 1)
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never break logging
+        assert _RUST is not None
+        _RUST.report_unraisable(exc)
 
 
 def _note_drop() -> None:
@@ -1077,10 +1126,7 @@ def _note_drop() -> None:
         _drop_count += 1
         dropped = _drop_count
     if dropped == 1 or dropped % 1000 == 0:
-        warnings.warn(
-            f"structguru native logging dropped {dropped} record(s): queue full",
-            stacklevel=3,
-        )
+        _warn(f"structguru native logging dropped {dropped} record(s): queue full", stacklevel=3)
 
 
 def _note_stream_error(exc: BaseException) -> None:
@@ -1090,9 +1136,13 @@ def _note_stream_error(exc: BaseException) -> None:
         _stream_error_count += 1
         errors = _stream_error_count
     if errors == 1 or errors % 1000 == 0:
-        warnings.warn(
+        try:
+            detail = str(exc)
+        except Exception:  # noqa: BLE001 - diagnostics must never break logging
+            detail = "<unprintable>"
+        _warn(
             f"structguru stream sink write failed {errors} time(s), "
-            f"latest {type(exc).__name__}: {exc}",
+            f"latest {type(exc).__name__}: {detail}",
             stacklevel=3,
         )
 
@@ -1100,10 +1150,16 @@ def _note_stream_error(exc: BaseException) -> None:
 def _note_abandoned(count: int) -> None:
     """Warn when a stalled callable sink forced deliveries to be abandoned."""
     if count:
-        warnings.warn(
+        # A replacement generation (configure/update) keeps delivering; a
+        # stopped or halted dispatcher waits for the next configure().
+        halted = (
+            "; callable sinks are disabled until the next configure()"
+            if _callable_dispatcher.idle()
+            else ""
+        )
+        _warn(
             f"structguru abandoned {count} callable sink delivery record(s): a sink "
-            f"did not return within {_CALLABLE_STALL_TIMEOUT:g}s; callable sinks are "
-            "disabled until the next configure()",
+            f"did not return within {_CALLABLE_STALL_TIMEOUT:g}s{halted}",
             stacklevel=3,
         )
 
@@ -1158,6 +1214,13 @@ def writer_metrics() -> dict[str, Any] | None:
     when another destination succeeds. ``stream_errors`` counts ``write()``
     calls on a synchronous ``stream_sink`` that raised; those lines reached the
     native destinations but not the stream.
+
+    Callable sinks (``callable_sinks`` and ``logger.add()``) add
+    ``callable_dropped`` (deliveries dropped by a full callable queue in drop
+    mode), ``callable_errors`` (sink calls that raised; the first and every
+    1000th emit a warning), ``callable_depth``, and ``callable_maxsize``. The
+    callable counters restart when configure() or a non-level update() replaces
+    the configuration; adding or removing a sink keeps them.
 
     Returns ``None`` while logging is disabled. Use :func:`lifecycle_metrics`
     for cumulative closed-writer rejections across configuration and shutdown.

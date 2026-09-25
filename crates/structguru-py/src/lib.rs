@@ -1453,5 +1453,6 @@ fn rust_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(dispatch::in_callback, module)?)?;
     module.add_function(wrap_pyfunction!(dispatch::enter_callback, module)?)?;
     module.add_function(wrap_pyfunction!(dispatch::exit_callback, module)?)?;
+    module.add_function(wrap_pyfunction!(dispatch::report_unraisable, module)?)?;
     Ok(())
 }

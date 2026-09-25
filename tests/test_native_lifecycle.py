@@ -78,10 +78,9 @@ def test_retired_writer_rejections_remain_observable(
     assert state.writer.metrics()["dropped"] == 0
     assert structguru.lifecycle_metrics() == {"rejected": before + 1}
     if path == "stream":
-        # This is a rejected native delivery, not necessarily a lost event.
+        # The synchronous stream follows the native writer's outcome.
         assert [json.loads(line)["message"] for line in stream.getvalue().splitlines()] == [
-            "accepted",
-            "late",
+            "accepted"
         ]
     structguru.shutdown()
     snapshot = structguru.lifecycle_metrics()

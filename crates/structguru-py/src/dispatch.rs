@@ -9,12 +9,13 @@
 //! `tests/test_native_dispatch.py` keep their meaning.
 //!
 //! Callbacks are `Py<PyAny>` handles owned by this module for the lifetime of a
-//! registration. The worker thread attaches to the interpreter for each record
+//! registration. The worker thread attaches to the interpreter for each batch
 //! it delivers; every wait a producer or lifecycle caller performs happens with
-//! the interpreter detached so the worker can always make progress.
+//! the interpreter detached so the worker can always make progress. Generations
+//! deliver one at a time, in the order they started (see `Sequencer`).
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
@@ -24,6 +25,26 @@ use std::time::{Duration, Instant};
 use pyo3::exceptions::PyUserWarning;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
+
+/// Issue a `UserWarning` that can never interrupt the caller.
+///
+/// A diagnostic about logging must not make logging fail: when a warnings
+/// filter turns it into an exception (`-W error`), the exception goes to
+/// `sys.unraisablehook`, as CPython reports errors it cannot raise.
+fn warn(py: Python<'_>, message: &str, stacklevel: i32) {
+    let message = CString::new(message.replace('\0', "\\0")).expect("NUL bytes are escaped");
+    if let Err(error) = PyErr::warn(py, &py.get_type::<PyUserWarning>(), &message, stacklevel) {
+        error.write_unraisable(py, None);
+    }
+}
+
+/// Report `error` through `sys.unraisablehook` instead of raising it.
+///
+/// For Python diagnostics on the logging path that must not raise; see `warn`.
+#[pyfunction]
+pub fn report_unraisable(py: Python<'_>, error: Bound<'_, pyo3::exceptions::PyBaseException>) {
+    PyErr::from_value(error.into_any()).write_unraisable(py, None);
+}
 
 thread_local! {
     /// Nesting depth of sink callbacks on this thread: the dispatch worker for
@@ -98,6 +119,67 @@ struct ChannelState {
     abandoned: bool,
 }
 
+/// Delivery order across the queue generations of one dispatcher.
+///
+/// Every generation takes a ticket when it starts, and its worker delivers
+/// only while that ticket is the oldest one still out. So at most one worker
+/// invokes sinks at a time, and a replacement generation never overtakes the
+/// backlog of its predecessors, although producers fill its queue at once. A
+/// ticket comes back when its worker exits or its generation is abandoned,
+/// so a stuck sink holds later generations back only until a flush gives up.
+#[derive(Default)]
+struct Sequencer {
+    tickets: Mutex<Tickets>,
+    turn: Condvar,
+}
+
+#[derive(Default)]
+struct Tickets {
+    next: u64,
+    out: BTreeSet<u64>,
+}
+
+impl Sequencer {
+    fn lock(&self) -> MutexGuard<'_, Tickets> {
+        self.tickets.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn take(&self) -> u64 {
+        let mut tickets = self.lock();
+        let ticket = tickets.next;
+        tickets.next += 1;
+        tickets.out.insert(ticket);
+        ticket
+    }
+
+    /// Wait until every earlier ticket is back, or `ticket` itself is.
+    fn wait_turn(&self, ticket: u64) {
+        let tickets = self.lock();
+        let _tickets = self
+            .turn
+            .wait_while(tickets, |tickets| {
+                tickets.out.contains(&ticket) && tickets.out.first() != Some(&ticket)
+            })
+            .unwrap_or_else(PoisonError::into_inner);
+    }
+
+    /// Return `ticket`; idempotent.
+    fn give_back(&self, ticket: u64) {
+        if self.lock().out.remove(&ticket) {
+            self.turn.notify_all();
+        }
+    }
+}
+
+/// Returns a generation's ticket however its worker stops, a panic included.
+struct Turn<'a>(&'a Channel);
+
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        self.0.sequencer.give_back(self.0.ticket);
+    }
+}
+
 /// One queue generation with producer-aware shutdown semantics.
 ///
 /// One lock guards the queue, producer leases, and the accepting flag.
@@ -118,27 +200,43 @@ struct Channel {
     /// flusher instead of the worker.
     not_empty: Condvar,
     thread: Mutex<Option<JoinHandle<()>>>,
+    /// This generation's place in the dispatcher's delivery order.
+    sequencer: Arc<Sequencer>,
+    ticket: u64,
+    /// Mirrors `ChannelState::abandoned` for the per-sink check on delivery.
+    halted: AtomicBool,
 }
 
 /// Records the worker takes from the queue per lock acquisition.
 const DELIVERY_BATCH: usize = 64;
+
+/// Distinct level numbers whose eligible sinks are cached per registration.
+const MAX_CACHED_LEVELS: usize = 64;
 
 /// Seconds from Python into a stall bound; `None` waits without limit.
 fn stall_duration(seconds: Option<f64>) -> Option<Duration> {
     seconds.map(|s| Duration::try_from_secs_f64(s.max(0.0)).unwrap_or(Duration::MAX))
 }
 
-/// Result of offering a record to a generation without waiting.
+/// Result of offering a record to a generation.
 enum Offer {
     Accepted,
     /// Full in drop mode; the lease has been released.
     Full,
     /// Full in block mode; the lease is still held and the record returned.
     WouldBlock(Record),
+    /// A flush abandoned the generation; the lease has been released and the
+    /// record counts toward the abandoned total that flush reported.
+    Abandoned,
 }
 
 impl Channel {
-    fn start(maxsize: usize, dispatcher: Weak<DispatcherInner>) -> Arc<Channel> {
+    fn start(
+        maxsize: usize,
+        dispatcher: Weak<DispatcherInner>,
+        sequencer: Arc<Sequencer>,
+    ) -> Arc<Channel> {
+        let ticket = sequencer.take();
         let channel = Arc::new(Channel {
             maxsize,
             state: Mutex::new(ChannelState {
@@ -148,12 +246,18 @@ impl Channel {
             condition: Condvar::new(),
             not_empty: Condvar::new(),
             thread: Mutex::new(None),
+            sequencer,
+            ticket,
+            halted: AtomicBool::new(false),
         });
         let worker = Arc::clone(&channel);
-        let handle = std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("structguru-callable-sinks".to_owned())
-            .spawn(move || worker.run(dispatcher))
-            .expect("spawn callable sink dispatch worker");
+            .spawn(move || worker.run(dispatcher));
+        let handle = spawned.unwrap_or_else(|error| {
+            channel.sequencer.give_back(ticket);
+            panic!("spawn callable sink dispatch worker: {error}")
+        });
         *channel.lock_thread() = Some(handle);
         channel
     }
@@ -201,11 +305,13 @@ impl Channel {
         done: impl Fn(&ChannelState) -> bool,
         progress: impl Fn(&ChannelState) -> u64,
     ) -> (MutexGuard<'a, ChannelState>, bool) {
+        // A limit beyond the clock's range (an infinite timeout) is no limit.
+        let deadline_after = |now: Instant| stall.and_then(|limit| now.checked_add(limit));
         let mut last = progress(&state);
-        let mut deadline = stall.map(|limit| Instant::now() + limit);
+        let mut deadline = deadline_after(Instant::now());
         while !done(&state) {
-            match (stall, deadline) {
-                (Some(limit), Some(at)) => {
+            match deadline {
+                Some(at) => {
                     let now = Instant::now();
                     if now >= at {
                         return (state, false);
@@ -218,10 +324,10 @@ impl Channel {
                     let current = progress(&state);
                     if current != last {
                         last = current;
-                        deadline = Some(Instant::now() + limit);
+                        deadline = deadline_after(Instant::now());
                     }
                 }
-                _ => {
+                None => {
                     state = self
                         .condition
                         .wait(state)
@@ -247,6 +353,11 @@ impl Channel {
     /// the caller must go on to wait (`Offer::WouldBlock`).
     fn offer(&self, record: Record, blocking: bool) -> Offer {
         let mut state = self.lock();
+        if state.abandoned {
+            // No worker will take it; the abandoning flush counted this lease.
+            self.release_lease(&mut state);
+            return Offer::Abandoned;
+        }
         if self.is_full(&state) {
             if !blocking {
                 self.release_lease(&mut state);
@@ -260,9 +371,9 @@ impl Channel {
     }
 
     /// Wait for a slot, insert, and release the lease. Callers detach from the
-    /// interpreter first: the worker needs it to free a slot. Returns `false`
-    /// when the generation was abandoned while waiting: the record is dropped.
-    fn put_blocking(&self, record: Record) -> bool {
+    /// interpreter first: the worker needs it to free a slot. Returns
+    /// `Offer::Abandoned` when the generation was abandoned while waiting.
+    fn put_blocking(&self, record: Record) -> Offer {
         let mut state = self.lock();
         state.blocked_producers += 1;
         while self.is_full(&state) && !state.abandoned {
@@ -274,11 +385,11 @@ impl Channel {
         state.blocked_producers -= 1;
         if state.abandoned {
             self.release_lease(&mut state);
-            return false;
+            return Offer::Abandoned;
         }
         self.append(&mut state, record);
         self.release_lease(&mut state);
-        true
+        Offer::Accepted
     }
 
     /// Wait for producers that reserved delivery before this call, then for
@@ -287,11 +398,12 @@ impl Channel {
     /// queue instead of waiting for a moment when it happens to be empty.
     ///
     /// With `stall`, a worker that makes no progress for that long (a sink that
-    /// never returns) is abandoned: the generation stops accepting, blocked
-    /// producers drop their records, and the number of accepted records left
-    /// undelivered is returned. Returns at once inside a sink callback: a
-    /// callback cannot wait for its own worker. Callers detach from the
-    /// interpreter first.
+    /// never returns) is abandoned: the generation stops accepting, producers
+    /// holding a lease give up their records, later generations may deliver,
+    /// and the number of records lost is returned: accepted records left
+    /// undelivered plus the records of those producers. Returns at once
+    /// inside a sink callback: a callback cannot wait for its own worker.
+    /// Callers detach from the interpreter first.
     fn flush(&self, stall: Option<Duration>) -> usize {
         if in_callback() {
             return 0;
@@ -303,40 +415,65 @@ impl Channel {
             }
             state.flush_waiters += 1;
             let lease_target = state.leases_issued;
+            // A finished delivery is progress too: a producer blocked on a full
+            // queue settles its lease only once the worker's batch is done.
+            // Another flusher abandoning the generation ends the wait as well.
             let (next, mut drained) = self.wait_until(
                 state,
                 stall,
-                |state| state.leases_settled >= lease_target,
-                |state| state.leases_settled,
+                |state| state.abandoned || state.leases_settled >= lease_target,
+                |state| state.leases_settled + state.finished,
             );
             state = next;
-            if drained {
+            if drained && !state.abandoned {
                 let accepted_target = state.accepted;
                 let (next, finished) = self.wait_until(
                     state,
                     stall,
-                    |state| state.finished >= accepted_target,
+                    |state| state.abandoned || state.finished >= accepted_target,
                     |state| state.finished,
                 );
                 state = next;
                 drained = finished;
             }
             state.flush_waiters -= 1;
+            if state.abandoned {
+                // The flusher that abandoned the generation reported its
+                // records; they must not be counted twice.
+                return 0;
+            }
             if drained {
-                (!state.accepting, 0)
+                (!state.accepting, None)
             } else {
                 state.abandoned = true;
                 state.accepting = false;
-                let abandoned = state.unfinished_tasks;
+                self.halted.store(true, Ordering::Release);
+                // Every producer still holding a lease finds the generation
+                // abandoned and gives up its record.
+                let abandoned = state.unfinished_tasks + state.producers;
                 self.condition.notify_all();
                 self.not_empty.notify_all();
-                (false, abandoned)
+                (false, Some(abandoned))
             }
         };
         if retired {
             self.join();
         }
+        let Some(abandoned) = abandoned else {
+            return 0;
+        };
+        // The stuck worker never delivers again; later generations may.
+        self.sequencer.give_back(self.ticket);
         abandoned
+    }
+
+    /// Queued records of an abandoned generation, which no worker will take.
+    fn take_orphans(&self) -> Vec<Record> {
+        let mut state = self.lock();
+        if !state.abandoned {
+            return Vec::new();
+        }
+        state.queue.drain(..).collect()
     }
 
     /// Reject new producers without waiting for callbacks or queue space.
@@ -387,9 +524,11 @@ impl Channel {
     }
 
     fn run(self: Arc<Self>, dispatcher: Weak<DispatcherInner>) {
+        let _turn = Turn(&self);
         // Every callback this thread runs is nested.
         CALLBACK_DEPTH.with(|depth| depth.set(1));
         let mut batch: Vec<Record> = Vec::with_capacity(DELIVERY_BATCH);
+        let mut has_turn = false;
         loop {
             {
                 let mut state = self.lock();
@@ -416,6 +555,12 @@ impl Channel {
                         .unwrap_or_else(PoisonError::into_inner);
                 }
             }
+            if !has_turn {
+                // Records wait here, still accepted, until every earlier
+                // generation has finished or been abandoned.
+                self.sequencer.wait_turn(self.ticket);
+                has_turn = true;
+            }
             // Stay attached while work remains, as a Python worker thread holds
             // the interpreter between switch intervals. Attaching per record
             // would hand the interpreter back and forth with a producer blocked
@@ -437,7 +582,8 @@ impl Channel {
                             self.condition.notify_all(); // producers may wait for these slots
                         }
                     }
-                    for record in batch.drain(..) {
+                    let mut records = batch.drain(..);
+                    while let Some(record) = records.next() {
                         self.deliver(py, &dispatcher, &record);
                         drop(record);
                         let mut state = self.lock();
@@ -449,6 +595,14 @@ impl Channel {
                         // The delivery that just finished may be the one a
                         // flush gave up on; stop before starting another.
                         if state.abandoned {
+                            drop(state);
+                            // Taken from the queue but never delivered: their
+                            // sinks must not wait on them (see `remove`).
+                            if let Some(dispatcher) = dispatcher.upgrade() {
+                                for record in records.by_ref() {
+                                    dispatcher.settle(py, &record.sinks);
+                                }
+                            }
                             break;
                         }
                     }
@@ -458,18 +612,29 @@ impl Channel {
     }
 
     fn deliver(&self, py: Python<'_>, dispatcher: &Weak<DispatcherInner>, record: &Record) {
+        let dispatcher = dispatcher.upgrade();
         let line = PyString::new(py, &record.line);
         for sink in record.sinks.iter() {
+            // Once a flush gives up on this generation, its worker delivers
+            // nothing more, not even the rest of a record it has started.
+            if self.halted.load(Ordering::Acquire) {
+                break;
+            }
             // Worker callbacks cannot interrupt the caller: every failure,
-            // `BaseException` subclasses included, is dropped.
-            let _ = match &sink.level_callback {
+            // `BaseException` subclasses included, is counted and reported.
+            let delivered = match &sink.level_callback {
                 Some(callback) => callback.bind(py).call1((&line, record.level)),
                 None => sink.callback.bind(py).call1((&line,)),
             };
+            if let Err(error) = delivered
+                && let Some(dispatcher) = &dispatcher
+            {
+                dispatcher.note_error(py, &error);
+            }
         }
         // Account for the delivery before the record counts as done, so a
         // flush() observes every consequence of delivery.
-        if let Some(dispatcher) = dispatcher.upgrade() {
+        if let Some(dispatcher) = dispatcher {
             dispatcher.settle(py, &record.sinks);
         }
     }
@@ -556,11 +721,56 @@ struct Registry {
     /// finalizers waiting for that count to reach zero (see `remove`).
     outstanding: HashMap<i64, usize>,
     finalizers: HashMap<i64, Py<PyAny>>,
+    /// Why no generation runs even though sinks are registered; while
+    /// halted, registering a sink starts no generation.
+    halt: Halt,
+}
+
+/// Why dispatch is halted, ordered by what it takes to resume.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Halt {
+    Running,
+    /// `stop`, `disable`, or `sync(None)`: logging is off or shutting down.
+    /// `configure`, or `sync` with the callbacks of an enabled runtime,
+    /// resumes, so a stale disable that lost a race with `configure` cannot
+    /// leave an enabled runtime without callable dispatch.
+    Lifecycle,
+    /// The active generation was abandoned because a sink made no progress;
+    /// only `configure` resumes.
+    Abandoned,
 }
 
 impl Registry {
+    /// Halt dispatch for `reason`, keeping a stronger reason already set.
+    fn halt(&mut self, reason: Halt) {
+        self.halt = self.halt.max(reason);
+    }
+
     fn has_sinks(&self) -> bool {
         !self.configured.is_empty() || !self.runtime.is_empty()
+    }
+
+    fn set_configured(&mut self, callbacks: Vec<Py<PyAny>>) {
+        self.configured = callbacks
+            .into_iter()
+            .enumerate()
+            .map(|(index, callback)| Sink {
+                token: -(index as i64 + 1),
+                callback,
+                min_level: 0,
+                level_callback: None,
+            })
+            .collect();
+        self.eligible.clear();
+    }
+
+    fn is_configured_with(&self, callbacks: &[Py<PyAny>]) -> bool {
+        self.configured.len() == callbacks.len()
+            && self
+                .configured
+                .iter()
+                .zip(callbacks)
+                .all(|(sink, callback)| sink.callback.is(callback))
     }
 
     fn live_channels(&self) -> Vec<Arc<Channel>> {
@@ -589,6 +799,9 @@ struct DispatcherInner {
     /// Set while a generation is active; read lock-free on the hot path.
     active: AtomicBool,
     dropped: AtomicU64,
+    /// Sink calls that raised.
+    errors: AtomicU64,
+    sequencer: Arc<Sequencer>,
     snapshot: AtomicPtr<Snapshot>,
 }
 
@@ -625,7 +838,11 @@ impl DispatcherInner {
     }
 
     fn start_channel(self: &Arc<Self>, py: Python<'_>, registry: &mut Registry) -> PyResult<()> {
-        let channel = Channel::start(registry.maxsize, Arc::downgrade(self));
+        let channel = Channel::start(
+            registry.maxsize,
+            Arc::downgrade(self),
+            Arc::clone(&self.sequencer),
+        );
         let handle = Py::new(py, DispatchChannel { inner: channel })?;
         registry.channel = Some(handle.clone_ref(py));
         registry.channels.push(handle);
@@ -650,12 +867,20 @@ impl DispatcherInner {
     /// marked by the shared callback scope. An external lifecycle call will
     /// still find and drain every retired generation.
     ///
-    /// Returns the number of accepted records abandoned because a worker made
-    /// no progress for `stall` (see `Channel::flush`).
+    /// Returns the number of records abandoned because a worker made no
+    /// progress for `stall` (see `Channel::flush`). Channels are flushed in
+    /// the order they started, which is also their delivery order.
     fn drain(&self, py: Python<'_>, channels: Vec<Arc<Channel>>, stall: Option<Duration>) -> usize {
         let mut abandoned = 0;
         if !in_callback() {
             abandoned = py.detach(|| channels.iter().map(|channel| channel.flush(stall)).sum());
+            for channel in &channels {
+                // Release the sinks of records no worker will take, so that
+                // removing one of them need not wait for them.
+                for record in channel.take_orphans() {
+                    self.settle(py, &record.sinks);
+                }
+            }
         }
         let mut registry = self.lock_registry();
         if registry
@@ -666,6 +891,7 @@ impl DispatcherInner {
             // Nothing can be delivered through a stuck worker: stop offering
             // records to it until the next configure().
             self.retire_active(&mut registry);
+            registry.halt(Halt::Abandoned);
         }
         registry.channels.retain(|channel| {
             let inner = &channel.get().inner;
@@ -704,18 +930,43 @@ impl DispatcherInner {
         }
     }
 
-    fn note_drop(&self, py: Python<'_>) -> PyResult<()> {
+    fn note_drop(&self, py: Python<'_>) {
         let dropped = self.dropped.fetch_add(1, Ordering::AcqRel) + 1;
         if dropped == 1 || dropped.is_multiple_of(1000) {
-            let message = CString::new(format!(
-                "structguru callable sinks dropped {dropped} delivery record(s): queue full"
-            ))
-            .expect("warning text has no NUL");
             // Level 2 attributes the warning to the facade's `_log`, as the
             // Python dispatcher's `stacklevel=4` did.
-            PyErr::warn(py, &py.get_type::<PyUserWarning>(), &message, 2)?;
+            warn(
+                py,
+                &format!(
+                    "structguru callable sinks dropped {dropped} delivery record(s): queue full"
+                ),
+                2,
+            );
         }
-        Ok(())
+    }
+
+    /// Count a sink call that raised and report it at a bounded rate, like a
+    /// failing stream sink. Runs on the worker, inside the callback scope, so
+    /// a warning routed into logging cannot reach callable sinks again.
+    fn note_error(&self, py: Python<'_>, error: &PyErr) {
+        let errors = self.errors.fetch_add(1, Ordering::AcqRel) + 1;
+        if errors == 1 || errors.is_multiple_of(1000) {
+            let kind = error
+                .get_type(py)
+                .name()
+                .map_or_else(|_| "BaseException".to_owned(), |name| name.to_string());
+            let detail = error
+                .value(py)
+                .str()
+                .map_or_else(|_| "<unprintable>".to_owned(), |text| text.to_string());
+            warn(
+                py,
+                &format!(
+                    "structguru callable sink raised {errors} time(s), latest {kind}: {detail}"
+                ),
+                1,
+            );
+        }
     }
 }
 
@@ -746,7 +997,7 @@ impl CallableDispatcher {
         runtime: Vec<Sink>,
         next_token: i64,
         maxsize: usize,
-        dropped: u64,
+        counters: (u64, u64),
     ) -> Self {
         let registry = Registry {
             configured,
@@ -758,11 +1009,15 @@ impl CallableDispatcher {
             eligible: HashMap::new(),
             outstanding: HashMap::new(),
             finalizers: HashMap::new(),
+            halt: Halt::Running,
         };
+        let (dropped, errors) = counters;
         let inner = Arc::new(DispatcherInner {
             registry: Mutex::new(registry),
             active: AtomicBool::new(false),
             dropped: AtomicU64::new(dropped),
+            errors: AtomicU64::new(errors),
+            sequencer: Arc::default(),
             snapshot: AtomicPtr::new(std::ptr::null_mut()),
         });
         inner.publish(py, &inner.lock_registry());
@@ -774,10 +1029,14 @@ impl CallableDispatcher {
 impl CallableDispatcher {
     #[new]
     fn new(py: Python<'_>) -> Self {
-        Self::from_parts(py, Vec::new(), Vec::new(), 1, 1024, 0)
+        Self::from_parts(py, Vec::new(), Vec::new(), 1, 1024, (0, 0))
     }
 
     /// Register a runtime sink, starting dispatch when logging is enabled.
+    ///
+    /// Never replaces or waits for a generation. While dispatch is halted
+    /// (see `stop`), the sink waits for the next `configure` (or `sync` with
+    /// callbacks).
     #[pyo3(signature = (callback, min_level=0, *, enabled, level_callback=None))]
     fn add(
         &self,
@@ -800,7 +1059,7 @@ impl CallableDispatcher {
             },
         );
         registry.eligible.clear();
-        if enabled && registry.channel.is_none() {
+        if enabled && registry.channel.is_none() && registry.halt == Halt::Running {
             self.inner.start_channel(py, &mut registry)?;
         }
         self.inner.publish(py, &registry);
@@ -810,97 +1069,171 @@ impl CallableDispatcher {
     /// Remove one sink, then drain every record that captured it.
     ///
     /// `finalizer` releases the sink's resources (closing a handler) and runs
-    /// once no delivery references the sink: after the drain when called
-    /// outside a callback, otherwise on the worker right after the last
-    /// delivery that captured the sink, since a callback cannot wait for its
-    /// own worker. Closing at once would leave those deliveries writing to a
-    /// closed handler.
-    #[pyo3(signature = (token, *, finalizer=None))]
-    fn remove(&self, py: Python<'_>, token: i64, finalizer: Option<Py<PyAny>>) -> PyResult<bool> {
-        let (removed, channels, finalizer) = {
+    /// once no delivery references the sink: right after the drain, or, when a
+    /// delivery is still running, on the thread that finishes the last one.
+    /// That happens inside a sink callback, which cannot wait for its own
+    /// worker, and when the drain abandoned a sink that stopped returning.
+    /// Closing at once would leave those deliveries writing to a closed
+    /// handler.
+    ///
+    /// Returns whether `token` was registered and, as `stop` does, the number
+    /// of records abandoned because a sink made no progress for
+    /// `stall_timeout`.
+    #[pyo3(signature = (token, *, finalizer=None, stall_timeout=None))]
+    fn remove(
+        &self,
+        py: Python<'_>,
+        token: i64,
+        finalizer: Option<Py<PyAny>>,
+        stall_timeout: Option<f64>,
+    ) -> PyResult<(bool, usize)> {
+        let (removed, channels) = {
             let mut registry = self.inner.lock_registry();
             let removed = registry.runtime.remove(&token).is_some();
             registry.eligible.clear();
             if !registry.has_sinks() {
                 self.inner.retire_active(&mut registry);
             }
-            let channels = registry.live_channels();
-            let mut finalizer = finalizer;
-            let outstanding = registry.outstanding.get(&token).copied().unwrap_or(0);
-            if in_callback()
-                && outstanding > 0
-                && let Some(deferred) = finalizer.take()
-            {
-                registry.finalizers.insert(token, deferred);
-            }
             self.inner.publish(py, &registry);
-            (removed, channels, finalizer)
+            (removed, registry.live_channels())
         };
-        self.inner.drain(py, channels, None);
+        let abandoned = self
+            .inner
+            .drain(py, channels, stall_duration(stall_timeout));
         if let Some(finalizer) = finalizer {
-            finalizer.bind(py).call0()?;
+            let due = {
+                let mut registry = self.inner.lock_registry();
+                if registry.outstanding.get(&token).copied().unwrap_or(0) > 0 {
+                    // `settle` runs it after the last delivery.
+                    registry.finalizers.insert(token, finalizer);
+                    self.inner.publish(py, &registry);
+                    None
+                } else {
+                    Some(finalizer)
+                }
+            };
+            if let Some(finalizer) = due {
+                finalizer.bind(py).call0()?;
+            }
         }
-        Ok(removed)
+        Ok((removed, abandoned))
     }
 
-    /// Atomically activate a replacement queue and drain its predecessor.
-    #[pyo3(signature = (callbacks, *, maxsize))]
-    fn configure(&self, py: Python<'_>, callbacks: Vec<Py<PyAny>>, maxsize: usize) -> PyResult<()> {
-        let configured: Vec<Sink> = callbacks
-            .into_iter()
-            .enumerate()
-            .map(|(index, callback)| Sink {
-                token: -(index as i64 + 1),
-                callback,
-                min_level: 0,
-                level_callback: None,
-            })
-            .collect();
+    /// Replace the configured sinks and start a new queue generation.
+    ///
+    /// The new generation accepts records at once but delivers only after
+    /// every earlier one has finished or been abandoned; this call then drains
+    /// those predecessors. Drop and error counters restart, and a halted
+    /// dispatcher resumes. See `stop` for `stall_timeout` and the return value.
+    #[pyo3(signature = (callbacks, *, maxsize, stall_timeout=None))]
+    fn configure(
+        &self,
+        py: Python<'_>,
+        callbacks: Vec<Py<PyAny>>,
+        maxsize: usize,
+        stall_timeout: Option<f64>,
+    ) -> PyResult<usize> {
         let channels = {
             let mut registry = self.inner.lock_registry();
             self.inner.retire_active(&mut registry);
             let channels = registry.live_channels();
-            registry.configured = configured;
-            registry.eligible.clear();
+            registry.set_configured(callbacks);
             registry.maxsize = maxsize;
+            registry.halt = Halt::Running;
             self.inner.dropped.store(0, Ordering::Release);
+            self.inner.errors.store(0, Ordering::Release);
             if registry.has_sinks() {
                 self.inner.start_channel(py, &mut registry)?;
             }
             self.inner.publish(py, &registry);
             channels
         };
-        self.inner.drain(py, channels, None);
+        Ok(self
+            .inner
+            .drain(py, channels, stall_duration(stall_timeout)))
+    }
+
+    /// Converge on a configuration without disturbing a matching one.
+    ///
+    /// `callbacks=None` means logging is disabled. For a registration that
+    /// raced a configure() or shutdown(): when the dispatcher already matches,
+    /// nothing is replaced, restarted, or waited for. A mismatch is applied as
+    /// `configure` or `disable` would, except that nothing is drained (a new
+    /// generation still delivers after its predecessors) and counters keep
+    /// counting. Callbacks mean logging is enabled, so they resume dispatch
+    /// halted by `stop`, `disable`, or `sync(None)`; after an abandoned
+    /// generation only `configure` resumes it.
+    #[pyo3(signature = (callbacks, *, maxsize))]
+    fn sync(
+        &self,
+        py: Python<'_>,
+        callbacks: Option<Vec<Py<PyAny>>>,
+        maxsize: usize,
+    ) -> PyResult<()> {
+        let mut registry = self.inner.lock_registry();
+        let Some(callbacks) = callbacks else {
+            if registry.channel.is_some()
+                || !registry.configured.is_empty()
+                || registry.halt == Halt::Running
+            {
+                self.inner.retire_active(&mut registry);
+                registry.configured.clear();
+                registry.eligible.clear();
+                registry.halt(Halt::Lifecycle);
+                self.inner.publish(py, &registry);
+            }
+            return Ok(());
+        };
+        if registry.maxsize != maxsize || !registry.is_configured_with(&callbacks) {
+            self.inner.retire_active(&mut registry);
+            registry.set_configured(callbacks);
+            registry.maxsize = maxsize;
+            self.inner.publish(py, &registry);
+        }
+        if registry.halt == Halt::Lifecycle {
+            registry.halt = Halt::Running;
+        }
+        if registry.channel.is_none() && registry.has_sinks() && registry.halt == Halt::Running {
+            self.inner.start_channel(py, &mut registry)?;
+        }
         Ok(())
     }
 
-    /// Stop dispatch and remove configured sinks while preserving runtime registrations.
-    fn disable(&self, py: Python<'_>) {
+    /// Stop dispatch and remove configured sinks while preserving runtime
+    /// registrations; dispatch stays halted until the next `configure` (or
+    /// `sync` with callbacks). See `stop` for `stall_timeout` and the return
+    /// value.
+    #[pyo3(signature = (*, stall_timeout=None))]
+    fn disable(&self, py: Python<'_>, stall_timeout: Option<f64>) -> usize {
         let channels = {
             let mut registry = self.inner.lock_registry();
             self.inner.retire_active(&mut registry);
             registry.configured.clear();
             registry.eligible.clear();
+            registry.halt(Halt::Lifecycle);
             self.inner.publish(py, &registry);
             registry.live_channels()
         };
-        self.inner.drain(py, channels, None);
+        self.inner
+            .drain(py, channels, stall_duration(stall_timeout))
     }
 
-    /// Stop the active dispatch queue while preserving registrations.
+    /// Stop the active dispatch queue while preserving registrations; dispatch
+    /// stays halted until the next `configure` (or `sync` with callbacks).
     ///
     /// `drain` is accepted for API symmetry; both values join behind every
     /// accepted queue entry, as the Python dispatcher always did.
     ///
     /// `stall_timeout` bounds the wait for a sink that stops returning; the
-    /// number of accepted records left undelivered is returned (zero when
-    /// every delivery completed).
+    /// number of records abandoned is returned (zero when every delivery
+    /// completed).
     #[pyo3(signature = (*, drain, stall_timeout=None))]
     fn stop(&self, py: Python<'_>, drain: bool, stall_timeout: Option<f64>) -> usize {
         let _ = drain;
         let channels = {
             let mut registry = self.inner.lock_registry();
             self.inner.retire_active(&mut registry);
+            registry.halt(Halt::Lifecycle);
             registry.live_channels()
         };
         self.inner
@@ -952,7 +1285,10 @@ impl CallableDispatcher {
                         .filter(|sink| level >= sink.min_level)
                         .map(|sink| sink.clone_ref(py))
                         .collect();
-                    registry.eligible.insert(level, Arc::clone(&sinks));
+                    // A bridged stdlib record may carry any level number.
+                    if registry.eligible.len() < MAX_CACHED_LEVELS {
+                        registry.eligible.insert(level, Arc::clone(&sinks));
+                    }
                     sinks
                 }
             };
@@ -976,23 +1312,26 @@ impl CallableDispatcher {
             sinks: Arc::clone(&sinks),
             level,
         };
-        let accepted = match channel.offer(record, blocking) {
-            Offer::Accepted => true,
-            Offer::Full => false,
-            Offer::WouldBlock(record) => {
-                // Only a full queue pays for detaching: the worker needs the
-                // interpreter to free a slot.
-                py.detach(|| channel.put_blocking(record))
-            }
+        let offered = match channel.offer(record, blocking) {
+            // Only a full queue pays for detaching: the worker needs the
+            // interpreter to free a slot.
+            Offer::WouldBlock(record) => py.detach(|| channel.put_blocking(record)),
+            offered => offered,
         };
-        if !accepted {
-            self.inner.settle(py, &sinks);
-            self.inner.note_drop(py)?;
+        match offered {
+            Offer::Accepted => return Ok(true),
+            Offer::Full => {
+                self.inner.settle(py, &sinks);
+                self.inner.note_drop(py);
+            }
+            // Counted by the flush that abandoned the generation, not as a
+            // queue-full drop.
+            Offer::Abandoned | Offer::WouldBlock(_) => self.inner.settle(py, &sinks),
         }
-        Ok(accepted)
+        Ok(false)
     }
 
-    /// Return callable dispatch queue and drop metrics.
+    /// Return callable dispatch queue, drop, and error metrics.
     fn metrics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let registry = self.inner.lock_registry();
         let depth = registry
@@ -1004,21 +1343,23 @@ impl CallableDispatcher {
             "callable_dropped",
             self.inner.dropped.load(Ordering::Acquire),
         )?;
+        result.set_item("callable_errors", self.inner.errors.load(Ordering::Acquire))?;
         result.set_item("callable_depth", depth)?;
         result.set_item("callable_maxsize", registry.maxsize)?;
         Ok(result)
     }
 
-    /// Reset the drop counter for isolated tests.
+    /// Reset the drop and error counters for isolated tests.
     fn reset_drop_count(&self) {
         self.inner.dropped.store(0, Ordering::Release);
+        self.inner.errors.store(0, Ordering::Release);
     }
 
     /// Build the dispatcher a forked child continues with.
     ///
     /// Worker threads do not survive fork and a lock held by a vanished thread
     /// can never be acquired, so nothing inherited is touched: registrations
-    /// come from the lock-free snapshot, the drop count carries over, queued
+    /// come from the lock-free snapshot, drop and error counts carry over, queued
     /// records are not delivered in the child, and finalizers that removal
     /// deferred run now since nothing waits on the parent's counts. The caller
     /// replaces its reference; the inherited dispatcher is never used again.
@@ -1040,7 +1381,10 @@ impl CallableDispatcher {
             snapshot.runtime.iter().map(|s| s.clone_ref(py)).collect(),
             snapshot.next_token,
             snapshot.maxsize,
-            self.inner.dropped.load(Ordering::Acquire),
+            (
+                self.inner.dropped.load(Ordering::Acquire),
+                self.inner.errors.load(Ordering::Acquire),
+            ),
         );
         {
             let mut registry = child.inner.lock_registry();

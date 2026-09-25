@@ -6,6 +6,7 @@ deadlock-free callable-sink dispatch, and the colored console renderer.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -13,7 +14,10 @@ import sys
 import tempfile
 import textwrap
 import threading
+import warnings
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -277,6 +281,7 @@ def test_callable_sink_receives_rendered_lines() -> None:
     assert json.loads(received[0])["message"] == "callable 0"
 
 
+@pytest.mark.filterwarnings("ignore:structguru callable sink raised")
 def test_callable_sink_errors_are_swallowed() -> None:
     good: list[str] = []
     lock = threading.Lock()
@@ -301,6 +306,237 @@ def test_callable_sink_errors_are_swallowed() -> None:
         _runtime.shutdown()
 
     assert len(good) == 1, "good sink must still receive despite bad_sink raising"
+
+
+def test_callable_sink_errors_are_counted_and_reported() -> None:
+    # A subprocess sees the worker thread's warning on stderr on every build;
+    # context-aware warning capture would miss it on free-threaded Python.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+            import structguru as sg
+            calls = []
+            def flaky(line):
+                calls.append(line)
+                raise ConnectionError('collector down')
+            sg.configure(target='null', callable_sinks=[flaky])
+            token = sg.logger.add(flaky)
+            for i in range(3):
+                sg.logger.info('record {}', i)
+            sg.flush()
+            assert len(calls) == 6, calls
+            print(sg.writer_metrics()['callable_errors'])
+            sg.logger.remove(token)
+            sg.shutdown()
+        """),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["6"]
+    # Rate-limited like stream sink failures: the first failure is reported.
+    assert result.stderr.count("callable sink raised") == 1, result.stderr
+    assert "ConnectionError: collector down" in result.stderr
+
+
+def test_callable_drop_count_survives_add_and_resets_on_configure() -> None:
+    started, release = threading.Event(), threading.Event()
+
+    def blocking_sink(_line: str) -> None:
+        started.set()
+        release.wait(timeout=3)
+
+    settings: dict[str, Any] = {
+        "target": "null",
+        "overflow": "drop",
+        "callable_sinks": [blocking_sink],
+        "callable_queue_maxsize": 1,
+    }
+    _runtime.configure(**settings)
+    try:
+        structguru.logger.info("first")
+        assert started.wait(timeout=1)
+        structguru.logger.info("second")
+        with pytest.warns(UserWarning, match="callable sinks dropped 1 "):
+            structguru.logger.info("third")
+        token = structguru.logger.add(lambda line: None)
+        metrics = _runtime.writer_metrics()
+        assert metrics is not None and metrics["callable_dropped"] == 1
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            structguru.logger.info("fourth")
+        assert not captured, "the first-drop warning fired again after logger.add()"
+        metrics = _runtime.writer_metrics()
+        assert metrics is not None and metrics["callable_dropped"] == 2
+    finally:
+        release.set()
+    structguru.logger.remove(token)
+    _runtime.configure(**settings)
+    metrics = _runtime.writer_metrics()
+    assert metrics is not None and metrics["callable_dropped"] == 0
+
+
+def test_log_call_diagnostics_never_raise_under_warnings_as_errors() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-W",
+            "error",
+            "-c",
+            textwrap.dedent("""
+            import threading
+            from dataclasses import replace
+            import structguru as sg
+            from structguru import _runtime
+
+            # Native queue full in drop mode.
+            sg.configure(target='memory', overflow='drop')
+            state = _runtime.current_runtime()
+            state.writer.close()
+            writer = _runtime._RUST._NativeStringWriter(1, paused=True)
+            _runtime._runtime = replace(state, writer=writer)
+            sg.logger.info('accepted')
+            sg.logger.info('dropped by the native queue')
+
+            # Callable queue full in drop mode.
+            started, release = threading.Event(), threading.Event()
+            def blocking(line):
+                started.set()
+                release.wait(3)
+            sg.configure(target='null', overflow='drop', callable_sinks=[blocking],
+                         callable_queue_maxsize=1)
+            sg.logger.info('first')
+            assert started.wait(3)
+            sg.logger.info('queued')
+            sg.logger.info('dropped by the callable queue')
+            release.set()
+
+            # A failing synchronous stream and a failing callable sink.
+            class Broken:
+                def write(self, line):
+                    raise OSError('stream down')
+            def failing(line):
+                raise ConnectionError('collector down')
+            sg.configure(target='null', stream_sink=Broken(), callable_sinks=[failing])
+            sg.logger.info('stream and callable failure')
+            sg.flush()
+            sg.shutdown()
+            print('completed')
+        """),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["completed"]
+    for diagnostic in (
+        "native logging dropped 1 record(s): queue full",
+        "callable sinks dropped 1 delivery record(s): queue full",
+        "stream sink write failed 1 time(s), latest OSError: stream down",
+        "callable sink raised 1 time(s), latest ConnectionError: collector down",
+    ):
+        assert diagnostic in result.stderr, result.stderr
+
+
+def _collect_sentry(events: list[str]) -> Any:
+    def processor(_logger: Any, _method: str, event: dict[str, Any]) -> dict[str, Any]:
+        events.append(event["event"])
+        return event
+
+    return processor
+
+
+class _StagedWriter:
+    """Writer proxy that runs a lifecycle action around the fused capture call."""
+
+    def __init__(self, writer: Any, before: Any = None, after: Any = None) -> None:
+        self._writer, self._before, self._after = writer, before, after
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._writer, name)
+
+    def log_capture(self, *args: Any, **kwargs: Any) -> Any:
+        if self._before is not None:
+            self._before()
+        result = self._writer.log_capture(*args, **kwargs)
+        if self._after is not None:
+            self._after()
+        return result
+
+
+def test_record_accepted_before_reconfiguration_reaches_callable_sinks_and_sentry() -> None:
+    received: list[str] = []
+    events: list[str] = []
+    _runtime.configure(target="memory", sentry_processor=_collect_sentry(events))
+    token = structguru.logger.add(lambda line: received.append(json.loads(line)["message"]))
+    state = _runtime.current_runtime()
+    assert state is not None
+    staged = _StagedWriter(state.writer, after=lambda: structguru.update(service="next"))
+    _runtime._runtime = replace(state, writer=staged)  # type: ignore[arg-type]
+
+    structguru.logger.info("accepted before update")
+    structguru.flush()
+
+    assert [json.loads(line)["message"] for line in state.writer.messages()] == [
+        "accepted before update"
+    ]
+    assert received == ["accepted before update"]
+    assert events == ["accepted before update"]
+    assert structguru.get_config().service == "next"  # type: ignore[union-attr]
+    structguru.logger.remove(token)
+
+
+def test_writer_rejection_skips_every_secondary_destination() -> None:
+    received: list[str] = []
+    events: list[str] = []
+    stream = io.StringIO()
+    _runtime.configure(
+        target="memory", stream_sink=stream, sentry_processor=_collect_sentry(events)
+    )
+    token = structguru.logger.add(received.append)
+    state = _runtime.current_runtime()
+    assert state is not None
+    before = structguru.lifecycle_metrics()["rejected"]
+    staged = _StagedWriter(state.writer, before=state.writer.close)
+    _runtime._runtime = replace(state, writer=staged)  # type: ignore[arg-type]
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        structguru.logger.info("rejected by a closed writer")
+    structguru.flush()
+
+    assert not captured
+    assert structguru.lifecycle_metrics()["rejected"] == before + 1
+    assert stream.getvalue() == ""
+    assert received == []
+    assert events == []
+    structguru.logger.remove(token)
+
+
+def test_record_accepted_while_shutting_down_is_not_delivered_afterwards() -> None:
+    received: list[str] = []
+    events: list[str] = []
+    _runtime.configure(target="memory", sentry_processor=_collect_sentry(events))
+    token = structguru.logger.add(received.append)
+    state = _runtime.current_runtime()
+    assert state is not None
+    staged = _StagedWriter(state.writer, after=structguru.shutdown)
+    _runtime._runtime = replace(state, writer=staged)  # type: ignore[arg-type]
+
+    structguru.logger.info("accepted while shutting down")
+
+    assert _runtime.current_runtime() is None
+    assert [json.loads(line)["message"] for line in state.writer.messages()] == [
+        "accepted while shutting down"
+    ]
+    assert received == []
+    assert events == []
+    structguru.logger.remove(token)
 
 
 def test_stream_sink_write_errors_never_reach_the_caller() -> None:
