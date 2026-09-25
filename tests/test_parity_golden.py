@@ -1,35 +1,37 @@
-"""Golden parity suite: native render path vs the structlog JSON pipeline.
+"""Golden parity suite: native render path vs the structlog/orjson pipeline.
 
-Phase 0 of the full-Rust migration. This suite is the
-migration's definition of done: every scenario logs the same call through the
-standard structlog path and the native path and asserts the emitted JSON lines
-are **byte-identical** after normalizing the volatile timestamp value. Byte
-comparison (unlike the parsed-dict checks in ``test_native_render.py``) also
-locks key order and number/string serialization format.
+Every scenario logs the same call through the native path and through
+``structlog_reference_line`` (``_structlog_reference.py``): the pre-1.0 structlog processor
+chain rendered by ``JSONRenderer(orjson)``, rebuilt without calling structguru.
+The emitted JSON lines must be **byte-identical** after normalizing the
+volatile timestamp value. Byte comparison (unlike the parsed-dict checks in
+``test_native_render.py``) also locks key order and number/string
+serialization format, so a native serialization change fails here.
 
 Tiers:
 
-1. **Byte parity** — the common path. Any divergence is a migration blocker.
-2. **Semantic parity** — exceptions. Known, accepted divergence: the standard
-   path appends ``exception`` after ``message`` (``format_exc_info`` runs in the
-   formatter stage, post-``EventRenamer``) while the native path renders it
+1. **Byte parity** — the common path.
+2. **Semantic parity** — exceptions. Known, accepted divergence: the structlog
+   path appends ``exception`` after ``message`` (``format_exc_info`` runs in
+   the formatter stage, post-``EventRenamer``) while the native path renders it
    with the user fields. Values must still match exactly.
-3. **Coverage gaps** — strict xfails for calls the native path does not handle
-   yet; each is a Phase 1 work item. Implementing the feature flips the test.
+3. **Stack info** — placement parity; the captured frames differ by design.
+
+``test_golden_line_is_pinned`` also pins one representative line as a
+committed string, so the reference cannot drift together with the renderer.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import enum
-import io
 import json
 import re
 import uuid
 from typing import Any
 
 import pytest
-from conftest import configure
+from _structlog_reference import structlog_reference_line
 
 import structguru
 from structguru import _runtime
@@ -53,11 +55,9 @@ def _standard_line(
     bound: dict[str, Any],
     kwargs: dict[str, Any],
 ) -> str:
-    buf = io.StringIO()
-    configure(service="svc", level="DEBUG", stream=buf)
-    log = structguru.logger.bind(**bound) if bound else structguru.logger
-    getattr(log, method)(msg, *args, **kwargs)
-    return buf.getvalue().strip().splitlines()[-1]
+    return structlog_reference_line(
+        method, msg, args, logger_name=__name__, bound=bound, kwargs=kwargs
+    )
 
 
 def _native_line(
@@ -146,6 +146,21 @@ FIELD_SCENARIOS = [
     pytest.param({}, {"at": dt.datetime(2026, 7, 10, 12, 0, 0, 5)}, id="datetime"),
     pytest.param({}, {"d": dt.date(2026, 7, 10)}, id="date"),
     pytest.param({}, {"uid": uuid.UUID("12345678-1234-5678-1234-567812345678")}, id="uuid"),
+    pytest.param(
+        {},
+        {"one": 1.0, "exp": 1e16, "plain": 1e15, "big": 1e300, "small": 5e-324, "long": 1 / 3},
+        id="float-formats",
+    ),
+    pytest.param(
+        {},
+        {"min": -(2**63), "max": 2**63 - 1, "u64": 2**64 - 1, "neg": -1, "zero": 0},
+        id="integer-bounds",
+    ),
+    pytest.param(
+        {},
+        {"ctrl": "\x00\x1f\x7f\u2028\u2029\u202e", "empty": "", "list": [], "map": {}},
+        id="string-escapes-and-empty-containers",
+    ),
 ]
 
 
@@ -197,32 +212,82 @@ def test_parity_reserved_key_collisions(kwargs: dict[str, Any]) -> None:
 
 
 def test_parity_contextualize() -> None:
-    def run(capture: Any) -> str:
-        with structguru.logger.contextualize(request_id="ctx-1", user="bob"):
-            return capture()
-
-    buf = io.StringIO()
-    configure(service="svc", level="DEBUG", stream=buf)
-
-    def std() -> str:
-        structguru.logger.info("ctx", extra=1)
-        return buf.getvalue().strip().splitlines()[-1]
-
-    standard = run(std)
+    context = {"request_id": "ctx-1", "user": "bob"}
+    standard = structlog_reference_line(
+        "info", "ctx", logger_name=__name__, kwargs={"extra": 1}, contextvars=context
+    )
 
     _runtime.configure(service="svc", target="memory", level="DEBUG")
     try:
-
-        def nat() -> str:
+        with structguru.logger.contextualize(**context):
             structguru.logger.info("ctx", extra=1)
-            _runtime.flush_native()
-            return _runtime.drain_messages()[-1].strip()
-
-        native = run(nat)
+        _runtime.flush_native()
+        native = _runtime.drain_messages()[-1].strip()
     finally:
         _runtime.shutdown()
 
     assert _normalize_ts(native) == _normalize_ts(standard)
+
+
+def test_parity_stack_placement() -> None:
+    stack = "Stack (most recent call last):\n  frame"
+    standard = structlog_reference_line(
+        "info", "where", logger_name=__name__, kwargs={"k": 1}, stack=stack
+    )
+
+    _runtime.configure(service="svc", target="memory", level="DEBUG")
+    try:
+        structguru.logger.opt(stack_info=stack).info("where", k=1)
+        _runtime.flush_native()
+        native = _runtime.drain_messages()[-1].strip()
+    finally:
+        _runtime.shutdown()
+
+    assert _normalize_ts(native) == _normalize_ts(standard)
+
+
+def test_golden_line_is_pinned() -> None:
+    # A committed line: the reference and the renderer cannot drift together.
+    golden = (
+        '{"request_id":"req-1","qty":2,"ratio":0.1,"ok":true,"none":null,"tags":["a","b"],'
+        '"ctx":{"password":"[REDACTED]","path":"/x"},"rid":"ctx-1",'
+        f'"logger":"{__name__}","level":"WARN","severity":4,"timestamp":"TS",'
+        '"service":"svc","message":"order 987 accepted"}'
+    )
+    call = {
+        "bound": {"request_id": "req-1"},
+        "kwargs": {
+            "id": 987,
+            "qty": 2,
+            "ratio": 0.1,
+            "ok": True,
+            "none": None,
+            "tags": ["a", "b"],
+            "ctx": {"password": "hunter2", "path": "/x"},
+        },
+    }
+    standard = structlog_reference_line(
+        "warning",
+        "order {id} accepted",
+        logger_name=__name__,
+        contextvars={"rid": "ctx-1"},
+        bound=call["bound"],
+        kwargs=call["kwargs"],
+    )
+
+    _runtime.configure(service="svc", target="memory", level="DEBUG")
+    try:
+        with structguru.logger.contextualize(rid="ctx-1"):
+            structguru.logger.bind(**call["bound"]).warning(
+                "order {id} accepted", **dict(call["kwargs"])
+            )
+        _runtime.flush_native()
+        native = _runtime.drain_messages()[-1].strip()
+    finally:
+        _runtime.shutdown()
+
+    assert _normalize_ts(standard) == golden
+    assert _normalize_ts(native) == golden
 
 
 # -- Tier 2: semantic parity (exceptions) ------------------------------------
@@ -236,10 +301,11 @@ def _exception_pair(**log_kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     except ValueError as err:
         exc = err
 
-    buf = io.StringIO()
-    configure(service="svc", level="DEBUG", stream=buf)
-    structguru.logger.error("failed", exc_info=exc, **log_kwargs)
-    standard = json.loads(buf.getvalue().strip().splitlines()[-1])
+    standard = json.loads(
+        structlog_reference_line(
+            "error", "failed", logger_name=__name__, kwargs={"exc_info": exc, **log_kwargs}
+        )
+    )
 
     _runtime.configure(service="svc", target="memory", level="DEBUG")
     try:
@@ -268,10 +334,9 @@ def test_parity_exception_with_chained_cause() -> None:
     except RuntimeError as err:
         exc = err
 
-    buf = io.StringIO()
-    configure(service="svc", level="DEBUG", stream=buf)
-    structguru.logger.error("failed", exc_info=exc)
-    standard = json.loads(buf.getvalue().strip().splitlines()[-1])
+    standard = json.loads(
+        structlog_reference_line("error", "failed", logger_name=__name__, kwargs={"exc_info": exc})
+    )
 
     _runtime.configure(service="svc", target="memory", level="DEBUG")
     try:

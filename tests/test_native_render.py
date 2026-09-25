@@ -1,8 +1,10 @@
-"""Golden-parity tests: native render path vs the structlog JSON output.
+"""Parity tests: native render path vs the structlog/orjson reference.
 
-Compares parsed dicts (ignoring the volatile ``timestamp`` value) so field
-order is not asserted here — only that the native path produces the same keys
-and values as the current structlog pipeline for the common, non-exception case.
+Compares parsed dicts (ignoring the volatile ``timestamp`` value) against
+``structlog_reference_line`` (``_structlog_reference.py``), the pre-1.0 structlog processor
+chain rendered with orjson, so field order is not asserted here — only that
+the native path produces the same keys and values for the common case. Byte
+parity lives in ``test_parity_golden.py``.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ import uuid
 from typing import Any
 
 import pytest
-from conftest import configure
+from _structlog_reference import structlog_reference_line
 
 import structguru
 from structguru import _runtime
@@ -30,11 +32,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def _standard_json(bound: dict[str, Any], method: str, msg: str, **kwargs: Any) -> dict[str, Any]:
-    buf = io.StringIO()
-    configure(service="svc", level="DEBUG", stream=buf)
-    log = structguru.logger.bind(**bound)
-    getattr(log, method)(msg, **kwargs)
-    line = buf.getvalue().strip().splitlines()[-1]
+    line = structlog_reference_line(method, msg, logger_name=__name__, bound=bound, kwargs=kwargs)
     return json.loads(line)
 
 
@@ -132,10 +130,11 @@ def test_native_exception_matches_structlog() -> None:
     finally:
         _runtime.shutdown()
 
-    buf = io.StringIO()
-    configure(service="svc", level="DEBUG", stream=buf)
-    structguru.logger.error("failed", code=1, exc_info=exc)
-    standard = json.loads(buf.getvalue().strip().splitlines()[-1])
+    standard = json.loads(
+        structlog_reference_line(
+            "error", "failed", logger_name=__name__, kwargs={"code": 1, "exc_info": exc}
+        )
+    )
 
     assert native["exception"] == standard["exception"]
     assert native["level"] == "ERROR"
