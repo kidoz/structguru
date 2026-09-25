@@ -436,40 +436,129 @@ const ANSI_RED: &str = "\x1b[31m";
 const ANSI_BOLD_RED: &str = "\x1b[1;31m";
 const ANSI_RESET: &str = "\x1b[0m";
 
-/// Append `s` with control characters escaped.
+/// Whether `ch` must not reach console output raw.
 ///
-/// The JSON renderer gets this from serde_json; the human-readable console path
-/// does not, so without it a request-controlled field value or message could
-/// embed a newline (forging a separate log line) or an ANSI escape sequence
-/// (manipulating the operator's terminal). Escaping neutralizes both while
-/// keeping ordinary text readable.
-fn push_escaped(buf: &mut String, s: &str) {
+/// The JSON renderer gets escaping from serde_json; the human-readable console
+/// path does not, so without this a request-controlled message or field could
+/// embed a newline (forging a separate log line), an ANSI escape sequence
+/// (manipulating the operator's terminal), a Unicode line or paragraph
+/// separator (a line break for `str.splitlines()` and many viewers), or a
+/// bidirectional formatting control (reordering how the rest of the line
+/// displays). Covers C0/C1 controls, U+2028, U+2029, and the bidi controls.
+fn is_console_unsafe(ch: char) -> bool {
+    ch.is_control()
+        || matches!(
+            ch,
+            '\u{2028}'
+                | '\u{2029}'
+                | '\u{061C}'
+                | '\u{200E}'
+                | '\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2066}'..='\u{2069}'
+        )
+}
+
+fn push_char_escape(buf: &mut String, ch: char) {
     use std::fmt::Write;
-    for ch in s.chars() {
-        match ch {
-            '\n' => buf.push_str("\\n"),
-            '\r' => buf.push_str("\\r"),
-            '\t' => buf.push_str("\\t"),
-            c if c.is_control() => {
-                let _ = write!(buf, "\\x{:02x}", c as u32);
-            }
-            c => buf.push(c),
+    match ch {
+        '\n' => buf.push_str("\\n"),
+        '\r' => buf.push_str("\\r"),
+        '\t' => buf.push_str("\\t"),
+        c if u32::from(c) <= 0xFF => {
+            let _ = write!(buf, "\\x{:02x}", u32::from(c));
         }
+        c => {
+            let _ = write!(buf, "\\u{:04x}", u32::from(c));
+        }
+    }
+}
+
+/// Append free text (timestamp, level, message, stack and exception lines)
+/// with unsafe characters escaped. Backslashes stay literal, so paths and
+/// regexes remain readable.
+fn push_escaped(buf: &mut String, s: &str) {
+    // Printable ASCII needs no escaping: copy it in one step.
+    if s.bytes().all(|byte| (0x20..0x7F).contains(&byte)) {
+        buf.push_str(s);
+        return;
+    }
+    for ch in s.chars() {
+        if is_console_unsafe(ch) {
+            push_char_escape(buf, ch);
+        } else {
+            buf.push(ch);
+        }
+    }
+}
+
+/// Append `s` as a double-quoted console string. `"` and `\` are escaped as
+/// well, so a value cannot close its quotes and forge a following `k=v` pair,
+/// and a literal backslash sequence stays distinguishable from an escape.
+fn push_quoted(buf: &mut String, s: &str) {
+    buf.push('"');
+    if s.bytes()
+        .all(|byte| (0x20..0x7F).contains(&byte) && byte != b'"' && byte != b'\\')
+    {
+        buf.push_str(s);
+    } else {
+        for ch in s.chars() {
+            match ch {
+                '"' => buf.push_str("\\\""),
+                '\\' => buf.push_str("\\\\"),
+                c if is_console_unsafe(c) => push_char_escape(buf, c),
+                c => buf.push(c),
+            }
+        }
+    }
+    buf.push('"');
+}
+
+/// Append a field key bare, or quoted when its text could be mistaken for
+/// separators: whitespace, `=`, quotes, backslashes, and unsafe characters at
+/// any depth, plus the `:`, `,`, `{`, `}` delimiters inside a nested map.
+fn push_key(buf: &mut String, key: &str, nested: bool) {
+    let ambiguous = key.is_empty()
+        || key.chars().any(|ch| {
+            ch.is_whitespace()
+                || matches!(ch, '=' | '"' | '\\')
+                || (nested && matches!(ch, ':' | ',' | '{' | '}'))
+                || is_console_unsafe(ch)
+        });
+    if ambiguous {
+        push_quoted(buf, key);
+    } else {
+        buf.push_str(key);
+    }
+}
+
+/// Append a multi-line block (stack, exception) with every line indented as a
+/// continuation of the record and escaped after redaction.
+fn push_block(buf: &mut String, text: &str) {
+    for line in text.split('\n') {
+        buf.push_str("\n  ");
+        push_escaped(buf, line);
     }
 }
 
 /// Format a [`Value`] for the console renderer (human-readable, not JSON).
 fn display_value(value: &Value, buf: &mut String) {
+    use std::fmt::Write;
     match value {
         Value::Null => buf.push_str("None"),
         Value::Bool(b) => buf.push_str(if *b { "True" } else { "False" }),
-        Value::Int(i) => buf.push_str(&i.to_string()),
-        Value::Float(f) => buf.push_str(&f.to_string()),
-        Value::String(s) => {
-            buf.push('"');
-            push_escaped(buf, s);
-            buf.push('"');
+        Value::Int(i) => {
+            let _ = write!(buf, "{i}");
         }
+        // The JSON renderer's shortest round-trip text: 1.0 stays `1.0` and
+        // 1e300 stays short. Non-finite floats render like JSON null.
+        Value::Float(f) => match serde_json::Number::from_f64(*f) {
+            Some(number) => {
+                let _ = write!(buf, "{number}");
+            }
+            None => buf.push_str("None"),
+        },
+        Value::String(s) => push_quoted(buf, s),
         Value::List(items) => {
             buf.push('[');
             for (i, item) in items.iter().enumerate() {
@@ -486,7 +575,7 @@ fn display_value(value: &Value, buf: &mut String) {
                 if i > 0 {
                     buf.push_str(", ");
                 }
-                push_escaped(buf, k);
+                push_key(buf, k, true);
                 buf.push(':');
                 display_value(v, buf);
             }
@@ -498,12 +587,15 @@ fn display_value(value: &Value, buf: &mut String) {
 
 /// Render a single log line as a colored, human-readable console string.
 ///
-/// Format: ``<timestamp> [<LEVEL>] <message>  k1=v1 k2=v2``
+/// Format: ``<timestamp> [<LEVEL>] <message>  k1=v1  k2=v2``, then the stack
+/// and a formatted (string) `exception` as indented blocks.
 ///
 /// This is structguru's own stable dev format, not a structlog
-/// ``ConsoleRenderer`` clone. Fields are rendered as ``k=v`` pairs after the
-/// message. The same redaction pipeline as [`render_line`] is applied first.
-#[allow(clippy::too_many_arguments, dead_code)]
+/// ``ConsoleRenderer`` clone. The same redaction pipeline as [`render_line`]
+/// is applied first, and the fields shown are the ones the JSON renderer keeps:
+/// user `logger`/`level`/`severity`/`timestamp`/`message` values (which JSON
+/// overrides) are omitted, as is a user `stack` when a stack is rendered.
+#[allow(clippy::too_many_arguments)]
 pub fn render_line_console(
     fields: Vec<(String, Value)>,
     logger: &str,
@@ -535,13 +627,13 @@ pub fn render_line_console(
     let (level_pad, color) = level_style(&canonical, colors);
 
     let mut out = String::with_capacity(128);
-    out.push_str(timestamp);
+    push_escaped(&mut out, timestamp);
     out.push(' ');
     if colors {
         out.push_str(color);
     }
     out.push('[');
-    out.push_str(&level_pad);
+    push_escaped(&mut out, &level_pad);
     out.push(']');
     if colors {
         out.push_str(ANSI_RESET);
@@ -549,26 +641,21 @@ pub fn render_line_console(
     out.push(' ');
     push_escaped(&mut out, &redacted_message);
 
-    // Append user fields as k=v pairs (skip standard keys).
-    let standard: &[&str] = &[
-        "logger",
-        "level",
-        "severity",
-        "timestamp",
-        "service",
-        "message",
-        "stack",
-    ];
-    for (key, value) in &entries {
-        if standard.contains(&key.as_str()) {
-            continue;
+    let mut exception = None;
+    for (key, value) in entries {
+        match (key.as_str(), value) {
+            ("logger" | "level" | "severity" | "timestamp" | "message", _) => {}
+            ("stack", _) if stack.is_some() => {}
+            ("exception", Value::String(text)) => exception = Some(text),
+            (_, value) => {
+                out.push_str("  ");
+                push_key(&mut out, &key, false);
+                out.push('=');
+                display_value(&value, &mut out);
+            }
         }
-        out.push_str("  ");
-        push_escaped(&mut out, key);
-        out.push('=');
-        display_value(value, &mut out);
     }
-    // Suppress unused-variable lint for logger/service (kept in signature for API symmetry).
+    // Logger and service are not part of the console layout.
     let _ = (logger, service);
 
     if let Some(stack) = stack {
@@ -579,12 +666,10 @@ pub fn render_line_console(
             sensitive_patterns,
             pattern_replacement,
         );
-        // Keep multiline stacks readable while marking every line as a
-        // continuation and neutralizing terminal controls after redaction.
-        for line in redacted_stack.split('\n') {
-            out.push_str("\n  ");
-            push_escaped(&mut out, line);
-        }
+        push_block(&mut out, &redacted_stack);
+    }
+    if let Some(exception) = exception {
+        push_block(&mut out, &exception);
     }
     out
 }
@@ -1285,6 +1370,103 @@ mod tests {
         assert!(!line.contains('\x1b'));
         assert!(line.contains("line1\\nlevel=CRITICAL forged"));
         assert!(line.contains("note=\"val\\x1b[2Jwiped\""));
+    }
+
+    #[test]
+    fn console_quotes_ambiguous_keys_and_escapes_quoted_values() {
+        let fields = vec![
+            (
+                "user".to_owned(),
+                Value::String(r#"bob"  admin="true"#.to_owned()),
+            ),
+            ("a=1  b".to_owned(), Value::String("v".to_owned())),
+            ("lit".to_owned(), Value::String(r"x\ny".to_owned())),
+            (
+                "nested".to_owned(),
+                Value::Map(vec![("a:1, b".to_owned(), Value::Int(2))]),
+            ),
+        ];
+        let line = render_line_console(
+            fields, "l", "info", "svc", "m", false, "TS", None, None, None, None,
+        );
+        assert_eq!(
+            line,
+            r#"TS [INFO    ] m  user="bob\"  admin=\"true"  "a=1  b"="v"  lit="x\\ny"  nested={"a:1, b":2}"#,
+        );
+    }
+
+    #[test]
+    fn console_escapes_line_separators_and_bidi_controls() {
+        let fields = vec![(
+            "k\u{202E}".to_owned(),
+            Value::String("a\u{2028}b".to_owned()),
+        )];
+        let line = render_line_console(
+            fields,
+            "l",
+            "info",
+            "svc",
+            "m\u{2029}\u{061C}",
+            false,
+            "TS",
+            None,
+            None,
+            None,
+            Some("s\u{2066}"),
+        );
+        assert_eq!(
+            line,
+            r#"TS [INFO    ] m\u2029\u061c  "k\u202e"="a\u2028b"
+  s\u2066"#,
+        );
+    }
+
+    #[test]
+    fn console_floats_match_json_number_text() {
+        let fields = vec![
+            ("one".to_owned(), Value::Float(1.0)),
+            ("big".to_owned(), Value::Float(1e300)),
+            ("negz".to_owned(), Value::Float(-0.0)),
+            ("nan".to_owned(), Value::Float(f64::NAN)),
+        ];
+        let line = render_line_console(
+            fields, "l", "info", "svc", "m", false, "TS", None, None, None, None,
+        );
+        assert_eq!(
+            line,
+            "TS [INFO    ] m  one=1.0  big=1e+300  negz=-0.0  nan=None"
+        );
+    }
+
+    #[test]
+    fn console_renders_string_exception_as_block_after_stack() {
+        let fields = vec![
+            ("code".to_owned(), Value::Int(1)),
+            (
+                "exception".to_owned(),
+                Value::String("Traceback:\n  frame\nValueError: x".to_owned()),
+            ),
+            ("service".to_owned(), Value::String("user-svc".to_owned())),
+            ("stack".to_owned(), Value::String("user-stack".to_owned())),
+            ("logger".to_owned(), Value::String("spoof".to_owned())),
+        ];
+        let line = render_line_console(
+            fields,
+            "l",
+            "error",
+            "svc",
+            "failed",
+            false,
+            "TS",
+            None,
+            None,
+            None,
+            Some("Stack:\n  f"),
+        );
+        assert_eq!(
+            line,
+            "TS [ERROR   ] failed  code=1  service=\"user-svc\"\n  Stack:\n    f\n  Traceback:\n    frame\n  ValueError: x",
+        );
     }
 
     #[test]
