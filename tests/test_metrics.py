@@ -69,3 +69,16 @@ class TestMetricProcessor:
 
         result = proc(None, "info", {"event": "db.query executed", "duration_ms": 10.0})
         assert "event" in result  # event dict still passed through
+
+
+def test_event_field_never_replaces_the_message_metrics_match() -> None:
+    from structguru import _runtime, logger
+
+    hits: list[str] = []
+    processor = MetricProcessor().counter("user.login", lambda ed: hits.append(ed["event"]))
+    _runtime.configure(target="memory", metric_processor=processor)
+    logger.info("user.login succeeded", event="click")
+    logger.info("page view", event="user.login")
+    _runtime.flush()
+    assert hits == ["user.login succeeded"]
+    assert '"event":"click"' in _runtime.drain_messages()[0]

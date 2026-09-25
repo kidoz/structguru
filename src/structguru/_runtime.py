@@ -408,14 +408,19 @@ def notify_metrics(
 
     Called on the caller's thread (never the writer thread) with a
     pre-``EventRenamer``-shaped event dict, matching what ``MetricProcessor``
-    sees on the standard path. No-op when no processor is configured; hook
+    sees on the standard path. The message always occupies ``"event"``, as in
+    :func:`notify_sentry`: a user field by that name renders natively but must
+    not change which metrics fire. No-op when no processor is configured; hook
     errors are swallowed — metrics must never break logging.
     """
     state = runtime or current_runtime()
     if state is None or state.metric_processor is None:
         return
+    event_dict = {"event": message, **fields}
+    if "event" in fields:
+        event_dict["event"] = message
     try:
-        state.metric_processor(None, method, {"event": message, **fields})
+        state.metric_processor(None, method, event_dict)
     except Exception:  # noqa: BLE001 - hooks must never break logging
         pass
 
@@ -629,7 +634,8 @@ def configure(settings: Settings | None = None, **changes: Unpack[SettingsChange
 
     ``metric_processor`` is a structlog-style processor (e.g.
     :class:`structguru.metrics.MetricProcessor`) invoked for every *kept* record
-    with ``(None, method, {"event": message, **fields})`` before rendering.
+    with ``(None, method, {"event": message, **fields})`` before rendering; the
+    message stays in ``"event"`` even when a field has that name.
     Records dropped by level filtering, sampling, or rate limiting never reach
     it. Exceptions raised by the processor are swallowed.
 
