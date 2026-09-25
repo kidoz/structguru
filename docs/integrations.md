@@ -432,7 +432,7 @@ retry.
 
 ## Flask
 
-`setup_flask_logging` registers `before_request` and `after_request` hooks for structured request logging.
+`setup_flask_logging` registers `before_request`, `after_request`, and `teardown_request` hooks for structured request logging.
 
 ### Basic Usage
 
@@ -460,6 +460,31 @@ setup_flask_logging(
 - `method`: HTTP method.
 - `path`: The request path.
 - `client_ip`: The client's IP address.
+
+### Request Lifecycle
+
+- The binding hook runs before every other application-level `before_request`
+  hook, including ones registered before `setup_flask_logging`. A hook that ends
+  the request early (an authentication `401`, a rate-limit `429`) still gets a
+  request ID, the response header, and a summary line, and context those hooks
+  bind is kept for the rest of the request. The context is cleared after every
+  other application `teardown_request` hook, so those hooks log with it too.
+- A streamed body (a generator, with or without `stream_with_context`) is
+  produced with the request context bound, and its `Request completed` summary
+  is logged when the body is exhausted or closed, so `duration_ms` includes the
+  streaming time. A body that raises while streaming is logged as
+  `Request failed` at `ERROR`. Files passed straight to the server
+  (`send_file`) and error pages are summarized when the response is returned.
+  Werkzeug's test client reads a streamed body lazily, so in tests the summary
+  appears after `response.get_data()` or `response.close()`.
+- When an exception propagates past Flask (`PROPAGATE_EXCEPTIONS`, testing, or
+  debug mode), `after_request` does not run; the summary is logged from the
+  teardown hook as `Request failed` with status `500` and the exception.
+- Every request logs exactly one summary. A non-streamed summary is logged once
+  Flask has finalized the response (the `request_finished` signal), so when an
+  `after_request` hook that runs later fails and Flask answers with a `500`
+  instead, the summary reports the `500`. If the error response fails to
+  finalize as well, it is logged as `Request failed`.
 
 ## Django
 
@@ -497,6 +522,18 @@ The middleware automatically:
 - Binds `user_id` if `request.user.pk` is available.
 - Adds `X-Request-ID` to the HTTP response.
 - Logs a summary line with the status code and duration.
+
+For streaming responses — `StreamingHttpResponse` with a synchronous or
+asynchronous iterator, and `FileResponse` — the summary is logged when the server
+closes the response, so `duration_ms` includes the streaming time. The body's
+iterator runs with the request context bound; a body that raises is logged as
+`Request failed`, and one cancelled by a client disconnect under ASGI as
+`Request cancelled`. A `FileResponse` over a file keeps the file, so WSGI
+servers can still send it with `wsgi.file_wrapper`.
+
+`build_logging_config` adds `service` to every line: as a `service` field in
+JSON mode, and after the level in console mode
+(`2026-01-01 12:00:00,000 [INFO] my-django-app django.request: ...`).
 
 ## SQLAlchemy
 

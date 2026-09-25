@@ -310,3 +310,248 @@ class TestErrorLoggingThroughBridge:
         assert rec["request"] == "<unsupported: WSGIRequest>"
         assert "RuntimeError: synthetic application failure" in rec["exception"]
         assert "Logging error" not in capsys.readouterr().err
+
+
+def _django_settings() -> None:
+    pytest.importorskip("django")
+    from django.conf import settings
+
+    if not settings.configured:
+        settings.configure(DEFAULT_CHARSET="utf-8")
+
+
+def _stream_request(request_id: str) -> MagicMock:
+    request = MagicMock(method="GET", path="/stream")
+    request.META = {"HTTP_X_REQUEST_ID": request_id, "REMOTE_ADDR": "10.0.0.9"}
+    request.user.pk = None
+    return request
+
+
+def _fake_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    from types import SimpleNamespace
+
+    from structguru.integrations import django as django_module
+
+    clock = [0.0]
+    monkeypatch.setattr(django_module, "time", SimpleNamespace(perf_counter=lambda: clock[0]))
+    return clock
+
+
+def _records(buf: io.StringIO) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in buf.getvalue().splitlines() if line.strip()]
+
+
+class TestStreamingResponses:
+    def test_sync_stream_runs_with_request_context_and_summarizes_at_the_end(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _django_settings()
+        from django.http import StreamingHttpResponse
+
+        from structguru import logger
+
+        clock = _fake_clock(monkeypatch)
+        buf = io.StringIO()
+        configure(service="test", stream=buf)
+        clear_contextvars()
+
+        def view(request: Any) -> StreamingHttpResponse:
+            bind_contextvars(user="u1")
+
+            def generate():  # type: ignore[no-untyped-def]
+                for i in range(2):
+                    clock[0] += 1.5
+                    logger.info("chunk", i=i)
+                    yield b"x"
+
+            return StreamingHttpResponse(generate())
+
+        response = StructguruMiddleware(view)(_stream_request("rid-stream"))
+        assert response["X-Request-ID"] == "rid-stream"
+        assert get_contextvars() == {}
+        assert _records(buf) == []
+
+        chunks = iter(response)
+        assert next(chunks) == b"x"
+        assert get_contextvars() == {}
+        assert list(chunks) == [b"x"]
+        response.close()
+        assert get_contextvars() == {}
+
+        first, second, summary = _records(buf)
+        for record in (first, second):
+            assert record["request_id"] == "rid-stream"
+            assert record["path"] == "/stream"
+            assert record["user"] == "u1"
+        assert summary["message"] == "Request completed"
+        assert summary["request_id"] == "rid-stream"
+        assert summary["status_code"] == 200
+        assert summary["duration_ms"] == 3000.0
+
+    async def test_async_stream_runs_with_request_context(self) -> None:
+        _django_settings()
+        from django.http import StreamingHttpResponse
+
+        from structguru import logger
+
+        buf = io.StringIO()
+        configure(service="test", stream=buf)
+        clear_contextvars()
+
+        def view(request: Any) -> StreamingHttpResponse:
+            async def generate():  # type: ignore[no-untyped-def]
+                logger.info("async chunk")
+                yield b"a"
+                yield b"b"
+
+            return StreamingHttpResponse(generate())
+
+        response = StructguruMiddleware(view)(_stream_request("rid-async"))
+        assert response.is_async
+        parts = [part async for part in response]
+        assert parts == [b"a", b"b"]
+        assert get_contextvars() == {}
+        response.close()
+
+        chunk, summary = _records(buf)
+        assert chunk["message"] == "async chunk"
+        assert chunk["request_id"] == "rid-async"
+        assert summary["message"] == "Request completed"
+        assert summary["request_id"] == "rid-async"
+
+    async def test_cancelled_async_stream_is_logged_as_cancelled(self) -> None:
+        import asyncio
+
+        _django_settings()
+        from django.http import StreamingHttpResponse
+
+        buf = io.StringIO()
+        configure(service="test", stream=buf)
+        clear_contextvars()
+
+        def view(request: Any) -> StreamingHttpResponse:
+            async def generate():  # type: ignore[no-untyped-def]
+                yield b"a"
+                raise asyncio.CancelledError  # the client disconnected
+
+            return StreamingHttpResponse(generate())
+
+        response = StructguruMiddleware(view)(_stream_request("rid-gone"))
+        with pytest.raises(asyncio.CancelledError):
+            async for _part in response:
+                pass
+        response.close()
+        [summary] = _records(buf)
+        assert summary["message"] == "Request cancelled"
+        assert summary["level"] == "INFO"
+        assert summary["request_id"] == "rid-gone"
+        assert get_contextvars() == {}
+
+    def test_stream_failure_and_early_close(self) -> None:
+        _django_settings()
+        from django.http import StreamingHttpResponse
+
+        buf = io.StringIO()
+        configure(service="test", stream=buf)
+        clear_contextvars()
+        cleanup_contexts: list[dict[str, Any]] = []
+
+        def failing(request: Any) -> StreamingHttpResponse:
+            def generate():  # type: ignore[no-untyped-def]
+                yield b"a"
+                raise RuntimeError("stream broke")
+
+            return StreamingHttpResponse(generate())
+
+        response = StructguruMiddleware(failing)(_stream_request("rid-broken"))
+        with pytest.raises(RuntimeError, match="stream broke"):
+            list(response)
+        response.close()
+        [summary] = _records(buf)
+        assert summary["message"] == "Request failed"
+        assert summary["level"] == "ERROR"
+        assert summary["request_id"] == "rid-broken"
+        assert "RuntimeError: stream broke" in summary["exception"]
+
+        buf.truncate(0)
+        buf.seek(0)
+
+        def partial(request: Any) -> StreamingHttpResponse:
+            def generate():  # type: ignore[no-untyped-def]
+                try:
+                    yield b"a"
+                    yield b"b"
+                finally:
+                    cleanup_contexts.append(get_contextvars())
+
+            return StreamingHttpResponse(generate())
+
+        response = StructguruMiddleware(partial)(_stream_request("rid-partial"))
+        assert next(iter(response)) == b"a"
+        response.close()  # the server gives up after one chunk
+        assert cleanup_contexts[-1]["request_id"] == "rid-partial"
+        [summary] = _records(buf)
+        assert summary["message"] == "Request completed"
+        assert summary["request_id"] == "rid-partial"
+        assert get_contextvars() == {}
+
+    def test_file_response_keeps_its_file_and_summarizes_on_close(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _django_settings()
+        from django.http import FileResponse
+
+        clock = _fake_clock(monkeypatch)
+        buf = io.StringIO()
+        configure(service="test", stream=buf)
+        clear_contextvars()
+        body = io.BytesIO(b"file-body")
+
+        response = StructguruMiddleware(lambda request: FileResponse(body))(
+            _stream_request("rid-file")
+        )
+        # The file stays available to wsgi.file_wrapper (sendfile) servers.
+        assert response.file_to_stream is body
+        assert _records(buf) == []
+        clock[0] += 2.0
+        assert b"".join(response) == b"file-body"
+        response.close()
+        assert body.closed
+        [summary] = _records(buf)
+        assert summary["message"] == "Request completed"
+        assert summary["request_id"] == "rid-file"
+        assert summary["duration_ms"] == 2000.0
+        assert get_contextvars() == {}
+
+    def test_non_streaming_response_is_summarized_immediately(self) -> None:
+        _django_settings()
+        from django.http import HttpResponse
+
+        buf = io.StringIO()
+        configure(service="test", stream=buf)
+        response = StructguruMiddleware(lambda request: HttpResponse("ok"))(
+            _stream_request("rid-plain")
+        )
+        [summary] = _records(buf)
+        assert summary["request_id"] == "rid-plain"
+        response.close()
+        assert len(_records(buf)) == 1
+
+
+class TestBuildLoggingConfigService:
+    @pytest.mark.parametrize("json_logs", [True, False])
+    def test_service_appears_in_every_mode(self, json_logs: bool) -> None:
+        buf = io.StringIO()
+        config = build_logging_config(service="svc-100%", json_logs=json_logs)
+        config["handlers"]["console"]["stream"] = buf
+        logging.config.dictConfig(config)
+        try:
+            logging.getLogger("t").warning("hello")
+            line = buf.getvalue().strip()
+            if json_logs:
+                assert json.loads(line)["service"] == "svc-100%"
+            else:
+                assert "svc-100%" in line
+                assert line.endswith("t: hello")
+        finally:
+            logging.config.dictConfig({"version": 1, "disable_existing_loggers": False})

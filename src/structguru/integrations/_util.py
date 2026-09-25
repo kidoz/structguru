@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable, Iterator
+from typing import Any, Generic, TypeVar
 from urllib.parse import urlsplit, urlunsplit
 
-from structguru._contextvars import bind_contextvars, clear_contextvars
+from structguru._contextvars import bind_contextvars, clear_contextvars, get_contextvars
 from structguru.redaction import DEFAULT_SENSITIVE_KEYS
 
 REQUEST_ID_MAX_LEN = 128
@@ -31,6 +32,8 @@ CREDENTIAL_HEADERS: frozenset[str] = frozenset(
         "x-amz-security-token",
     }
 )
+
+_T = TypeVar("_T")
 
 
 def sanitize_url(raw: object) -> str:
@@ -151,3 +154,192 @@ def replace_contextvars(fields: dict[str, Any]) -> None:
     clear_contextvars()
     if fields:
         bind_contextvars(**fields)
+
+
+class StreamState:
+    """Request state shared by a lazily produced (streamed) response body.
+
+    Holds the request context to re-bind while the body is produced, and a
+    one-shot completion callback that runs when the body is exhausted, fails,
+    or is closed — whichever comes first.
+
+    Parameters
+    ----------
+    context:
+        Context snapshot taken when the handler returned the response.
+    on_finish:
+        Called once with the exception that ended the stream, or ``None``.
+    """
+
+    __slots__ = ("_on_finish", "context", "finished")
+
+    def __init__(
+        self,
+        context: dict[str, Any],
+        on_finish: Callable[[BaseException | None], None],
+    ) -> None:
+        self.context = context
+        self.finished = False
+        self._on_finish = on_finish
+
+    def enter(self) -> None:
+        """Bind the request context (replacing whatever is bound)."""
+        replace_contextvars(self.context)
+
+    def save(self) -> None:
+        """Keep enrichment the body bound while producing a chunk."""
+        self.context = get_contextvars()
+
+    def finish(
+        self,
+        error: BaseException | None = None,
+        caller_context: dict[str, Any] | None = None,
+    ) -> None:
+        """Run the completion callback once, then hand the context back.
+
+        The callback runs with the request context bound. Afterwards
+        *caller_context* is restored — unless the framework ended the request
+        (cleared the context) while the body ran, as Flask's
+        ``stream_with_context`` does during the last chunk, or no caller
+        context is given. Then the context is left clear, so a finished
+        request is never bound again.
+        """
+        request_ended = not get_contextvars()
+        try:
+            if not self.finished:
+                self.finished = True
+                replace_contextvars(self.context)
+                self._on_finish(error)
+        finally:
+            if caller_context is not None and not request_ended:
+                replace_contextvars(caller_context)
+            else:
+                clear_contextvars()
+
+
+class ContextBoundIterator(Generic[_T]):
+    """Iterate a lazy response body with its request context bound.
+
+    Each step binds the request context while the body produces a chunk (so
+    its logs carry it), keeps enrichment the body made for the next step, and
+    then restores the caller's context, so nothing leaks into the server's own
+    work before, between, or after chunks. Exhaustion, a failure, or
+    :meth:`close` finishes the stream: the completion callback runs with the
+    request context (see :meth:`StreamState.finish`).
+    """
+
+    def __init__(self, iterable: Iterable[_T], state: StreamState) -> None:
+        self._iterable = iterable
+        self._iterator: Iterator[_T] | None = None
+        self._state = state
+
+    def __iter__(self) -> ContextBoundIterator[_T]:
+        return self
+
+    def __next__(self) -> _T:
+        state = self._state
+        if state.finished:
+            raise StopIteration
+        caller_context = get_contextvars()
+        state.enter()
+        try:
+            if self._iterator is None:
+                self._iterator = iter(self._iterable)
+            item = next(self._iterator)
+        except StopIteration:
+            state.finish(None, caller_context)
+            raise
+        except BaseException as exc:
+            state.finish(exc, caller_context)
+            raise
+        state.save()
+        replace_contextvars(caller_context)
+        return item
+
+    def close(self) -> None:
+        """Close the wrapped body (with its context bound) and finish the stream."""
+        state = self._state
+        closers = [getattr(self._iterable, "close", None)]
+        if self._iterator is not None and self._iterator is not self._iterable:
+            closers.append(getattr(self._iterator, "close", None))
+        if state.finished:
+            for close in closers:
+                if close is not None:
+                    close()
+            return
+        caller_context = get_contextvars()
+        state.enter()
+        error: BaseException | None = None
+        try:
+            for close in closers:
+                if close is not None:
+                    close()
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            state.finish(error, caller_context)
+
+
+class ContextBoundAsyncIterator(Generic[_T]):
+    """Asynchronous counterpart of :class:`ContextBoundIterator`.
+
+    It deliberately has no ``__iter__`` so frameworks that detect async bodies
+    by the absence of synchronous iteration (Django) keep treating it as one.
+    The synchronous :meth:`close` finishes the stream without awaiting the
+    wrapped iterator, for response-level ``close()`` hooks.
+    """
+
+    def __init__(self, iterable: AsyncIterable[_T], state: StreamState) -> None:
+        self._iterable = iterable
+        self._iterator: AsyncIterator[_T] | None = None
+        self._state = state
+
+    def __aiter__(self) -> ContextBoundAsyncIterator[_T]:
+        return self
+
+    async def __anext__(self) -> _T:
+        state = self._state
+        if state.finished:
+            raise StopAsyncIteration
+        caller_context = get_contextvars()
+        state.enter()
+        try:
+            if self._iterator is None:
+                self._iterator = aiter(self._iterable)
+            item = await anext(self._iterator)
+        except StopAsyncIteration:
+            state.finish(None, caller_context)
+            raise
+        except BaseException as exc:
+            state.finish(exc, caller_context)
+            raise
+        state.save()
+        replace_contextvars(caller_context)
+        return item
+
+    async def aclose(self) -> None:
+        """Close the wrapped body (with its context bound) and finish the stream."""
+        state = self._state
+        target = self._iterator if self._iterator is not None else self._iterable
+        aclose = getattr(target, "aclose", None)
+        if state.finished:
+            if aclose is not None:
+                await aclose()
+            return
+        caller_context = get_contextvars()
+        state.enter()
+        error: BaseException | None = None
+        try:
+            if aclose is not None:
+                await aclose()
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            state.finish(error, caller_context)
+
+    def close(self) -> None:
+        """Finish the stream without awaiting the wrapped iterator."""
+        if not self._state.finished:
+            self._state.finish(None, get_contextvars())

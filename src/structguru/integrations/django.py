@@ -19,16 +19,22 @@ Usage in ``settings.py``::
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import time
 from typing import Any
 
-from structguru._contextvars import bind_contextvars, clear_contextvars
+from structguru._contextvars import bind_contextvars, clear_contextvars, get_contextvars
 from structguru.core import Logger
 from structguru.integrations._stdlib_env import optional_bool_from_env
-from structguru.integrations._util import coerce_request_id
+from structguru.integrations._util import (
+    ContextBoundAsyncIterator,
+    ContextBoundIterator,
+    StreamState,
+    coerce_request_id,
+)
 
 
 class _JSONLogFormatter(logging.Formatter):
@@ -79,7 +85,8 @@ def build_logging_config(
     Parameters
     ----------
     service:
-        Application name added to every log record (as a logging filter).
+        Application name added to every rendered line: the ``service`` field
+        in JSON mode, a prefix after the level in console mode.
     level:
         Root log level.
     json_logs:
@@ -106,7 +113,11 @@ def build_logging_config(
                 "service": service,
             },
             "console": {
-                "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                # Escape '%' so the service name cannot act as a format directive.
+                "format": (
+                    f"%(asctime)s [%(levelname)s] {service.replace('%', '%%')} "
+                    "%(name)s: %(message)s"
+                ),
             },
         },
         "handlers": {
@@ -128,6 +139,12 @@ class StructguruMiddleware:
     Binds ``request_id``, ``method``, ``path``, ``client_ip`` (and ``user_id``
     when available) to structguru context variables for the duration of each
     request.
+
+    Streaming responses (``StreamingHttpResponse`` with a synchronous or an
+    asynchronous iterator, and ``FileResponse``) are summarized when the server
+    closes the response, so ``duration_ms`` covers the streaming time, and
+    application iterators are produced with the request context bound. A
+    ``FileResponse`` over a file keeps its file for ``wsgi.file_wrapper``.
     """
 
     def __init__(self, get_response: Any) -> None:
@@ -138,7 +155,8 @@ class StructguruMiddleware:
         """Bind request context for the duration of one Django request.
 
         Context is cleared on entry and on every exit path, so a recycled
-        worker thread never inherits the previous request's fields.
+        worker thread never inherits the previous request's fields. A streamed
+        body re-binds the request context only while it produces chunks.
         """
         clear_contextvars()
         try:
@@ -162,13 +180,61 @@ class StructguruMiddleware:
                 self.log.exception("Request failed")
                 raise
             else:
-                duration_ms = (time.perf_counter() - start_time) * 1000
-                self.log.info(
-                    "Request completed",
-                    status_code=response.status_code,
-                    duration_ms=round(duration_ms, 2),
-                )
+                if getattr(response, "streaming", False) is True:
+                    self._summarize_on_close(response, start_time)
+                else:
+                    self._log_summary(start_time, response.status_code, None)
                 response["X-Request-ID"] = request_id
                 return response
         finally:
             clear_contextvars()
+
+    def _log_summary(
+        self, start_time: float, status_code: int, error: BaseException | None
+    ) -> None:
+        duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        if isinstance(error, asyncio.CancelledError):
+            # The ASGI handler cancels the body when the client disconnects.
+            self.log.info("Request cancelled", status_code=status_code, duration_ms=duration_ms)
+        elif error is not None:
+            self.log.error(
+                "Request failed", exc_info=error, status_code=status_code, duration_ms=duration_ms
+            )
+        else:
+            self.log.info("Request completed", status_code=status_code, duration_ms=duration_ms)
+
+    def _summarize_on_close(self, response: Any, start_time: float) -> None:
+        """Defer the summary of a streaming *response* until its body is done."""
+
+        def finish(error: BaseException | None) -> None:
+            self._log_summary(start_time, response.status_code, error)
+
+        state = StreamState(get_contextvars(), finish)
+        if getattr(response, "file_to_stream", None) is None:
+            # Re-assigning keeps Django's own handling: the wrapper's close()
+            # joins the response's closers and sync/async detection still holds.
+            content = response.streaming_content
+            if getattr(response, "is_async", False) is True:
+                response.streaming_content = ContextBoundAsyncIterator(content, state)
+            else:
+                response.streaming_content = ContextBoundIterator(content, state)
+
+        # Servers call close() once the body is sent (WSGI, including
+        # wsgi.file_wrapper, and Django's ASGI handler). Closers such as a
+        # generator's cleanup run with the request context bound.
+        original_close = response.close
+
+        def close() -> None:
+            caller_context = get_contextvars()
+            if not state.finished:
+                state.enter()
+            error: BaseException | None = None
+            try:
+                original_close()
+            except BaseException as exc:
+                error = exc
+                raise
+            finally:
+                state.finish(error, caller_context)
+
+        response.close = close
