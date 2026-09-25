@@ -32,9 +32,11 @@ def setup_query_logging(
     engine:
         A :class:`sqlalchemy.engine.Engine`.
     slow_threshold_ms:
-        Log a warning when a query exceeds this duration (milliseconds).
+        Log a ``Slow query`` warning (``slow=True``) when a query takes at
+        least this long (milliseconds). ``0`` marks every query as slow.
     log_all:
-        If ``True``, log every query regardless of duration.
+        If ``True``, also log queries under the threshold, at ``DEBUG`` as
+        ``Query executed`` (``slow=False``). Slow queries keep their warning.
     logger_name:
         Name for the structguru logger.
     """

@@ -135,3 +135,22 @@ class TestSetupQueryLogging:
 
         output = buf.getvalue()
         assert "SELECT 1" in output
+
+
+def test_documented_log_all_recipe_logs_fast_queries_at_debug() -> None:
+    sqlalchemy = __import__("pytest").importorskip("sqlalchemy")
+    import json
+
+    from structguru.integrations.sqlalchemy import setup_query_logging
+
+    buf = io.StringIO()
+    configure(service="test", level="DEBUG", stream=buf)
+    engine = sqlalchemy.create_engine("sqlite:///:memory:")
+    # The "Logging All Queries" recipe from docs/integrations.md.
+    setup_query_logging(engine, log_all=True)
+    with engine.connect() as connection:
+        connection.execute(sqlalchemy.text("select 1"))
+    [record] = [json.loads(line) for line in buf.getvalue().splitlines()]
+    assert record["message"] == "Query executed"
+    assert record["level"] == "DEBUG"
+    assert record["slow"] is False

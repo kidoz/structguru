@@ -560,8 +560,13 @@ setup_query_logging(engine, slow_threshold_ms=100.0)
 For local development or debugging, you might want to see every query regardless of its duration:
 
 ```python
-setup_query_logging(engine, slow_threshold_ms=0, log_all=True)
+setup_query_logging(engine, log_all=True)
 ```
+
+Queries under `slow_threshold_ms` are logged at `DEBUG` as `Query executed`
+(`slow=false`); slower ones keep their `Slow query` warning. Leave the threshold
+above zero: `slow_threshold_ms=0` marks every query as slow and logs each one as
+a warning.
 
 ## gRPC
 
