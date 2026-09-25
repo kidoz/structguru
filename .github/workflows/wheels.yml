@@ -224,6 +224,53 @@ jobs:
           name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
           path: dist/*.whl
 
+  build-free-threaded:
+    # pip never selects an abi3 wheel on free-threaded CPython (3.14t has no
+    # stable ABI), so without these version-specific cp314t wheels a 3.14t
+    # install falls back to the sdist and needs a Rust toolchain.
+    name: free-threaded wheels ${{ matrix.platform.os }}-${{ matrix.platform.target }}
+    needs: metadata
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { runner: ubuntu-latest,  os: linux,   target: x86_64,  manylinux: auto }
+          - { runner: macos-14,       os: macos,   target: aarch64, manylinux: auto }
+          - { runner: windows-latest, os: windows, target: x64,     manylinux: auto }
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: "0.11.28"
+      - name: Install free-threaded Python
+        shell: bash
+        run: |
+          uv python install 3.14t
+          echo "FT_PYTHON=$(uv python find 3.14t)" >> "$GITHUB_ENV"
+      - name: Build wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          # Linux builds run inside the manylinux container, which ships its
+          # own free-threaded interpreter; macOS and Windows build on the host.
+          args: >-
+            --release --out dist --interpreter
+            ${{ matrix.platform.os == 'linux' && '/opt/python/cp314-cp314t/bin/python' || env.FT_PYTHON }}
+      - name: Smoke-test free-threaded wheel
+        shell: bash
+        run: |
+          uv venv --python 3.14t ft-venv
+          uv pip install --python ft-venv dist/*.whl
+          if [ -x ft-venv/bin/python ]; then py=ft-venv/bin/python; else py=ft-venv/Scripts/python.exe; fi
+          "$py" -c "import sys, structguru; assert not sys._is_gil_enabled(); assert structguru.is_available(); structguru.logger.info('wheel smoke test'); structguru.shutdown()"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wheels-free-threaded-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          path: dist/*.whl
+
   sdist:
     needs: metadata
     runs-on: ubuntu-latest
@@ -241,7 +288,7 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: [release-python, release-free-threaded, release-rust, build, sdist, supply-chain]
+    needs: [release-python, release-free-threaded, release-rust, build, build-free-threaded, sdist, supply-chain]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: pypi

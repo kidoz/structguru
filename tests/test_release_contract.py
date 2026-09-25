@@ -34,9 +34,21 @@ def test_publish_job_depends_on_release_and_supply_chain_gates() -> None:
     assert "release-rust" in workflow
     assert "supply-chain" in workflow
     assert (
-        "needs: [release-python, release-free-threaded, release-rust, build, sdist, supply-chain]"
-        in workflow
+        "needs: [release-python, release-free-threaded, release-rust, build, "
+        "build-free-threaded, sdist, supply-chain]" in workflow
     )
+
+
+def test_free_threaded_wheels_are_built_and_smoke_tested() -> None:
+    # pip never selects the abi3 wheel on free-threaded CPython, so 3.14t needs
+    # its own version-specific wheels or every install compiles from the sdist.
+    workflow = Path(".github/workflows/wheels.yml").read_text(encoding="utf-8")
+
+    assert "build-free-threaded:" in workflow
+    assert "uv python install 3.14t" in workflow
+    assert "/opt/python/cp314-cp314t/bin/python" in workflow
+    assert "assert not sys._is_gil_enabled()" in workflow
+    assert "name: wheels-free-threaded-" in workflow
 
 
 def test_quality_gate_targets_are_declared() -> None:
