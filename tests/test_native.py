@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 import structguru._rust as rust
 
@@ -319,6 +321,44 @@ def test_native_lone_surrogates_are_replaced_not_rejected() -> None:
 
     key = next(iter(rust._convert_value_debug({"k\udcff": 1})))
     assert key.startswith("k") and "\udcff" not in key
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("a\udcffb", "a\ufffdb"),
+        ("\ud800", "\ufffd"),
+        ("\ud800\ud800", "\ufffd\ufffd"),
+        ("\ude00\ud83d", "\ufffd\ufffd"),  # a low surrogate first is no pair
+        ("\ud83d" + "\ude00", "\U0001f600"),
+        ("x\ud83d\ude00\udcffy", "x\U0001f600\ufffdy"),
+        ("\ufffd\udcff", "\ufffd\ufffd"),
+    ],
+)
+def test_native_surrogates_become_one_replacement_or_their_pair(text: str, expected: str) -> None:
+    # Each lone surrogate is one U+FFFD, and a high/low pair built by
+    # concatenation is the character it encodes, as json.loads reads it.
+    assert rust._convert_value_debug(text) == expected
+    assert rust._convert_value_debug({text: text}) == {expected: expected}
+    assert json.loads(rust._render_json_debug([text])) == [expected]
+
+
+def test_native_record_text_arguments_decode_surrogate_pairs() -> None:
+    import structguru
+
+    pair = "\ud83d" + "\ude00"
+    _runtime.configure(service=f"svc{pair}", target="memory")
+    structguru.Logger(name=f"app{pair}\udcff").opt(stack_info=f"Stack:{pair}").info(
+        f"sent {pair}\udcff", **{f"k{pair}": f"v{pair}\udcff"}
+    )
+    _runtime.flush()
+    [line] = _runtime.drain_messages()
+    record = json.loads(line)
+    assert record["service"] == "svc\U0001f600"
+    assert record["logger"] == "app\U0001f600\ufffd"
+    assert record["stack"] == "Stack:\U0001f600"
+    assert record["message"] == "sent \U0001f600\ufffd"
+    assert record["k\U0001f600"] == "v\U0001f600\ufffd"
 
 
 @pytest.mark.parametrize(

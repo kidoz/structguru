@@ -2,8 +2,8 @@ use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyException, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{
-    PyAny, PyBool, PyDict, PyDictMethods, PyFloat, PyInt, PyList, PyListMethods, PyString, PyTuple,
-    PyTupleMethods,
+    PyAny, PyBool, PyBytes, PyDict, PyDictMethods, PyFloat, PyInt, PyList, PyListMethods, PyString,
+    PyTuple, PyTupleMethods,
 };
 use std::borrow::Cow;
 use std::time::Duration;
@@ -1205,12 +1205,12 @@ fn marker(kind: &str, obj: &Bound<'_, PyAny>) -> Value {
 fn type_name(obj: &Bound<'_, PyAny>) -> String {
     obj.get_type()
         .name()
-        .map(|name| name.to_string())
+        .map(|name| string_to_owned(&name))
         .unwrap_or_else(|_| "unknown".to_owned())
 }
 
 /// Owned copies of a record's text arguments under the same policy as field
-/// values: an unpaired surrogate becomes U+FFFD instead of failing the record.
+/// values: a lone surrogate becomes U+FFFD instead of failing the record.
 /// `os.fsdecode()` output and stdlib messages built from it reach every entry
 /// point this way, so a message can never be rejected where a field is not.
 fn text_arguments(
@@ -1227,19 +1227,50 @@ fn text_arguments(
     )
 }
 
-/// Copy a Python string, replacing unpaired surrogates (not representable in
-/// UTF-8, so `to_str` rejects them) with U+FFFD instead of failing the record.
+/// Copy a Python string, decoding surrogates (not representable in UTF-8, so
+/// `to_str` rejects them) with [`decode_surrogates`] instead of failing the
+/// record.
 fn string_to_owned(value: &Bound<'_, PyString>) -> String {
     string_to_cow(value).into_owned()
 }
 
-/// Borrow a Python string's UTF-8 text, copying only to replace unpaired
-/// surrogates with U+FFFD (the [`string_to_owned`] policy without the copy).
+/// Borrow a Python string's UTF-8 text, copying only to decode surrogates
+/// (the [`string_to_owned`] policy without the copy).
 fn string_to_cow<'a>(value: &'a Bound<'_, PyString>) -> Cow<'a, str> {
     match value.to_str() {
         Ok(text) => Cow::Borrowed(text),
-        Err(_) => value.to_string_lossy(),
+        Err(_) => Cow::Owned(decode_surrogates(value)),
     }
+}
+
+/// The text of a Python string holding surrogate code points.
+///
+/// A high surrogate directly followed by a low one — a pair split across code
+/// points, as `"\ud83d" + "\ude00"` builds — is the character it encodes, as
+/// `json.loads` reads it; every other surrogate becomes one U+FFFD.
+fn decode_surrogates(value: &Bound<'_, PyString>) -> String {
+    // UTF-16 with `surrogatepass` keeps each surrogate as its own code unit,
+    // so the standard UTF-16 decoder pairs them. `encode` is looked up on
+    // `str` itself so a subclass cannot substitute its own.
+    let encoded = value
+        .py()
+        .get_type::<PyString>()
+        .call_method1("encode", (value, "utf-16-le", "surrogatepass"));
+    let Ok(encoded) = encoded else {
+        return value.to_string_lossy().into_owned();
+    };
+    let Ok(bytes) = encoded.cast::<PyBytes>() else {
+        return value.to_string_lossy().into_owned();
+    };
+    let units = bytes
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|unit| u16::from_le_bytes(*unit));
+    char::decode_utf16(units)
+        .map(|decoded| decoded.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect()
 }
 
 fn convert_big_int(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
