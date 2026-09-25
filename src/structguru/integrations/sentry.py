@@ -135,7 +135,9 @@ class SentryProcessor:
         if level < self._event_level:
             return event_dict
 
-        with _sentry_sdk.new_scope() as scope:
+        # new_scope() arrived in sentry-sdk 2.0; 1.x only has push_scope().
+        scope_factory = getattr(_sentry_sdk, "new_scope", None) or _sentry_sdk.push_scope
+        with scope_factory() as scope:
             for key in self._tag_keys:
                 if key in payload:
                     scope.set_tag(key, str(payload[key]))

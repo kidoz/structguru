@@ -204,3 +204,49 @@ class TestSentryProcessor:
         extras = mock_sentry._scope.set_extra.call_args.args[1]
         assert "safe" in extras
         assert REDACTED_MARKER_KEY not in extras
+
+
+def test_falls_back_to_push_scope_without_new_scope() -> None:
+    # sentry-sdk 1.x has push_scope() but no new_scope() (added in 2.0).
+    sdk = _mock_sentry()
+    del sdk.new_scope
+    scope = MagicMock()
+    sdk.push_scope.return_value.__enter__ = MagicMock(return_value=scope)
+    sdk.push_scope.return_value.__exit__ = MagicMock(return_value=False)
+    error = ValueError("boom")
+    event = {"event": "failed", "service": "api", "exc_info": error, REDACTED_MARKER_KEY: True}
+    with patch.object(sentry_mod, "_sentry_sdk", sdk):
+        SentryProcessor(tag_keys=frozenset({"service"}))(None, "error", event)
+    sdk.push_scope.assert_called_once_with()
+    scope.set_tag.assert_called_once_with("service", "api")
+    sdk.capture_exception.assert_called_once_with(error)
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_real_sdk_without_new_scope_still_captures_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentry_sdk = pytest.importorskip("sentry_sdk")
+    from sentry_sdk.transport import Transport
+
+    from structguru import configure, logger
+
+    events: list[object] = []
+
+    class CapturingTransport(Transport):
+        def capture_envelope(self, envelope: object) -> None:
+            events.extend(item for item in envelope.items if item.type == "event")  # type: ignore[attr-defined]
+
+    with sentry_sdk.init(
+        dsn="https://key@example.invalid/1",
+        transport=CapturingTransport,
+        default_integrations=False,
+    ):
+        monkeypatch.delattr(sentry_sdk, "new_scope")
+        configure(target="null", sentry_processor=SentryProcessor())
+        try:
+            raise ZeroDivisionError("boom")
+        except ZeroDivisionError:
+            logger.exception("failed")
+        sentry_sdk.flush()
+    assert len(events) == 1

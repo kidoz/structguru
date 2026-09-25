@@ -608,4 +608,6 @@ configure(sentry_processor=sentry_processor)
 
 The native hook redacts the message and structured fields before Sentry sees the
 event. Raw `exc_info` is retained only for `capture_exception`. If `sentry-sdk`
-is not installed, `SentryProcessor` acts as a no-op.
+is not installed, `SentryProcessor` acts as a no-op. Events use
+`sentry_sdk.new_scope()` on sentry-sdk 2.x and fall back to `push_scope()` on
+1.x.
