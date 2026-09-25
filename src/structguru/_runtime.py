@@ -671,9 +671,11 @@ def configure(settings: Settings | None = None, **changes: Unpack[SettingsChange
     Logs emitted inside these callbacks still reach the native writer but skip
     callable sinks, preventing feedback loops and worker self-deadlocks.
 
-    Registers shutdown (``atexit``) and fork (``os.register_at_fork``) handlers so
-    buffered records are flushed on exit and the background writer is respawned in
-    forked children (gunicorn/celery prefork) instead of deadlocking.
+    Registers fork (``os.register_at_fork``) handlers so the background writer is
+    respawned in forked children (gunicorn/celery prefork) instead of deadlocking.
+    Buffered records are drained at interpreter exit by an ``atexit`` handler
+    registered when structguru is imported, so ``atexit`` handlers registered
+    later — even before this call — still log before that drain.
     """
     resolved = (
         Settings.from_env(**changes)
@@ -917,12 +919,11 @@ def _sync_callable_dispatcher(*, reconfigured: bool = True) -> None:
 
 
 def _register_lifecycle_hooks() -> None:
-    """Register atexit + fork handlers exactly once."""
+    """Register fork handlers exactly once (the atexit drain registers at import)."""
     global _hooks_registered
     with _state_lock:
         if _hooks_registered:
             return
-        atexit.register(_atexit_close)
         # register_at_fork is POSIX-only; on Windows (spawn) there is nothing to do.
         if hasattr(os, "register_at_fork"):
             os.register_at_fork(
@@ -935,6 +936,13 @@ def _register_lifecycle_hooks() -> None:
 def _atexit_close() -> None:
     """Drain native and callable sinks on interpreter shutdown."""
     shutdown()
+
+
+# Registered at import, before any application handler can be: atexit runs
+# handlers last-in first-out, so every handler registered after importing
+# structguru can still log before this final drain, even with
+# STRUCTGURU_AUTOCONFIGURE=0 and a configure() call that comes later.
+atexit.register(_atexit_close)
 
 
 def _before_fork() -> None:

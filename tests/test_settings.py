@@ -317,3 +317,23 @@ def test_level_change_during_record_preserves_all_deliveries(change: Any, format
     assert len(lines) == 1
     assert callbacks == lines
     assert [event["event"] for event in sentry] == ["already admitted"]
+
+
+def test_atexit_handlers_registered_before_explicit_configure_still_log() -> None:
+    code = (
+        "import atexit\n"
+        "import structguru\n"
+        "atexit.register(lambda: structguru.logger.info('bye from atexit'))\n"
+        "structguru.configure(service='late')\n"
+        "structguru.logger.info('hello')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", code],
+        env={**os.environ, "STRUCTGURU_AUTOCONFIGURE": "0"},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    messages = [json.loads(line)["message"] for line in result.stdout.splitlines()]
+    assert messages == ["hello", "bye from atexit"]

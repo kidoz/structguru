@@ -63,7 +63,9 @@ failures. These are separate from lifecycle rejections. Writer counters restart 
 a new writer is constructed; level-only updates retain them.
 
 Shutdown and interpreter exit drain accepted callable deliveries before closing the
-native writer, allowing their nested native logs to finish. A shutdown requested
+native writer, allowing their nested native logs to finish. The exit drain is an
+`atexit` handler registered when structguru is imported; handlers registered after
+the import run first and can still log, even when `configure()` comes later. A shutdown requested
 from inside a callback cannot wait for that callback itself; subsequent nested logs
 see the disabled runtime. Later calls remain disabled until `configure()` is called.
 
