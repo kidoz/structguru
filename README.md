@@ -258,6 +258,11 @@ update(
 )
 ```
 
+Patterns apply to the message, field names, and string values at any depth,
+and to integers by their decimal digits (a matching integer is emitted as the
+redacted string). If redaction makes two keys of one map equal, the record
+keeps one key with the last value.
+
 Patterns run on Rust's linear-time regex engine (no ReDoS), which rejects
 look-around and backreferences at `update()` time. Most look-behinds rewrite
 as capture groups — `(?<=password=)\S+` becomes `(password=)\S+` with
@@ -413,7 +418,7 @@ Public API:
 Behavior notes:
 
 - **Overflow**: the default `maxsize=8192` uses `overflow="block"` to wait for queue space. Use `overflow="drop"` for drop-newest behavior with metrics and rate-limited warnings. `maxsize=0` explicitly opts into an unbounded queue.
-- **Redaction, level filtering, exceptions, and OpenTelemetry** injection are supported natively; redaction covers the message and all structured string values before rendering or Sentry export. `sensitive_keys` overrides the default redaction keys. Rust's linear-time regex engine rejects backreferences and look-around with `ValueError` at configuration time.
+- **Redaction, level filtering, exceptions, and OpenTelemetry** injection are supported natively; redaction covers the message, field names, string values, and integers at any depth before rendering or Sentry export (see the redaction API reference for the exact coverage). `sensitive_keys` overrides the default redaction keys. Rust's linear-time regex engine rejects backreferences and look-around with `ValueError` at configuration time.
 - **Sampling & rate limiting** (`sample_rate`, `rate_limit_max`, `rate_limit_period`) are applied as native pre-render filters — dropped records cost zero rendering. `sampled` and `rate_limited` counters are distinct from the transport `dropped` counter. `sample_max_level` restricts sampling to records at or below that level; more severe records always pass.
 - **Metric hooks** (`metric_processor=...`) invoke a structlog-style processor (e.g. `MetricProcessor`) for every *kept* record on the caller's thread, with `(None, method, {"event": message, **fields})`. Dropped records (level/sampling/rate-limit) never reach it; hook errors are swallowed.
 - **Fork/shutdown safe** — the writer is flushed on exit and respawned in forked children (gunicorn/celery prefork). Rotating-file writers sharing a path coordinate through an owner-only `.lock` sidecar; distributed hosts should still prefer stdout and an external collector.

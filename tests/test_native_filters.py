@@ -151,13 +151,15 @@ def test_pattern_redaction_descends_into_nested_maps_and_lists() -> None:
         _runtime.shutdown()
 
 
-def test_pattern_redaction_skips_non_string_values() -> None:
-    # A pattern that would match anything; non-strings must be untouched.
-    _runtime.configure(service="svc", target="memory", level="DEBUG", sensitive_patterns=[r".+"])
+def test_pattern_redaction_skips_bool_float_and_null_values() -> None:
+    # A pattern matching the text of every value below (but not the keys):
+    # integers are matched by their decimal digits; the other non-strings are not.
+    pattern = r"^(?:42|True|true|1\.5|None|null)$"
+    _runtime.configure(service="svc", target="memory", level="DEBUG", sensitive_patterns=[pattern])
     try:
         structguru.logger.info("m", count=42, flag=True, ratio=1.5, nothing=None)
         record = _drain_last()
-        assert record["count"] == 42
+        assert record["count"] == "[REDACTED]"
         assert record["flag"] is True
         assert record["ratio"] == 1.5
         assert record["nothing"] is None

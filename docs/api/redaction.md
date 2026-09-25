@@ -1,15 +1,34 @@
 # API Reference: Redaction
 
 Redaction runs inside the native Rust renderer, before a record is rendered,
-queued, or forwarded to Sentry. It covers both the message and the structured
-fields, so a secret cannot escape through either one.
+queued, or forwarded to Sentry. It covers the message and the structured
+fields — their names as well as their values — in both JSON and console
+output.
 
 Two independent mechanisms apply:
 
 - **Key-based redaction** replaces the *value* of any field whose key is
-  considered sensitive, at any depth (nested maps and lists included).
-- **Pattern-based redaction** rewrites substrings matching a regex, in the
-  message and in every string value.
+  considered sensitive (case-insensitively), at any depth (nested maps and
+  lists included). The key itself is kept. Naming `message`, `logger`,
+  `service`, or `stack` in `sensitive_keys` redacts that whole text.
+- **Pattern-based redaction** rewrites every match of a regex, in declaration
+  order, in:
+    - the message, the logger name, the service name, and `stack` text;
+    - every field **key**, at the top level and in nested maps;
+    - every string value at any depth, including a formatted `exception`
+      traceback and the strings inside a structured exception;
+    - every **integer** value, matched against its decimal text. A matching
+      integer is emitted as the redacted *string*, so
+      `card=4111111111111111` with `r"\b\d{16}\b"` renders
+      `"card": "[REDACTED]"`.
+
+  Floats, booleans, and `None` are never pattern-matched. When redaction makes
+  two keys of one map equal (two e-mail addresses both becoming
+  `[REDACTED]`), they collapse into a single key that keeps the first key's
+  position and the last value, so JSON output never repeats a key.
+
+Hooks that run before rendering see the record as logged: `metric_processor`
+receives the unredacted fields. The timestamp and level are not redacted.
 
 ```python
 from structguru import configure

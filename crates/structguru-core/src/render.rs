@@ -7,6 +7,8 @@
 use crate::value::Value;
 use crate::{normalize_level, syslog_severity};
 use regex::Regex;
+use std::borrow::Cow;
+use std::collections::HashMap;
 
 const REDACTED: &str = "[REDACTED]";
 
@@ -56,39 +58,67 @@ impl RedactionPattern {
     }
 
     /// `replace_all` with the regex crate's group expansion in `replacement`
-    /// (`$1`, `${name}`; `$$` for a literal `$`).
+    /// (`$1`, `${name}`; `$$` for a literal `$`). Borrows `text` back when
+    /// nothing matched, so scanning clean text does not allocate. The linear
+    /// engine checks `is_match` first: on the short field keys and values that
+    /// make up most records it costs about a third of an empty `replace_all`.
     ///
     /// A backtracking pattern whose evaluation errors at match time (backtrack
     /// limit exceeded) fails CLOSED: the entire string becomes `[REDACTED]`.
     /// Emitting a value the configured pattern could not check risks leaking
     /// exactly the data redaction exists to mask.
-    fn replace_all(&self, text: &str, replacement: &str) -> String {
+    fn replace_all<'t>(&self, text: &'t str, replacement: &str) -> Cow<'t, str> {
         match self {
-            Self::Linear(re) => re.replace_all(text, replacement).into_owned(),
-            Self::Backtracking(re) => replace_all_backtracking(re, text, replacement)
-                .unwrap_or_else(|| REDACTED.to_owned()),
+            Self::Linear(re) if re.is_match(text) => re.replace_all(text, replacement),
+            Self::Linear(_) => Cow::Borrowed(text),
+            Self::Backtracking(re) => {
+                replace_all_backtracking(re, text, replacement).unwrap_or(Cow::Borrowed(REDACTED))
+            }
         }
     }
 }
 
 /// fancy-regex's `replace_all` panics on evaluation errors; iterate matches
 /// manually so a backtrack-limit error surfaces as `None` instead.
-fn replace_all_backtracking(
+fn replace_all_backtracking<'t>(
     re: &fancy_regex::Regex,
-    text: &str,
+    text: &'t str,
     replacement: &str,
-) -> Option<String> {
-    let mut out = String::with_capacity(text.len());
+) -> Option<Cow<'t, str>> {
+    let mut out: Option<String> = None;
     let mut last = 0;
     for caps in re.captures_iter(text) {
         let caps = caps.ok()?;
         let matched = caps.get(0).expect("capture group 0 is the whole match");
+        let out = out.get_or_insert_with(|| String::with_capacity(text.len()));
         out.push_str(&text[last..matched.start()]);
-        fancy_regex::Expander::default().append_expansion(&mut out, replacement, &caps);
+        fancy_regex::Expander::default().append_expansion(out, replacement, &caps);
         last = matched.end();
     }
-    out.push_str(&text[last..]);
-    Some(out)
+    Some(match out {
+        None => Cow::Borrowed(text),
+        Some(mut out) => {
+            out.push_str(&text[last..]);
+            Cow::Owned(out)
+        }
+    })
+}
+
+/// Run every pattern over `text` in declaration order, so later patterns see
+/// the output of earlier ones. `None` when no pattern matched.
+fn apply_patterns(text: &str, patterns: &[RedactionPattern], replacement: &str) -> Option<String> {
+    let mut current = Cow::Borrowed(text);
+    for pattern in patterns {
+        let replaced = match pattern.replace_all(&current, replacement) {
+            Cow::Owned(replaced) => replaced,
+            Cow::Borrowed(_) => continue,
+        };
+        current = Cow::Owned(replaced);
+    }
+    match current {
+        Cow::Borrowed(_) => None,
+        Cow::Owned(redacted) => Some(redacted),
+    }
 }
 
 /// Internal marker set by `RedactingProcessor`, mirrored from
@@ -151,17 +181,20 @@ fn redact(value: &mut Value, keys: &[impl AsRef<str>]) {
     }
 }
 
-/// Recursively apply regex patterns to every string value in place.
+/// Recursively apply regex patterns in place to every map key, string value,
+/// and integer at any depth.
 ///
-/// Mirrors `RedactingProcessor(patterns=...)`: each compiled pattern is run via
-/// `replace_all` against every `Value::String` leaf (in declaration order, so
-/// later patterns see the output of earlier ones). Non-string leaves and
-/// `Value::Raw` are not pattern-matched.
+/// Each compiled pattern runs via `replace_all` in declaration order, so later
+/// patterns see the output of earlier ones. An integer is matched against its
+/// decimal text (`Value::Raw` included: it only ever carries the digits of an
+/// integer outside the `i64` range) and becomes the redacted *string* when a
+/// pattern matches, so a 16-digit card number cannot pass as a number.
+/// Floats, booleans, and null are not pattern-matched.
 ///
-/// `Value::Raw` is deliberately left untouched: it holds pre-serialized JSON
-/// (an integer outside the `i64` range). Descending into it would require
-/// re-parsing the JSON and would break the verbatim-output contract. Key-based
-/// redaction still applies to a `Raw` value's *key* in its parent map.
+/// Keys are redacted too: a secret used as a key (an email address mapping to
+/// a count) must not survive where the same text as a value would not. When
+/// redaction makes keys of one map equal, they collapse into one entry (see
+/// [`merge_duplicate_keys`]) so JSON output never repeats a key.
 ///
 /// `replacement` supports the regex crate's group expansion (`$1`, `${name}`;
 /// `$$` for a literal `$`), so look-behind-style patterns can be rewritten as
@@ -171,8 +204,16 @@ fn redact(value: &mut Value, keys: &[impl AsRef<str>]) {
 fn redact_patterns(value: &mut Value, patterns: &[RedactionPattern], replacement: &str) {
     match value {
         Value::Map(entries) => {
-            for (_, child) in entries.iter_mut() {
+            let mut renamed = false;
+            for (key, child) in entries.iter_mut() {
+                if let Some(redacted) = apply_patterns(key, patterns, replacement) {
+                    *key = redacted;
+                    renamed = true;
+                }
                 redact_patterns(child, patterns, replacement);
+            }
+            if renamed {
+                merge_duplicate_keys(entries);
             }
         }
         Value::List(items) => {
@@ -180,15 +221,94 @@ fn redact_patterns(value: &mut Value, patterns: &[RedactionPattern], replacement
                 redact_patterns(item, patterns, replacement);
             }
         }
-        Value::String(s) if !patterns.is_empty() => {
-            let mut current = std::mem::take(s);
-            for re in patterns {
-                current = re.replace_all(&current, replacement);
+        Value::String(text) => {
+            if let Some(redacted) = apply_patterns(text, patterns, replacement) {
+                *text = redacted;
             }
-            *s = current;
+        }
+        Value::Int(number) => {
+            let mut digits = [0; 20];
+            let digits = integer_text(*number, &mut digits);
+            if let Some(redacted) = apply_patterns(digits, patterns, replacement) {
+                *value = Value::String(redacted);
+            }
+        }
+        Value::Raw(json) if is_integer_literal(json) => {
+            if let Some(redacted) = apply_patterns(json, patterns, replacement) {
+                *value = Value::String(redacted);
+            }
         }
         _ => {}
     }
+}
+
+/// Decimal text of `number` in a stack buffer (20 bytes fit `i64::MIN`), so
+/// matching integers does not allocate.
+fn integer_text(number: i64, buffer: &mut [u8; 20]) -> &str {
+    let mut rest = number.unsigned_abs();
+    let mut start = buffer.len();
+    loop {
+        start -= 1;
+        buffer[start] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    if number < 0 {
+        start -= 1;
+        buffer[start] = b'-';
+    }
+    std::str::from_utf8(&buffer[start..]).expect("ASCII digits are UTF-8")
+}
+
+fn is_integer_literal(json: &str) -> bool {
+    let digits = json.strip_prefix('-').unwrap_or(json);
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Collapse entries whose keys became equal into one: the first occurrence
+/// keeps its position and takes the last value, as assigning into a dict
+/// would.
+fn merge_duplicate_keys(entries: &mut Vec<(String, Value)>) {
+    let mut positions: HashMap<String, usize> = HashMap::with_capacity(entries.len());
+    let mut merged: Vec<(String, Value)> = Vec::with_capacity(entries.len());
+    for (key, value) in entries.drain(..) {
+        match positions.get(&key) {
+            Some(&position) => merged[position].1 = value,
+            None => {
+                positions.insert(key.clone(), merged.len());
+                merged.push((key, value));
+            }
+        }
+    }
+    *entries = merged;
+}
+
+/// Strip the marker key, then apply key-based and pattern-based redaction to
+/// the user fields shared by both renderers.
+fn redact_fields(
+    mut fields: Vec<(String, Value)>,
+    sensitive_keys: Option<&[String]>,
+    sensitive_patterns: Option<&[RedactionPattern]>,
+    pattern_replacement: Option<&str>,
+) -> Vec<(String, Value)> {
+    // strip_redaction_marker semantics: the marker key never reaches the renderer.
+    fields.retain(|(key, _)| key != REDACTED_MARKER_KEY);
+    // Redact against the caller's keys, or the static defaults with zero
+    // per-record allocation (comparison is case-insensitive in `is_sensitive`).
+    let mut root = Value::Map(fields);
+    match sensitive_keys {
+        Some(custom) => redact(&mut root, custom),
+        None => redact(&mut root, DEFAULT_SENSITIVE_KEYS),
+    }
+    if let Some(patterns) = sensitive_patterns.filter(|patterns| !patterns.is_empty()) {
+        redact_patterns(&mut root, patterns, pattern_replacement.unwrap_or(REDACTED));
+    }
+    let Value::Map(entries) = root else {
+        unreachable!("root is constructed as a map");
+    };
+    entries
 }
 
 fn redact_text(
@@ -205,19 +325,11 @@ fn redact_text(
     if key_is_sensitive {
         return REDACTED.to_owned();
     }
-
-    let mut value = Value::String(text.to_owned());
-    if let Some(patterns) = sensitive_patterns {
-        redact_patterns(
-            &mut value,
-            patterns,
-            pattern_replacement.unwrap_or(REDACTED),
-        );
-    }
-    let Value::String(redacted) = value else {
-        unreachable!("text redaction preserves the string value variant");
-    };
-    redacted
+    sensitive_patterns
+        .and_then(|patterns| {
+            apply_patterns(text, patterns, pattern_replacement.unwrap_or(REDACTED))
+        })
+        .unwrap_or_else(|| text.to_owned())
 }
 
 /// Replace the value of an existing `key` in place, or append it.
@@ -254,23 +366,12 @@ pub fn render_line(
         sensitive_patterns,
         pattern_replacement,
     );
-    // Redact against the caller's keys, or the static defaults with zero
-    // per-record allocation (comparison is case-insensitive in `is_sensitive`).
-    let mut root = Value::Map(fields);
-    match sensitive_keys {
-        Some(custom) => redact(&mut root, custom),
-        None => redact(&mut root, DEFAULT_SENSITIVE_KEYS),
-    }
-    // Then apply value-pattern redaction to any string leaves.
-    if let Some(patterns) = sensitive_patterns {
-        redact_patterns(&mut root, patterns, pattern_replacement.unwrap_or(REDACTED));
-    }
-    let Value::Map(mut entries) = root else {
-        unreachable!("root is constructed as a map");
-    };
-
-    // strip_redaction_marker semantics: the marker key never reaches the renderer.
-    entries.retain(|(key, _)| key != REDACTED_MARKER_KEY);
+    let mut entries = redact_fields(
+        fields,
+        sensitive_keys,
+        sensitive_patterns,
+        pattern_replacement,
+    );
 
     let canonical = normalize_level(level);
     let severity = syslog_severity(&canonical);
@@ -423,18 +524,12 @@ pub fn render_line_console(
         sensitive_patterns,
         pattern_replacement,
     );
-    let mut root = Value::Map(fields);
-    match sensitive_keys {
-        Some(custom) => redact(&mut root, custom),
-        None => redact(&mut root, DEFAULT_SENSITIVE_KEYS),
-    }
-    if let Some(patterns) = sensitive_patterns {
-        redact_patterns(&mut root, patterns, pattern_replacement.unwrap_or(REDACTED));
-    }
-    let Value::Map(mut entries) = root else {
-        unreachable!("root is constructed as a map");
-    };
-    entries.retain(|(key, _)| key != REDACTED_MARKER_KEY);
+    let entries = redact_fields(
+        fields,
+        sensitive_keys,
+        sensitive_patterns,
+        pattern_replacement,
+    );
 
     let canonical = normalize_level(level);
     let (level_pad, color) = level_style(&canonical, colors);
@@ -797,15 +892,14 @@ mod tests {
     }
 
     #[test]
-    fn pattern_redaction_skips_non_string_leaves_and_raw() {
-        let any = RedactionPattern::linear(r".+").unwrap();
+    fn pattern_redaction_skips_bool_float_null_and_non_integer_raw() {
+        let any = RedactionPattern::linear(r"\d+|true|null|escaped").unwrap();
         let patterns = vec![any];
         let fields = vec![
-            ("count".to_owned(), Value::Int(42)),
             ("flag".to_owned(), Value::Bool(true)),
             ("ratio".to_owned(), Value::Float(1.5)),
             ("nothing".to_owned(), Value::Null),
-            // Raw holds pre-serialized JSON; patterns must not descend into it.
+            // Raw that is not integer digits is emitted verbatim, unmatched.
             ("raw".to_owned(), Value::Raw(r#""escaped""#.to_owned())),
         ];
         let line = render_line(
@@ -822,11 +916,123 @@ mod tests {
         )
         .unwrap();
 
-        assert!(line.contains(r#""count":42"#));
         assert!(line.contains(r#""flag":true"#));
         assert!(line.contains(r#""ratio":1.5"#));
         assert!(line.contains(r#""nothing":null"#));
         assert!(line.contains(r#""raw":"escaped""#));
+    }
+
+    #[test]
+    fn pattern_redacts_map_keys_at_every_depth() {
+        let patterns = vec![RedactionPattern::linear(r"\w+@corp\.com").unwrap()];
+        let fields = vec![
+            ("bob@corp.com".to_owned(), Value::String("x".to_owned())),
+            (
+                "rows".to_owned(),
+                Value::List(vec![Value::Map(vec![(
+                    "alice@corp.com".to_owned(),
+                    Value::Int(3),
+                )])]),
+            ),
+        ];
+        let line = render_line(
+            fields,
+            "l",
+            "info",
+            "svc",
+            "m",
+            "TS",
+            None,
+            None,
+            Some(&patterns),
+            None,
+        )
+        .unwrap();
+
+        assert!(line.starts_with(r#"{"[REDACTED]":"x","rows":[{"[REDACTED]":3}],"logger""#));
+    }
+
+    #[test]
+    fn pattern_redacted_keys_that_collide_keep_first_position_and_last_value() {
+        let patterns = vec![RedactionPattern::linear(r"\w+@corp\.com").unwrap()];
+        let fields = vec![
+            ("a@corp.com".to_owned(), Value::Int(1)),
+            (
+                "nested".to_owned(),
+                Value::Map(vec![
+                    ("[REDACTED]".to_owned(), Value::Int(1)),
+                    ("keep".to_owned(), Value::Int(2)),
+                    ("x@corp.com".to_owned(), Value::Int(3)),
+                ]),
+            ),
+            ("b@corp.com".to_owned(), Value::Int(4)),
+        ];
+        let line = render_line(
+            fields,
+            "l",
+            "info",
+            "svc",
+            "m",
+            "TS",
+            None,
+            None,
+            Some(&patterns),
+            None,
+        )
+        .unwrap();
+
+        assert!(line.starts_with(r#"{"[REDACTED]":4,"nested":{"[REDACTED]":3,"keep":2},"logger""#));
+    }
+
+    #[test]
+    fn pattern_redacts_matching_integers_into_strings() {
+        let patterns = vec![RedactionPattern::linear(r"\b\d{16,}\b").unwrap()];
+        let fields = vec![
+            ("card".to_owned(), Value::Int(4_111_111_111_111_111)),
+            ("negative".to_owned(), Value::Int(-4_111_111_111_111_111)),
+            ("qty".to_owned(), Value::Int(16)),
+            (
+                "big".to_owned(),
+                Value::Raw("123456789012345678901234".to_owned()),
+            ),
+        ];
+        let line = render_line(
+            fields,
+            "l",
+            "info",
+            "svc",
+            "m",
+            "TS",
+            None,
+            None,
+            Some(&patterns),
+            None,
+        )
+        .unwrap();
+
+        assert!(line.starts_with(
+            r#"{"card":"[REDACTED]","negative":"-[REDACTED]","qty":16,"big":"[REDACTED]","#
+        ));
+    }
+
+    #[test]
+    fn integer_text_matches_display() {
+        for number in [0, 7, -7, 42, i64::MAX, i64::MIN, -1_000_000] {
+            assert_eq!(integer_text(number, &mut [0; 20]), number.to_string());
+        }
+    }
+
+    #[test]
+    fn apply_patterns_borrows_when_nothing_matches() {
+        let patterns = vec![
+            RedactionPattern::linear(r"secret").unwrap(),
+            RedactionPattern::compile(r"(?<=k=)\w+", true).unwrap(),
+        ];
+        assert_eq!(apply_patterns("plain text", &patterns, REDACTED), None);
+        assert_eq!(
+            apply_patterns("secret k=v", &patterns, REDACTED).as_deref(),
+            Some("[REDACTED] k=[REDACTED]"),
+        );
     }
 
     #[test]

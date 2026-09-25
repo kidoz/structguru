@@ -473,3 +473,136 @@ def test_surrogates_in_text_arguments_are_replaced_not_rejected(
         for key in ("message", "logger", "service", "stack", "path"):
             assert "\ufffd" in record[key], key
         assert record[f"key{record['path']}"] == "retained"
+
+
+def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [key for key, _ in pairs]
+    assert len(keys) == len(set(keys)), f"duplicate JSON keys: {keys}"
+    return dict(pairs)
+
+
+def _render_with_patterns(format: str, log: Any, *patterns: str, **config: Any) -> str:
+    _runtime.configure(
+        target="memory", format=format, colors=False, sensitive_patterns=list(patterns), **config
+    )
+    try:
+        log()
+        _runtime.flush()
+        [line] = _runtime.drain_messages()
+    finally:
+        _runtime.shutdown()
+    return line.rstrip("\n")
+
+
+@pytest.mark.parametrize("format", ["json", "console"])
+def test_sensitive_patterns_cover_field_keys_at_every_depth(format: str) -> None:
+    line = _render_with_patterns(
+        format,
+        lambda: structguru.logger.info(
+            "per-user counts",
+            counts={"alice@corp.com": 3, "plain": 1},
+            rows=[{"123-45-6789": "ssn-keyed"}],
+            **{"bob@corp.com": "x"},
+        ),
+        r"[\w.]+@[\w.]+",
+        r"\b\d{3}-\d{2}-\d{4}\b",
+    )
+    for canary in ("alice@corp.com", "bob@corp.com", "123-45-6789"):
+        assert canary not in line
+    if format == "json":
+        record = json.loads(line, object_pairs_hook=_unique_keys)
+        assert record["counts"] == {"[REDACTED]": 3, "plain": 1}
+        assert record["rows"] == [{"[REDACTED]": "ssn-keyed"}]
+        assert record["[REDACTED]"] == "x"
+    else:
+        assert line.endswith(
+            '  counts={[REDACTED]:3, plain:1}  rows=[{[REDACTED]:"ssn-keyed"}]  [REDACTED]="x"'
+        )
+
+
+@pytest.mark.parametrize("format", ["json", "console"])
+def test_sensitive_patterns_redact_matching_integers(format: str) -> None:
+    line = _render_with_patterns(
+        format,
+        lambda: structguru.logger.info(
+            "payment",
+            card=4111111111111111,
+            nested={"cards": [4111111111111111, 7]},
+            big=12345678901234567890123,
+            partial=-4111111111111111,
+            qty=16,
+            ratio=4111111111111111.0,
+            flag=True,
+        ),
+        r"\b\d{16}\b",
+        r"\b\d{23}\b",
+    )
+    assert "4111111111111111," not in line and "12345678901234567890123" not in line
+    if format == "json":
+        record = json.loads(line)
+        assert record["card"] == "[REDACTED]"
+        assert record["nested"] == {"cards": ["[REDACTED]", 7]}
+        assert record["big"] == "[REDACTED]"
+        assert record["partial"] == "-[REDACTED]"
+        assert record["qty"] == 16
+        assert record["ratio"] == 4111111111111111.0  # floats are not pattern-matched
+        assert record["flag"] is True
+    else:
+        assert '  card="[REDACTED]"  nested={cards:["[REDACTED]", 7]}  big="[REDACTED]"' in line
+        assert '  partial="-[REDACTED]"  qty=16  ' in line
+
+
+def test_sensitive_pattern_capture_groups_apply_to_integers_and_keys() -> None:
+    line = _render_with_patterns(
+        "json",
+        lambda: structguru.logger.info(
+            "m", card=4111111111111111, by_card={"4111111111111111": "visa"}
+        ),
+        r"\b\d{12}(\d{4})\b",
+        pattern_replacement="****$1",
+    )
+    record = json.loads(line)
+    assert record["card"] == "****1111"
+    assert record["by_card"] == {"****1111": "visa"}
+
+
+@pytest.mark.parametrize("format", ["json", "console"])
+def test_keys_that_collide_after_pattern_redaction_render_once(format: str) -> None:
+    line = _render_with_patterns(
+        format,
+        lambda: structguru.logger.bind(**{"a@corp.com": "bound"}).info(
+            "m",
+            nested={"x@corp.com": 1, "keep": 2, "y@corp.com": 3},
+            **{"b@corp.com": "kwarg"},
+        ),
+        r"\w+@corp\.com",
+    )
+    if format == "json":
+        pairs = json.loads(line, object_pairs_hook=lambda pairs: pairs)
+        # First position, last value — dict assignment semantics.
+        assert pairs[0] == ("[REDACTED]", "kwarg")
+        assert pairs[1] == ("nested", [("[REDACTED]", 3), ("keep", 2)])
+        assert [key for key, _ in pairs].count("[REDACTED]") == 1
+    else:
+        assert line.endswith('  [REDACTED]="kwarg"  nested={[REDACTED]:3, keep:2}')
+
+
+def test_sensitive_patterns_cover_structured_exception_keys_and_values() -> None:
+    def fail() -> None:
+        owner = "carol@corp.com"  # noqa: F841 - captured via f_locals
+        raise ValueError("owner carol@corp.com")
+
+    try:
+        fail()
+    except ValueError as err:
+        exc = err
+    line = _render_with_patterns(
+        "json",
+        lambda: structguru.logger.opt(exception=exc).error("failed"),
+        r"[\w.]+@[\w.]+",
+        structured_exceptions=True,
+        exception_include_locals=True,
+    )
+    assert "carol@corp.com" not in line
+    record = json.loads(line)
+    assert record["exception"]["message"] == "owner [REDACTED]"
