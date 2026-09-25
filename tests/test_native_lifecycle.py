@@ -702,6 +702,60 @@ def test_forked_child_stdout_writer_ignores_parent_blocked_in_write() -> None:
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_forked_child_disables_logging_when_writer_cannot_restart(tmp_path: Path) -> None:
+    """A child whose replacement writer fails is disabled, never left hanging."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+            import os, signal, sys, warnings
+            warnings.simplefilter("ignore", DeprecationWarning)
+            import structguru as sg
+            from structguru import _runtime
+
+            path = os.path.join(sys.argv[1], "app.log")
+            sg.configure(service="svc", file_path=path, maxsize=4)
+            sg.logger.info("parent")
+            sg.flush()
+            # The parent keeps its open lock file; the child's reopen fails,
+            # even for root.
+            os.remove(path + ".lock")
+            os.mkdir(path + ".lock")
+            parent_dispatcher = _runtime._callable_dispatcher
+            pid = os.fork()
+            if pid == 0:
+                signal.alarm(5)
+                if _runtime.current_runtime() is not None:
+                    os._exit(3)
+                if _runtime._callable_dispatcher is parent_dispatcher:
+                    os._exit(4)
+                for i in range(8):  # more than maxsize: nothing may block
+                    sg.logger.info("child", i=i)
+                sg.flush()
+                sg.configure(service="svc", target="memory")
+                sg.logger.info("reconfigured")
+                sg.flush()
+                os._exit(0 if sg.writer_metrics()["written"] == 1 else 5)
+            _, status = os.waitpid(pid, 0)
+            assert os.waitstatus_to_exitcode(status) == 0, status
+            sg.logger.info("parent after fork")
+            sg.shutdown()
+        """),
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Exception ignored" not in result.stderr
+    assert result.stderr.count("logging is disabled in this forked process") == 1
+    messages = [json.loads(line)["message"] for line in (tmp_path / "app.log").open()]
+    assert messages == ["parent", "parent after fork"]
+
+
 def test_shutdown_abandons_a_callable_sink_that_never_returns() -> None:
     """A sink stuck forever must not hold shutdown (and interpreter exit) open."""
     result = subprocess.run(

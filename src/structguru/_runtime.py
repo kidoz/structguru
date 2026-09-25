@@ -908,6 +908,7 @@ def _before_fork() -> None:
 def _after_in_child() -> None:
     """Respawn the writer in the child: its worker thread did not survive fork."""
     global _runtime, _state_lock, _drop_lock, _lifecycle_rejected, _callable_dispatcher
+    global _lifecycle_generation
     state = _runtime
     # No other Python thread survives fork. Replace inherited synchronization
     # objects before touching state that may have been locked by a vanished thread.
@@ -918,19 +919,46 @@ def _after_in_child() -> None:
         _callable_dispatcher = _callable_dispatcher.fork_child(enabled=False)
         return
     state.writer.abandon()  # never join the parent's (now absent) worker thread
-    # Replay the full sink config so file paths and stdout mirroring survive fork.
-    writer = _RUST._NativeStringWriter(
-        state.maxsize,
-        target=state.target,
-        file_path=state.file_path,
-        file_max_bytes=state.file_max_bytes,
-        file_backup_count=state.file_backup_count,
-        also_stdout=state.also_stdout,
+    respawned = False
+    try:
+        # Replay the full sink config so file paths and stdout mirroring survive fork.
+        writer = _RUST._NativeStringWriter(
+            state.maxsize,
+            target=state.target,
+            file_path=state.file_path,
+            file_max_bytes=state.file_max_bytes,
+            file_backup_count=state.file_backup_count,
+            also_stdout=state.also_stdout,
+        )
+    except Exception as exc:  # noqa: BLE001 - os.fork() ignores errors raised by fork hooks
+        # The abandoned writer has no worker: keeping it would accept records
+        # nobody writes and hang flush(). Disable logging as shutdown() does.
+        _runtime = None
+        _lifecycle_generation += 1
+        _report_fork_respawn_failure(exc)
+    else:
+        _runtime = replace(state, writer=writer)
+        respawned = True
+    finally:
+        # The inherited dispatcher's worker thread and locks did not survive; a
+        # fresh one takes over the registrations and never touches the old state.
+        _callable_dispatcher = _callable_dispatcher.fork_child(enabled=respawned)
+
+
+def _report_fork_respawn_failure(exc: Exception) -> None:
+    """Tell the forked child's operator that its logging is disabled.
+
+    Writes straight to fd 2: ``sys.stderr`` and the warnings machinery take
+    locks that a thread which did not survive ``fork()`` may still hold.
+    """
+    message = (
+        "structguru: logging is disabled in this forked process because the log "
+        f"writer could not be restarted: {type(exc).__name__}: {exc}\n"
     )
-    _runtime = replace(state, writer=writer)
-    # The inherited dispatcher's worker thread and locks did not survive; a
-    # fresh one takes over the registrations and never touches the old state.
-    _callable_dispatcher = _callable_dispatcher.fork_child(enabled=True)
+    try:
+        os.write(2, message.encode("utf-8", "replace"))
+    except OSError:
+        pass
 
 
 def shutdown() -> None:
