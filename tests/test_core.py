@@ -897,3 +897,34 @@ logger.add(io.StringIO())
         ]
     )
     assert status == 1 and "arg-type" in stdout, stdout + stderr
+
+
+class TestRemoveById:
+    def test_ids_are_process_wide(self) -> None:
+        _runtime.configure(target="null")
+        received: list[str] = []
+        handler_id = Logger(name="mymod").add(received.append)
+        Logger().remove(handler_id)
+        Logger().info("after remove")
+        _runtime.flush()
+        assert received == []
+        with pytest.raises(
+            ValueError, match=f"There is no existing handler with id {handler_id}$"
+        ):
+            Logger().remove(handler_id)
+
+    def test_unknown_and_invalid_ids_raise(self) -> None:
+        with pytest.raises(ValueError, match="There is no existing handler with id 987654321"):
+            Logger().remove(987654321)
+        with pytest.raises(TypeError, match="Invalid handler id"):
+            Logger().remove("1")  # type: ignore[arg-type]
+
+    def test_remove_all_skips_sinks_removed_elsewhere(self) -> None:
+        _runtime.configure(target="null")
+        owner = Logger()
+        removed = owner.add(io.StringIO())
+        kept_elsewhere = Logger().add(io.StringIO())
+        owner.bind(child=True).remove(removed)
+        owner.remove()
+        assert owner._handlers == {}
+        Logger().remove(kept_elsewhere)

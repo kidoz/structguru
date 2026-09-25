@@ -320,6 +320,23 @@ class _SinkLock:
         self.lock.release()
 
 
+@dataclass(frozen=True)
+class _SinkRegistration:
+    """One ``add()`` sink, resolvable by its handler id from any logger."""
+
+    handler: logging.Handler
+    token: int
+    # The adding logger's registry (shared with its clones), which
+    # ``remove()`` without an id empties.
+    owner: dict[HandlerId, logging.Handler]
+    owner_lock: _SinkLock
+
+
+# Handler ids name process-wide sinks, so every logger resolves every id.
+# Guarded by ``_id_counter_lock``.
+_sinks: dict[HandlerId, _SinkRegistration] = {}
+
+
 def _after_fork() -> None:
     """Replace locks owned by vanished threads, preserving clone sharing."""
     global _root_attach_lock, _id_counter_lock
@@ -409,8 +426,8 @@ class Logger:
     _opt_exc_info: Any = None
     _opt_stack_info: bool = False
 
+    # Sinks added through this logger or its clones, for ``remove()``.
     _handlers: dict[HandlerId, logging.Handler] = field(default_factory=dict)
-    _native_sink_tokens: dict[HandlerId, int] = field(default_factory=dict)
     _lock: _SinkLock = field(default_factory=_SinkLock, repr=False)
 
     # -- context helpers ----------------------------------------------------
@@ -641,7 +658,7 @@ class Logger:
         Returns
         -------
         HandlerId
-            An identifier that can be passed to :meth:`remove`.
+            A process-wide identifier that any logger can pass to :meth:`remove`.
 
         Note
         ----
@@ -689,46 +706,57 @@ class Logger:
 
         with _id_counter_lock:
             handler_id = next(_id_counter)
+            _sinks[handler_id] = _SinkRegistration(
+                handler, native_token, self._handlers, self._lock
+            )
         with self._lock:
             self._handlers[handler_id] = handler
-            self._native_sink_tokens[handler_id] = native_token
         return handler_id
 
     def remove(self, handler_id: HandlerId | None = None) -> None:
         """Remove a sink by its *handler_id*.
 
-        If *handler_id* is ``None``, all sinks added via this logger
-        instance are removed.
+        Handler ids are process-wide, so any logger removes a sink added
+        through another. An id that names no active sink raises
+        ``ValueError`` and a non-integer id ``TypeError``, as in loguru.
+
+        If *handler_id* is ``None``, all sinks added via this logger instance
+        (including loggers derived from it with ``bind()`` or ``opt()``) are
+        removed.
         """
-        with self._lock:
-            if handler_id is None:
-                registrations = [
-                    (handler, self._native_sink_tokens.get(sink_id))
-                    for sink_id, handler in self._handlers.items()
-                ]
+        if handler_id is None:
+            with self._lock:
+                handler_ids = list(self._handlers)
                 self._handlers.clear()
-                self._native_sink_tokens.clear()
-            else:
+            with _id_counter_lock:
                 registrations = [
-                    (
-                        self._handlers.pop(handler_id, None),  # type: ignore[arg-type]
-                        self._native_sink_tokens.pop(handler_id, None),
-                    )
+                    registration
+                    for sink_id in handler_ids
+                    if (registration := _sinks.pop(sink_id, None)) is not None
                 ]
-        for handler, token in registrations:
-            if handler is not None:
-                _detach_from_root(handler)
-            if token is not None:
-                # Close only once every native delivery that captured the
-                # handler has run. Inside a sink callback the dispatcher cannot
-                # drain, so the close is deferred to the worker that finishes
-                # those deliveries; closing at once left them writing to a
-                # closed handler (a FileHandler silently reopens its file).
-                _runtime.remove_callable_sink(
-                    token, finalizer=handler.close if handler is not None else None
+        else:
+            if not isinstance(handler_id, int):
+                msg = (
+                    "Invalid handler id, it should be an integer as returned by the "
+                    f"'add()' method (or None), not: '{type(handler_id).__name__}'"
                 )
-            elif handler is not None:
-                handler.close()
+                raise TypeError(msg)
+            with _id_counter_lock:
+                registration = _sinks.pop(handler_id, None)
+            if registration is None:
+                msg = f"There is no existing handler with id {handler_id:d}"
+                raise ValueError(msg)
+            with registration.owner_lock:
+                registration.owner.pop(handler_id, None)
+            registrations = [registration]
+        for registration in registrations:
+            _detach_from_root(registration.handler)
+            # Close only once every native delivery that captured the handler
+            # has run. Inside a sink callback the dispatcher cannot drain, so
+            # the close is deferred to the worker that finishes those
+            # deliveries; closing at once left them writing to a closed handler
+            # (a FileHandler silently reopens its file).
+            _runtime.remove_callable_sink(registration.token, finalizer=registration.handler.close)
 
 
 logger = Logger()

@@ -196,6 +196,14 @@ logger.remove(handler_id)
 logger.remove()
 ```
 
+Handler ids are process-wide: any `Logger` can remove a sink that another one added.
+Removing an id that names no active sink raises `ValueError` (a non-integer raises
+`TypeError`), as in loguru; `remove()` without an id removes the sinks added through
+that logger and its `bind()`/`opt()` children. `level` accepts a name or a non-negative
+integer and raises `ValueError` for anything else, like `configure(level=...)`.
+A `logging.Handler` passed to `add()` keeps its own level and formatter: its formatter
+wraps the rendered line, only `level` gates what it receives, and `remove()` closes it.
+
 On Unix, new files created by either `logger.add(path)` or the native rotating
 file sink are owner-only (`0600`). Existing files retain their permissions.
 

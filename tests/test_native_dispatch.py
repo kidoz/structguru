@@ -309,7 +309,8 @@ def test_callback_shutdown_during_external_lifecycle_operation(operation: str) -
                 assert not closer.is_alive(), "lifecycle operation deadlocked"
                 assert not errors, errors
                 assert received == ["first", "second"], received
-                structguru.logger.remove(token)
+                if sys.argv[1] != "remove":  # removing an id twice raises
+                    structguru.logger.remove(token)
                 structguru.shutdown()
             """),
             operation,
