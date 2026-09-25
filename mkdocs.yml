@@ -5,6 +5,7 @@ theme:
   features:
     - navigation.tabs
     - navigation.sections
+    - navigation.indexes
     - toc.integrate
   palette:
     - media: "(prefers-color-scheme: light)"
@@ -30,30 +31,64 @@ plugins:
             docstring_style: numpy
             show_source: true
 
+# The documentation follows Diátaxis (https://diataxis.fr/): tutorials teach,
+# how-to guides solve a task, reference describes, explanation discusses.
 nav:
   - Home: index.md
-  - Integrations Guide: integrations.md
-  - Context Propagation: context-propagation.md
-  - API Reference:
-    - Overview: api/index.md
-    - Core: api/core.md
-    - Configuration: api/config.md
-    - Native Processing: api/processors.md
-    - Security & Redaction: api/redaction.md
-    - Performance & Sampling: api/sampling.md
-    - Level-Aware Processing: api/routing.md
-    - Observability (Metrics & OTel):
-      - Metrics: api/metrics.md
-      - OpenTelemetry: api/otel.md
-    - Exceptions: api/exceptions.md
+  - Tutorials:
+    - tutorials/index.md
+    - Get started: tutorials/getting-started.md
+    - Log a web service: tutorials/web-service.md
+  - How-to guides:
+    - how-to/index.md
+    - Configure logging: how-to/configure-logging.md
+    - Send logs to files and sinks: how-to/send-logs-to-sinks.md
+    - Handle backpressure: how-to/handle-backpressure.md
+    - Redact sensitive data: how-to/redact-sensitive-data.md
+    - Log exceptions: how-to/log-exceptions.md
+    - Capture standard-library logging: how-to/capture-stdlib-logging.md
+    - Propagate context: how-to/propagate-context.md
+    - Sample and rate-limit logs: how-to/sample-and-rate-limit.md
+    - Extract metrics: how-to/extract-metrics.md
+    - Correlate with OpenTelemetry: how-to/correlate-opentelemetry.md
+    - Report errors to Sentry: how-to/report-errors-to-sentry.md
+    - Test code that logs: how-to/test-code-that-logs.md
+    - Write an integration adapter: how-to/write-an-integration-adapter.md
+    - Frameworks:
+      - FastAPI and Starlette: how-to/integrations/asgi.md
+      - Granian: how-to/integrations/granian.md
+      - Flask: how-to/integrations/flask.md
+      - Django: how-to/integrations/django.md
+      - Celery: how-to/integrations/celery.md
+      - gRPC: how-to/integrations/grpc.md
+      - SQLAlchemy: how-to/integrations/sqlalchemy.md
+      - HTTPX: how-to/integrations/httpx.md
+      - Requests: how-to/integrations/requests.md
+  - Reference:
+    - reference/index.md
+    - Logger: reference/logger.md
+    - Configuration and runtime control: reference/configuration.md
+    - Settings and environment variables: reference/settings.md
+    - Record format: reference/record-format.md
+    - Metrics: reference/metrics.md
+    - Redaction: reference/redaction.md
+    - Exceptions: reference/exceptions.md
+    - OpenTelemetry: reference/otel.md
     - Integrations:
-      - ASGI: api/integrations/asgi.md
-      - Celery: api/integrations/celery.md
-      - Django: api/integrations/django.md
-      - Flask: api/integrations/flask.md
-      - gRPC: api/integrations/grpc.md
-      - HTTPX: api/integrations/httpx.md
-      - Requests: api/integrations/requests.md
-      - Sentry: api/integrations/sentry.md
-      - SQLAlchemy: api/integrations/sqlalchemy.md
-      - Standard Library: api/integrations/stdlib.md
+      - ASGI: reference/integrations/asgi.md
+      - Celery: reference/integrations/celery.md
+      - Django: reference/integrations/django.md
+      - Flask: reference/integrations/flask.md
+      - gRPC: reference/integrations/grpc.md
+      - HTTPX: reference/integrations/httpx.md
+      - Requests: reference/integrations/requests.md
+      - Sentry: reference/integrations/sentry.md
+      - SQLAlchemy: reference/integrations/sqlalchemy.md
+      - Standard library: reference/integrations/stdlib.md
+  - Explanation:
+    - explanation/index.md
+    - Architecture: explanation/architecture.md
+    - Delivery and lifecycle: explanation/delivery-and-lifecycle.md
+    - Context propagation: explanation/context-propagation.md
+    - Redaction design: explanation/redaction.md
+    - Compatibility with loguru and structlog: explanation/compatibility.md

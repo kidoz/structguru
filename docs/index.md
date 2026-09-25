@@ -1,8 +1,10 @@
 # structguru
 
-`structguru` is a native structured logging library with a loguru-style Python
-API. Rust is the only rendering path in v1; the package has no required Python
-runtime dependencies.
+`structguru` is a structured logging library for Python 3.11+ with a
+loguru-style API: brace formatting, `bind()`, `contextualize()`, `opt()`, and
+sink management. Every record is rendered by a bundled native Rust extension,
+as compact JSON for production or readable console lines for development. The
+package has no required runtime dependencies.
 
 ## Install
 
@@ -10,109 +12,49 @@ runtime dependencies.
 pip install structguru
 ```
 
-Optional integrations are available through the `otel`, `celery`, `flask`,
-`django`, `sqlalchemy`, `grpc`, `sentry`, `httpx`, `requests`, and `all` extras.
+Framework and service integrations are optional extras: `otel`, `celery`,
+`flask`, `django`, `sqlalchemy`, `grpc`, `sentry`, `httpx`, `requests`, and
+`all`.
 
-## Quick start
-
-```python
-from structguru import Logger, configure, logger, update
-
-configure(service="checkout", level="INFO")
-logger.bind(request_id="req-1").info("order {order_id} accepted", order_id=42)
-```
-
-Logging is configured automatically for JSON output to stdout at import time.
-`configure()` replaces settings: explicit keywords override environment values, which
-override built-in defaults. Use `update()` to retain existing settings while changing
-selected options, as in the examples below. Use `Logger(name=__name__)` for an explicit
-module name. See [configuration](api/config.md) for reusable Settings and environment options.
-
-## Context
+## Example
 
 ```python
-log = logger.bind(component="billing")
+from structguru import configure, logger
 
-with log.contextualize(request_id="req-1"):
-    log.info("payment accepted", amount=42.5)
+configure(service="checkout")
+
+log = logger.bind(request_id="req-1")
+log.info("Order {order_id} accepted", order_id=42, total=19.99)
 ```
 
-Bound values persist on the child logger. Contextual values use Python
-`contextvars` and are restored when the block exits.
-
-## Redaction
-
-```python
-from structguru import update
-
-update(
-    sensitive_keys=["password", "token"],
-    sensitive_patterns=[r"secret=\w+"],
-)
+```json
+{"request_id":"req-1","total":19.99,"logger":"__main__","level":"INFO","severity":6,"timestamp":"2026-09-25T08:23:16.414683Z","service":"checkout","message":"Order 42 accepted"}
 ```
 
-Key and pattern redaction covers the message and structured fields before data
-is rendered, queued, or forwarded to Sentry. A message placeholder that names a
-sensitive key (`"login token={token}"`) is interpolated as `[REDACTED]`, and a
-placeholder that interpolates a container (`logger.info("{}", {"token": t})`)
-renders it with the values under sensitive keys redacted.
+`order_id` fills the `{order_id}` placeholder in the message, `total` becomes a
+field of its own, and `request_id` comes from `bind()`.
 
-Patterns run on Rust's linear-time regex engine, which rejects look-around and
-backreferences at `configure()` time; rewrite them as capture groups with
-`pattern_replacement="$1[REDACTED]"`, or pass `allow_backtracking_patterns=True`
-to opt those patterns into a bounded backtracking engine (fail-closed on
-backtrack-limit overruns).
+## How these docs are organized
 
-## Sinks
+The documentation follows [Diátaxis](https://diataxis.fr/) and has four parts:
 
-```python
-from structguru import logger
+- [Tutorials](tutorials/index.md) are lessons that take you from an empty
+  directory to working, structured logs, one step at a time.
+- [How-to guides](how-to/index.md) are recipes for a specific task, such as
+  writing to a file, redacting secrets, or logging a Flask or Celery app.
+- [Reference](reference/index.md) describes every public function, setting,
+  environment variable, and output field.
+- [Explanation](explanation/index.md) discusses how structguru works and why
+  it is designed that way.
 
-file_id = logger.add("application.log", level="ERROR")
-callback_id = logger.add(lambda line: send_to_monitoring(line), level="CRITICAL")
+## Start here
 
-logger.remove(callback_id)
-logger.remove(file_id)
-```
-
-`logger.add()` supports file paths, streams, stdlib handlers, and callables. Each
-sink receives structguru records and is attached to the stdlib root logger for
-third-party records. Native delivery uses a bounded queue and is drained on
-flush, reconfiguration, `shutdown()`, fork handling, and interpreter exit.
-Handler ids are process-wide, so any logger can remove any sink; an unknown id
-raises `ValueError`. A stdlib handler keeps its own level and formatter.
-
-For a primary rotating file sink, configure it directly:
-
-```python
-update(file_path="application.log", file_max_bytes=50 * 1024 * 1024)
-```
-
-The rotating sink coordinates workers that share a path through an owner-only
-`application.log.lock` sidecar. Keep that lock file on the same local filesystem
-as the log; for containers or distributed hosts, stdout plus an external log
-collector remains the recommended deployment model.
-
-## Exceptions and tracing
-
-```python
-try:
-    risky_operation()
-except Exception:
-    logger.exception("operation failed")
-
-update(otel=True, structured_exceptions=True)
-```
-
-OpenTelemetry support is optional and becomes a no-op when its extra is not
-installed. Structured exceptions can include bounded, redacted local values:
-a local named like a sensitive key is redacted, as is any value under a
-sensitive key inside a mapping, list, tuple, set, dataclass, or
-`SimpleNamespace`. Other objects' own `repr()` text is covered by
-`sensitive_patterns`, which see each local whole before it is truncated.
-
-## Next steps
-
-- See the [API reference](api/index.md) for exact signatures.
-- See the [integrations guide](integrations.md) for framework setup.
-- See the project README for development and release commands.
+- New to structguru: follow [Get started with structguru](tutorials/getting-started.md).
+- Adding logging to a FastAPI or Starlette service: follow
+  [Log a web service](tutorials/web-service.md).
+- Setting up logging for production: see
+  [Configure logging](how-to/configure-logging.md) and
+  [Settings and environment variables](reference/settings.md).
+- Looking up a method or argument: see the [Logger reference](reference/logger.md).
+- Moving from loguru or structlog: read
+  [Compatibility with loguru and structlog](explanation/compatibility.md).
