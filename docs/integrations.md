@@ -486,6 +486,11 @@ server = grpc.server(
 - `grpc_method`: The gRPC method being called.
 - `request_id`: Extracted from invocation metadata or generated as a UUID4.
 
+gRPC delivers metadata keys in lower case, so `request_id_key` is matched
+case-insensitively (`"X-Request-ID"` works). A binary `-bin` key's value must be
+UTF-8. An invalid, oversized, or non-printable ID is replaced by a generated
+UUID; it never fails the RPC.
+
 ## Sentry
 
 `SentryProcessor` forwards log events to Sentry as breadcrumbs and, for the more severe ones, as captured events.

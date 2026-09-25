@@ -90,3 +90,17 @@ def test_sanitize_url_rejects_credentials_outside_a_parsed_authority(raw: str) -
 
 def test_sanitize_url_keeps_relative_paths_without_userinfo() -> None:
     assert sanitize_url("/relative/path?x=1") == "/relative/path?"
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [(b"rid-1", "rid-1"), ("rid-2", "rid-2"), (b"\xff", None), (b"", None), (42, None)],
+)
+def test_coerce_request_id_accepts_utf8_bytes_and_rejects_other_types(
+    raw: object, expected: str | None
+) -> None:
+    result = coerce_request_id(raw)
+    if expected is None:
+        assert len(result) == 36
+    else:
+        assert result == expected

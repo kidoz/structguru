@@ -43,15 +43,22 @@ def sanitize_url(raw: object) -> str:
     return f"{sanitized}?" if parts.query else sanitized
 
 
-def coerce_request_id(raw: str | None, *, max_len: int = REQUEST_ID_MAX_LEN) -> str:
+def coerce_request_id(raw: object, *, max_len: int = REQUEST_ID_MAX_LEN) -> str:
     """Return a safe request ID: *raw* if it passes validation, else a new UUID.
 
     An incoming value is accepted only when it is non-empty, at most
     *max_len* characters long, and contains no non-printable characters.
-    Otherwise a fresh :func:`uuid.uuid4` is returned so upstream callers
-    cannot inject control characters or unbounded strings into logs or
-    response headers.
+    ``bytes`` (binary gRPC metadata, raw ASGI headers) are accepted when they
+    decode as strict UTF-8. Anything else — including values of other types —
+    yields a fresh :func:`uuid.uuid4`, so upstream callers cannot inject
+    control characters or unbounded strings into logs or response headers, and
+    a malformed value never fails the request.
     """
-    if raw and len(raw) <= max_len and raw.isprintable():
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raw = None
+    if isinstance(raw, str) and raw and len(raw) <= max_len and raw.isprintable():
         return raw
     return str(uuid.uuid4())

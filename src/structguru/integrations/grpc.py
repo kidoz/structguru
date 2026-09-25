@@ -30,7 +30,10 @@ class StructguruInterceptor:
     Parameters
     ----------
     request_id_key:
-        Metadata key to extract a request/correlation ID from.
+        Metadata key to extract a request/correlation ID from. gRPC delivers
+        metadata keys in lower case, so the key is matched case-insensitively.
+        A binary (``-bin``) key's value must decode as UTF-8; an invalid or
+        malformed ID is replaced by a generated UUID and never fails the RPC.
     logger_name:
         Name for the structguru logger.
     """
@@ -41,7 +44,7 @@ class StructguruInterceptor:
         request_id_key: str = "x-request-id",
         logger_name: str = "structguru.grpc",
     ) -> None:
-        self.request_id_key = request_id_key
+        self.request_id_key = request_id_key.lower()
         self.log = Logger(name=logger_name)
 
     def intercept_service(
@@ -53,10 +56,10 @@ class StructguruInterceptor:
         clear_contextvars()
 
         method: str = handler_call_details.method or ""
-        metadata: dict[str, str] = {}
+        metadata: dict[str, str | bytes] = {}
         for key, value in handler_call_details.invocation_metadata or []:
             metadata[key] = value
-        request_id = coerce_request_id(metadata.get(self.request_id_key, ""))
+        request_id = coerce_request_id(metadata.get(self.request_id_key))
 
         bind_contextvars(grpc_method=method, request_id=request_id)
 

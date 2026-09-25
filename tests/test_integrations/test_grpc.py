@@ -375,3 +375,63 @@ class TestStructguruInterceptor:
 
         # Context should be cleared after continuation failure.
         assert "grpc_method" not in get_contextvars()
+
+
+@pytest.mark.parametrize(
+    "key, metadata, expected",
+    [
+        ("X-Request-ID", [("x-request-id", "rid-upper")], "rid-upper"),
+        ("x-request-id-bin", [("x-request-id-bin", b"rid-bin")], "rid-bin"),
+        ("X-Request-ID-Bin", [("x-request-id-bin", b"rid-bin-upper")], "rid-bin-upper"),
+        ("x-request-id-bin", [("x-request-id-bin", b"\xff\xfe")], None),
+        ("x-request-id-bin", [("x-request-id-bin", b"bad\r\nvalue")], None),
+    ],
+)
+def test_request_id_key_is_case_insensitive_and_binary_safe(
+    key: str, metadata: list[tuple[str, object]], expected: str | None
+) -> None:
+    clear_contextvars()
+    seen: list[str] = []
+
+    def unary(request: object, context: object) -> str:
+        seen.append(get_contextvars()["request_id"])
+        return "ok"
+
+    interceptor = StructguruInterceptor(request_id_key=key)
+    details = _make_handler_details(metadata=metadata)  # type: ignore[arg-type]
+    result = interceptor.intercept_service(MagicMock(return_value=_make_handler(unary)), details)
+    assert result.unary_unary("req", "ctx") == "ok"
+    if expected is None:
+        assert len(seen[0]) == 36  # a generated UUID, never a failed RPC
+    else:
+        assert seen == [expected]
+
+
+def test_real_server_accepts_mixed_case_and_binary_request_id_keys() -> None:
+    grpc = pytest.importorskip("grpc")
+    from concurrent import futures
+
+    seen: list[str] = []
+
+    def unary(request: bytes, context: object) -> bytes:
+        seen.append(get_contextvars()["request_id"])
+        return b"ok"
+
+    handler = grpc.method_handlers_generic_handler(
+        "svc", {"U": grpc.unary_unary_rpc_method_handler(unary)}
+    )
+    for key, value in (("X-Request-ID", "rid-1"), ("x-request-id-bin", b"rid-2")):
+        server = grpc.server(
+            futures.ThreadPoolExecutor(max_workers=1),
+            interceptors=[StructguruInterceptor(request_id_key=key)],
+        )
+        server.add_generic_rpc_handlers((handler,))
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        try:
+            with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+                call = channel.unary_unary("/svc/U")
+                assert call(b"", metadata=[(key.lower(), value)], timeout=5) == b"ok"
+        finally:
+            server.stop(None)
+    assert seen == ["rid-1", "rid-2"]
