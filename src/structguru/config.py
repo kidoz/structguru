@@ -1,7 +1,7 @@
 """Level-name helpers for structguru.
 
 Since v1.0, structguru uses the native Rust renderer as its only logging path.
-Runtime configuration lives in :func:`structguru.configure`; this module keeps
+Runtime configuration lives in ``structguru.configure``; this module keeps
 the level-name conversion helper shared by the integrations.
 """
 
@@ -13,7 +13,7 @@ from structguru._levels import LEVELS as _LEVELS
 
 
 def _to_logging_level(level_name: str) -> int:
-    """Convert a level name to its :mod:`logging` number.
+    """Convert a level name to its ``logging`` number.
 
     Accepts every name the library recognizes elsewhere (``configure(level=...)``,
     ``logger.catch(level=...)``), so the loguru-style aliases ``TRACE``,

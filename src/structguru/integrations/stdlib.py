@@ -1,6 +1,6 @@
 """Route standard-library logging into structguru's native pipeline.
 
-Third-party libraries log through the stdlib :mod:`logging` module. Installing
+Third-party libraries log through the stdlib ``logging`` module. Installing
 the bridge attaches a handler to the root logger that re-emits every such record
 through structguru's native renderer, so foreign logs share the same JSON /
 console formatting, redaction, level filtering, and output stream as
@@ -15,7 +15,7 @@ console formatting, redaction, level filtering, and output stream as
     # -> {"logger":"sqlalchemy.engine","level":"INFO",...,"message":"SELECT 1"}
 
 For a logger that sets ``propagate=False`` (so its records never reach the root
-logger), attach :class:`StructguruHandler` to it directly.
+logger), attach ``StructguruHandler`` to it directly.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ _STANDARD_RECORD_ATTRS = frozenset(
 
 @functools.lru_cache(maxsize=1024)
 def _logger_for(name: str) -> Logger:
-    """Return a cached structguru :class:`Logger` bound to *name*.
+    """Return a cached structguru ``Logger`` bound to *name*.
 
     The base logger is immutable in practice — ``bind()``/``opt()`` return fresh
     copies — so a shared per-name instance is safe to reuse across threads.
@@ -85,7 +85,7 @@ def _record_extras(record: logging.LogRecord) -> dict[str, Any]:
 
 
 class StructguruHandler(logging.Handler):
-    """A :class:`logging.Handler` that re-emits stdlib records via structguru.
+    """A ``logging.Handler`` that re-emits stdlib records via structguru.
 
     The record's logger name becomes the ``logger`` field, its level selects the
     structguru method, ``extra=`` fields are forwarded as structured fields, and
@@ -293,9 +293,9 @@ def install_stdlib_bridge(
 ) -> StructguruHandler:
     """Route root stdlib logging through structguru and quiet noisy loggers.
 
-    Installs a :class:`StructguruHandler` on the root logger so any library
-    logging through :mod:`logging` renders through structguru's native path.
-    Pass the returned handler to :func:`uninstall_stdlib_bridge` to undo it.
+    Installs a ``StructguruHandler`` on the root logger so any library
+    logging through ``logging`` renders through structguru's native path.
+    Pass the returned handler to ``uninstall_stdlib_bridge`` to undo it.
 
     Sinks registered with ``logger.add()`` already receive third-party records
     directly from the root logger, unrendered. The bridge delivers those same
@@ -309,9 +309,9 @@ def install_stdlib_bridge(
     level:
         Level set on the root logger — the floor for which stdlib records
         propagate to the bridge. structguru's own native level (set via
-        :func:`structguru.configure`) still applies on top.
+        ``structguru.configure``) still applies on top.
     suppress_loggers:
-        Logger names to raise to ``suppress_level`` (see :func:`suppress_loggers`).
+        Logger names to raise to ``suppress_level`` (see ``suppress_loggers``).
     suppress_level:
         Level applied to ``suppress_loggers`` (default ``"WARNING"``).
     clear_handlers:
@@ -320,22 +320,22 @@ def install_stdlib_bridge(
     disable_existing_loggers:
         ``True`` disables named loggers that already exist when the bridge is
         installed, and ``False`` re-enables them, matching the corresponding
-        :func:`logging.config.dictConfig` policy. ``None`` (the default) reads
+        ``logging.config.dictConfig`` policy. ``None`` (the default) reads
         ``STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS`` and leaves existing logger
         states unchanged when the variable is unset. Loggers created later are
         unaffected.
     replace:
         ``True`` releases an already-installed managed bridge first — with full
-        :func:`uninstall_stdlib_bridge` semantics, including restoring its
+        ``uninstall_stdlib_bridge`` semantics, including restoring its
         existing-loggers snapshot — and then installs the new one, so the last
         call wins. With the default ``False``, installing while a bridge is
-        still attached raises :class:`RuntimeError`. With no active bridge,
+        still attached raises ``RuntimeError``. With no active bridge,
         ``replace=True`` behaves exactly like a plain install. The swap runs in
         one critical section: a record logged by another thread during it is
         delivered at most once — rendered by the outgoing or incoming bridge,
         raw, or not at all — never twice, and never by raising. Suppression
         levels applied by the previous install are not reverted, and calling
-        :func:`uninstall_stdlib_bridge` on the replaced handler is a no-op.
+        ``uninstall_stdlib_bridge`` on the replaced handler is a no-op.
     """
     if disable_existing_loggers is None:
         disable_existing_loggers = optional_bool_from_env(
@@ -356,9 +356,9 @@ def install_stdlib_bridge_from_env(
 ) -> StructguruHandler:
     """Install the stdlib bridge using environment configuration.
 
-    Reading the environment is explicit so importing :mod:`structguru` never
+    Reading the environment is explicit so importing ``structguru`` never
     mutates the application's root logger. ``environ`` is injectable for tests;
-    normal applications should omit it to use :data:`os.environ`.
+    normal applications should omit it to use ``os.environ``.
     """
     config = stdlib_bridge_config_from_env(os.environ if environ is None else environ)
     return _install_stdlib_bridge_resolved(
@@ -374,7 +374,7 @@ def install_stdlib_bridge_from_env(
 def uninstall_stdlib_bridge(bridge: StructguruHandler) -> None:
     """Detach *bridge* from the root logger and restore direct sink delivery.
 
-    Reverses :func:`install_stdlib_bridge`: third-party records stop flowing
+    Reverses ``install_stdlib_bridge``: third-party records stop flowing
     through the native renderer, and ``logger.add()`` sinks are re-attached to
     the root logger so they keep receiving them (raw, as before the install).
     Root handlers removed by ``clear_handlers=True`` are not restored.

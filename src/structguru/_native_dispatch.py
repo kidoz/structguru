@@ -4,7 +4,7 @@ The dispatcher itself lives in the native extension (``CallableDispatcher``):
 sink registry, bounded queue generations, the worker thread, delivery
 accounting, and deferred finalizers. This module keeps the Python-facing names
 and the callback-scope helpers used by the raw stdlib delivery path in
-:mod:`structguru.core`.
+``structguru.core``.
 """
 
 from __future__ import annotations

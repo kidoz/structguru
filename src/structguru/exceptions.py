@@ -256,7 +256,7 @@ def _argparse_namespace_repr() -> object:
 
 
 def _walk_kind(cls: type) -> str | None:
-    """Name the :class:`_LocalRepr` method that walks *cls*, or ``None`` for a leaf.
+    """Name the ``_LocalRepr`` method that walks *cls*, or ``None`` for a leaf.
 
     Only type-level attributes are consulted, so no instance code runs. The
     answer is cached per class: message formatting asks for every argument
@@ -271,7 +271,7 @@ def _walk_kind(cls: type) -> str | None:
 
 
 def _classify(cls: type) -> str | None:
-    """Uncached :func:`_walk_kind`."""
+    """Uncached ``_walk_kind``."""
     if cls in _LEAF_TYPES or issubclass(cls, type):
         return None
     if issubclass(cls, (Mapping, dict)):
@@ -296,7 +296,7 @@ def _classify(cls: type) -> str | None:
 def _redacted_message_repr(value: Any, sensitive_keys: frozenset[str]) -> str | None:
     """Render a container a message placeholder interpolates, if it needs redaction.
 
-    Returns the :class:`_LocalRepr` rendering of *value* when it redacted a
+    Returns the ``_LocalRepr`` rendering of *value* when it redacted a
     value under one of *sensitive_keys* (lower-case) or hid nesting deeper
     than it walks, and ``None`` otherwise, so the caller formats *value* as
     usual. Items and length are not capped, like ``str()``.

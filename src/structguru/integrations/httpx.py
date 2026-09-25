@@ -16,7 +16,10 @@ _logger = Logger(name="structguru.httpx")
 
 
 def log_request(request: Any) -> None:
-    """Event hook to log the start of an outbound HTTPX request."""
+    """Event hook that records when an outbound HTTPX request starts.
+
+    Nothing is logged here; ``log_response`` logs the request with its duration.
+    """
     setattr(request, "_structguru_start_time", time.perf_counter())
 
 
@@ -69,7 +72,7 @@ class StructguruHTTPXLoggingHooks:
 
     @classmethod
     def get_hooks(cls) -> dict[str, list[Any]]:
-        """Return fresh synchronous hooks for :class:`httpx.Client`."""
+        """Return fresh synchronous hooks for ``httpx.Client``."""
         return {
             "request": [log_request],
             "response": [log_response],
@@ -77,7 +80,7 @@ class StructguruHTTPXLoggingHooks:
 
     @classmethod
     def get_async_hooks(cls) -> dict[str, list[Any]]:
-        """Return fresh asynchronous hooks for :class:`httpx.AsyncClient`."""
+        """Return fresh asynchronous hooks for ``httpx.AsyncClient``."""
         return {
             "request": [async_log_request],
             "response": [async_log_response],

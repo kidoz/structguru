@@ -63,7 +63,7 @@ class SettingsChanges(TypedDict, total=False):
 class Settings:
     """Describe a native runtime without opening sinks or starting workers.
 
-    Defaults match :func:`structguru.configure`. Collections are copied to
+    Defaults match ``structguru.configure``. Collections are copied to
     tuples; callbacks and streams retain their identity and ownership. Python
     values are validated here. Native regex compilation and file access are
     validated when applying the settings, before replacing a working runtime.

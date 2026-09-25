@@ -41,7 +41,7 @@ class _JSONLogFormatter(logging.Formatter):
     """stdlib formatter that renders records as JSON with proper escaping.
 
     Unlike a ``%``-style format string (where ``%(message)s`` is substituted
-    raw), this serializes each field through :func:`json.dumps`, so a log
+    raw), this serializes each field through ``json.dumps``, so a log
     message or logger name containing quotes or newlines cannot break the JSON
     or forge additional fields.
     """

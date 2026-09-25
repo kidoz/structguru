@@ -1,7 +1,7 @@
 """Native extension access and logging runtime configuration.
 
-Also owns the native render/enqueue path used by :class:`structguru.core.Logger`.
-Use :func:`configure` to customize rendering, filtering, and sinks. Structured
+Also owns the native render/enqueue path used by ``structguru.core.Logger``.
+Use ``configure`` to customize rendering, filtering, and sinks. Structured
 fields are redacted and rendered in Rust, then handed to a background writer
 thread for off-thread I/O.
 """
@@ -364,7 +364,7 @@ def remove_callable_sink(token: int, *, finalizer: Callable[[], None] | None = N
     ``finalizer`` runs once no queued delivery references the sink; inside a
     sink callback that is on the worker after the last such delivery. A sink
     that stops returning is abandoned after ``_CALLABLE_STALL_TIMEOUT``, as in
-    :func:`flush`.
+    ``flush``.
     """
     removed, abandoned = _callable_dispatcher.remove(
         token, finalizer=finalizer, stall_timeout=_CALLABLE_STALL_TIMEOUT
@@ -388,7 +388,7 @@ def should_render(
     """True when the pre-render filter (sampling/rate-limit) keeps the record.
 
     Returns ``True`` immediately when no filter is configured, so the default
-    native path pays no extra cost. Mirrors the shape of :func:`is_below_level`.
+    native path pays no extra cost. Mirrors the shape of ``is_below_level``.
     """
     state = runtime or current_runtime()
     if state is None:
@@ -409,7 +409,7 @@ def notify_metrics(
     Called on the caller's thread (never the writer thread) with a
     pre-``EventRenamer``-shaped event dict, matching what ``MetricProcessor``
     sees on the standard path. The message always occupies ``"event"``, as in
-    :func:`notify_sentry`: a user field by that name renders natively but must
+    ``notify_sentry``: a user field by that name renders natively but must
     not change which metrics fire. No-op when no processor is configured; hook
     errors are swallowed — metrics must never break logging.
     """
@@ -434,7 +434,7 @@ def notify_sentry(
 ) -> None:
     """Invoke the configured Sentry processor with the redacted rendered event.
 
-    Mirrors :func:`notify_metrics` but passes the raw ``exc_info`` (in the shape
+    Mirrors ``notify_metrics`` but passes the raw ``exc_info`` (in the shape
     ``SentryProcessor._resolve_exception`` expects: ``True``, a ``(type, exc, tb)``
     tuple, or a ``BaseException``) so exception capture works. Field values and
     the message are reconstructed from the JSON produced by the Rust renderer,
@@ -485,7 +485,7 @@ def build_exception_field(
     """Build the ``exception`` field value for a native record.
 
     Returns the structured dict when ``structured_exceptions`` is enabled
-    (matching :func:`structguru.exceptions.build_exception_dict` exactly, or
+    (matching ``structguru.exceptions.build_exception_dict`` exactly, or
     ``None`` when *exc_info* does not resolve); otherwise the formatted
     traceback string (matching ``format_exc_info``). Frame walking, locals
     capture, and ``repr`` are Python-owned — the native renderer only
@@ -553,7 +553,7 @@ def _drop_positions(formatted: traceback.TracebackException) -> None:
     """Rebuild every frame summary without column data so no carets render.
 
     ``TracebackException.format()`` derives the ``~~~^^^`` marker lines from
-    each frame's ``colno``/``end_colno``. A :class:`traceback.FrameSummary`
+    each frame's ``colno``/``end_colno``. A ``traceback.FrameSummary``
     built without them, and with ``end_lineno`` collapsed onto ``lineno``, is
     exactly what CPython produces under ``PYTHONNODEBUGRANGES=1``, so the
     output matches that mode line for line. Walks the ``__cause__`` and
@@ -592,10 +592,10 @@ def configure(settings: Settings | None = None, **changes: Unpack[SettingsChange
     Replace configuration using defaults, environment, then explicit keywords.
     A supplied ``Settings`` object replaces the defaults/environment base. Keyword
     overrides still win, including explicit ``None``. Omitted settings do not carry
-    over from a previous call; use :func:`update` for incremental changes.
+    over from a previous call; use ``update`` for incremental changes.
     Invalid settings leave the active runtime untouched. Reconfiguration replaces
     writers and resets sampling/rate-limit state. Sinks added with ``logger.add()``
-    survive reconfiguration and are not included in :func:`get_config`.
+    survive reconfiguration and are not included in ``get_config``.
 
     ``target`` selects the background writer's sink: ``"stdout"`` (default,
     12-factor), ``"null"`` (discard), or ``"memory"`` (inspection/tests).
@@ -603,11 +603,13 @@ def configure(settings: Settings | None = None, **changes: Unpack[SettingsChange
     The output queue is bounded to 8192 records by default. ``overflow`` governs a
     full queue: ``"block"`` (default, no loss — the caller waits with the GIL
     released) or ``"drop"`` (drop the new record, count it, and emit a rate-limited
-    warning; see :func:`writer_metrics`). Pass ``maxsize=0`` only to explicitly opt
+    warning; see ``writer_metrics``). Pass ``maxsize=0`` only to explicitly opt
     into an unbounded queue.
 
     ``sensitive_patterns`` is a list of regex source strings applied (in addition
-    to key-based redaction) to every string value. Rust's ``regex`` engine
+    to key-based redaction) to the message, the logger, service, and stack text,
+    every field key and string value at any depth, and integers by their decimal
+    digits (a matching integer is emitted as the redacted string). Rust's ``regex`` engine
     guarantees linear-time matching and rejects backreferences and look-around:
     an unsupported pattern raises ``ValueError`` here, at setup time.
     ``pattern_replacement`` is the substitution text for pattern matches and
@@ -632,12 +634,12 @@ def configure(settings: Settings | None = None, **changes: Unpack[SettingsChange
     is never limited; its key table holds at most 8192 messages and evicts the
     least recently seen when full. ``sampled`` and
     ``rate_limited`` counters are reported separately from the writer's transport
-    ``dropped`` counter (see :func:`writer_metrics`). ``sample_max_level``
+    ``dropped`` counter (see ``writer_metrics``). ``sample_max_level``
     restricts sampling to records at or below that level (more severe records
     always pass) — the native analog of level-gated sampling.
 
     ``metric_processor`` is a structlog-style processor (e.g.
-    :class:`structguru.metrics.MetricProcessor`) invoked for every *kept* record
+    ``structguru.metrics.MetricProcessor``) invoked for every *kept* record
     with ``(None, method, {"event": message, **fields})`` before rendering; the
     message stays in ``"event"`` even when a field has that name.
     Records dropped by level filtering, sampling, or rate limiting never reach
@@ -645,7 +647,7 @@ def configure(settings: Settings | None = None, **changes: Unpack[SettingsChange
 
     ``structured_exceptions=True`` renders the ``exception`` field as the
     structured dict produced by
-    :func:`structguru.exceptions.build_exception_dict` (with the
+    ``structguru.exceptions.build_exception_dict`` (with the
     ``exception_*`` knobs mirroring the processor's parameters,
     ``sensitive_keys`` reused for locals redaction, and ``sensitive_patterns``
     applied to each local's whole rendering before it is truncated) instead of
@@ -667,7 +669,7 @@ def configure(settings: Settings | None = None, **changes: Unpack[SettingsChange
     explicitly to override (ignored in JSON mode).
 
     ``file_path`` enables a native rotating-file sink (append mode). Defaults
-    mirror :class:`logging.handlers.RotatingFileHandler`: ``file_max_bytes=50MB``,
+    mirror ``logging.handlers.RotatingFileHandler``: ``file_max_bytes=50MB``,
     ``file_backup_count=5``. Set ``also_stdout=True`` to mirror output to both
     the file and stdout (e.g. container + persistent log).
 
@@ -677,7 +679,7 @@ def configure(settings: Settings | None = None, **changes: Unpack[SettingsChange
     by ``callable_queue_maxsize``; ``overflow="block"`` applies backpressure when
     full, while ``overflow="drop"`` drops and counts the callable delivery.
     Exceptions they raise are counted in ``callable_errors`` (see
-    :func:`writer_metrics`) and reported by a rate-limited warning.
+    ``writer_metrics``) and reported by a rate-limited warning.
     Logs emitted inside these callbacks still reach the native writer but skip
     callable sinks, preventing feedback loops and worker self-deadlocks.
 
@@ -1020,7 +1022,7 @@ def shutdown() -> None:
     """Drain accepted callbacks and native records, then disable logging.
 
     Calls still formatting or waiting for queue space can be rejected by the
-    closing writer; :func:`lifecycle_metrics` counts these native deliveries.
+    closing writer; ``lifecycle_metrics`` counts these native deliveries.
     Calls started after shutdown completes are disabled and are not counted.
     """
     global _runtime, _lifecycle_generation
@@ -1140,7 +1142,7 @@ def lifecycle_metrics() -> dict[str, int]:
     callable sinks, and Sentry follow the native writer's outcome.
 
     The counter survives configuration changes and shutdown; a forked child starts
-    at zero. Unlike :func:`writer_metrics`, this always returns a snapshot.
+    at zero. Unlike ``writer_metrics``, this always returns a snapshot.
     """
     with _drop_lock:
         return {"rejected": _lifecycle_rejected}
@@ -1224,7 +1226,7 @@ def flush() -> None:
     guarantee — before asserting on output in a test, or at a checkpoint where
     losing buffered records would matter.
 
-    Not needed for normal shutdown: :func:`shutdown`, reconfiguration, fork, and
+    Not needed for normal shutdown: ``shutdown``, reconfiguration, fork, and
     interpreter exit all drain automatically.
     """
     # Callbacks may log to the native writer or replace it by reconfiguring.
@@ -1249,8 +1251,9 @@ def writer_metrics() -> dict[str, Any] | None:
     """Return writer + filter metrics.
 
     Writer counters: ``enqueued``, ``dropped`` (queue-full), ``written``, ``depth``,
-    etc. When a pre-render filter is active, ``sampled`` and ``rate_limited`` are
-    added — these are distinct from the transport ``dropped`` counter.
+    and the other keys listed in the metrics reference. When a pre-render filter
+    is active, ``sampled`` and ``rate_limited`` are added — these are distinct
+    from the transport ``dropped`` counter.
     ``written`` counts records delivered to at least one native destination;
     ``sink_errors`` counts failed sink operations, including partial failures
     when another destination succeeds. ``stream_errors`` counts ``write()``
@@ -1264,7 +1267,7 @@ def writer_metrics() -> dict[str, Any] | None:
     callable counters restart when configure() or a non-level update() replaces
     the configuration; adding or removing a sink keeps them.
 
-    Returns ``None`` while logging is disabled. Use :func:`lifecycle_metrics`
+    Returns ``None`` while logging is disabled. Use ``lifecycle_metrics``
     for cumulative closed-writer rejections across configuration and shutdown.
     """
     state = current_runtime()
@@ -1283,10 +1286,10 @@ def _maybe_configure_from_env() -> None:
     """Auto-configure native mode at import time (the default since v1.0).
 
     Set ``STRUCTGURU_AUTOCONFIGURE=0`` to skip import-time configuration. Logging
-    then remains disabled until :func:`configure` is called. The legacy inverse
+    then remains disabled until ``configure`` is called. The legacy inverse
     switch ``STRUCTGURU_LEGACY=1`` remains supported when the new switch is absent.
 
-    :meth:`Settings.from_env` resolves native options and compatibility aliases.
+    ``Settings.from_env`` resolves native options and compatibility aliases.
     A missing extension or invalid environment value raises during import so the
     application cannot start with its only logging path silently disabled.
     """

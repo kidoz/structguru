@@ -78,7 +78,7 @@ def coerce_request_id(raw: object, *, max_len: int = REQUEST_ID_MAX_LEN) -> str:
     *max_len* characters long, and contains no non-printable characters.
     ``bytes`` (binary gRPC metadata, raw ASGI headers) are accepted when they
     decode as strict UTF-8. Anything else — including values of other types —
-    yields a fresh :func:`uuid.uuid4`, so upstream callers cannot inject
+    yields a fresh ``uuid.uuid4``, so upstream callers cannot inject
     control characters or unbounded strings into logs or response headers, and
     a malformed value never fails the request.
     """
@@ -96,7 +96,7 @@ def coerce_header_value(raw: object, *, max_len: int = HEADER_VALUE_MAX_LEN) -> 
     """Return a bounded, printable header value for binding, or ``None`` to drop it.
 
     ``bytes`` must decode as strict UTF-8. A value longer than *max_len*
-    characters is truncated and marked with :data:`TRUNCATED_SUFFIX`; a value
+    characters is truncated and marked with ``TRUNCATED_SUFFIX``; a value
     containing non-printable characters (CR/LF, NUL, other controls) is dropped.
     """
     if isinstance(raw, bytes):
@@ -116,7 +116,7 @@ def active_sensitive_keys() -> frozenset[str]:
 
     Custom ``sensitive_keys`` replace the defaults, exactly as in the native
     renderer. Without a configured runtime (or if it cannot be read) the
-    defaults from :data:`structguru.redaction.DEFAULT_SENSITIVE_KEYS` apply.
+    defaults from ``structguru.redaction.DEFAULT_SENSITIVE_KEYS`` apply.
     """
     try:
         from structguru import _runtime
@@ -133,7 +133,7 @@ def is_credential_header(name: str, sensitive_keys: frozenset[str]) -> bool:
     The renderer redacts a field only when its whole name equals a sensitive
     key, which misses header spellings such as ``x-api-key`` or
     ``x-auth-token``. Here a header matches when it is a well-known credential
-    header (:data:`CREDENTIAL_HEADERS`), or when any contiguous run of its
+    header (``CREDENTIAL_HEADERS``), or when any contiguous run of its
     ``-``/``_``-separated words, joined by ``_`` or directly, equals one of
     *sensitive_keys* (``x-api-key`` → ``api_key``, ``set-cookie`` → ``cookie``).
     """
@@ -224,8 +224,8 @@ class ContextBoundIterator(Generic[_T]):
     its logs carry it), keeps enrichment the body made for the next step, and
     then restores the caller's context, so nothing leaks into the server's own
     work before, between, or after chunks. Exhaustion, a failure, or
-    :meth:`close` finishes the stream: the completion callback runs with the
-    request context (see :meth:`StreamState.finish`).
+    ``close`` finishes the stream: the completion callback runs with the
+    request context (see ``StreamState.finish``).
     """
 
     def __init__(self, iterable: Iterable[_T], state: StreamState) -> None:
@@ -282,11 +282,11 @@ class ContextBoundIterator(Generic[_T]):
 
 
 class ContextBoundAsyncIterator(Generic[_T]):
-    """Asynchronous counterpart of :class:`ContextBoundIterator`.
+    """Asynchronous counterpart of ``ContextBoundIterator``.
 
     It deliberately has no ``__iter__`` so frameworks that detect async bodies
     by the absence of synchronous iteration (Django) keep treating it as one.
-    The synchronous :meth:`close` finishes the stream without awaiting the
+    The synchronous ``close`` finishes the stream without awaiting the
     wrapped iterator, for response-level ``close()`` hooks.
     """
 

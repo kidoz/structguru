@@ -60,20 +60,20 @@ class SentryProcessor:
     Parameters
     ----------
     event_level:
-        Minimum :mod:`logging` level to capture as a Sentry event.
+        Minimum ``logging`` level to capture as a Sentry event.
     tag_keys:
         Event-dict keys to set as Sentry tags.
     breadcrumb_level:
         Minimum level to record as a Sentry breadcrumb.
     capture_messages:
-        If ``True``, call :func:`sentry_sdk.capture_message` for every event
+        If ``True``, call ``sentry_sdk.capture_message`` for every event
         at or above *event_level* that does not carry ``exc_info``.  Defaults
-        to ``False`` to match :mod:`logging.LoggingIntegration` semantics —
+        to ``False`` to match ``logging.LoggingIntegration`` semantics —
         plain ``logger.error(...)`` calls only become Sentry *events* when
         they include an exception.
     require_redaction:
         If ``True`` (default), ``scope.set_extra("structlog_event", ...)`` is
-        only called when :data:`~structguru.redaction.REDACTED_MARKER_KEY`
+        only called when ``REDACTED_MARKER_KEY``
         is present on the event dict.
 
     Notes

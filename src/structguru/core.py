@@ -1,6 +1,6 @@
 """Loguru-like facade for the native structguru runtime.
 
-Provides a :class:`Logger` dataclass that mirrors Loguru's ergonomic API
+Provides a ``Logger`` dataclass that mirrors Loguru's ergonomic API
 (``bind``, ``contextualize``, ``opt``, level methods) while delegating all
 actual log processing to the bundled Rust renderer and writer.
 
@@ -46,7 +46,7 @@ _NO_FIELDS: dict[str, Any] = {}
 
 
 class WritableSink(Protocol):
-    """A text stream accepted by :meth:`Logger.add`."""
+    """A text stream accepted by ``Logger.add``."""
 
     def write(self, message: str, /) -> object:
         """Write a rendered text record."""
@@ -69,7 +69,7 @@ def _caller_module_name() -> str:
 
 
 class _CallableHandler(logging.Handler):
-    """A :class:`logging.Handler` that delegates to a plain callable."""
+    """A ``logging.Handler`` that delegates to a plain callable."""
 
     def __init__(self, fn: Callable[[str], None]) -> None:
         super().__init__()
@@ -102,7 +102,7 @@ class _SecureFileHandler(logging.FileHandler):
 
 
 def _make_handler(sink: Sink) -> logging.Handler:
-    """Create a :class:`logging.Handler` from various *sink* types."""
+    """Create a ``logging.Handler`` from various *sink* types."""
     if isinstance(sink, logging.Handler):
         return sink
     if isinstance(sink, (str, Path)):
@@ -219,7 +219,7 @@ def _warn_unprintable_message(type_name: str, exc_type_name: str) -> None:
     """Emit a ``UserWarning`` at most once per (message type, error type).
 
     The warning never raises into the logging call; see
-    :func:`_warn_format_failure`.
+    ``_warn_format_failure``.
     """
     _runtime._warn(
         f"structguru: failed to convert log message to str ({exc_type_name}); using a placeholder",
@@ -335,7 +335,7 @@ def _safe_format(
     such a key inside a container a placeholder interpolates, or reaches by
     attribute or index. Any formatting failure falls back to the raw
     template, and a message whose ``str()`` fails to a placeholder, each with
-    a one-shot :class:`UserWarning`; logging never raises for its arguments.
+    a one-shot ``UserWarning``; logging never raises for its arguments.
     """
     msg = message if type(message) is str else _message_text(message)
     if not (args or kwargs) or ("{" not in msg and "}" not in msg):
@@ -391,7 +391,7 @@ class _RootRelay(logging.Handler):
     Third-party records reach an ``add()`` sink through this relay rather than
     through the sink's handler directly, so raw delivery keeps the guarantees
     of native delivery: a record emitted inside any sink callback is not
-    delivered back into ``add()`` sinks, and :meth:`Logger.remove` waits for
+    delivered back into ``add()`` sinks, and ``Logger.remove`` waits for
     raw deliveries already in progress.
     """
 
@@ -474,7 +474,7 @@ def _attach_to_root(handler: logging.Handler, threshold: int) -> None:
 
 
 def _detach_from_root(handler: logging.Handler) -> None:
-    """Undo :func:`_attach_to_root`, waiting for raw deliveries in progress."""
+    """Undo ``_attach_to_root``, waiting for raw deliveries in progress."""
     with _root_attach_lock:
         relay = _root_relays.pop(handler, None)
         if relay is None:
@@ -488,7 +488,7 @@ def _detach_from_root(handler: logging.Handler) -> None:
 def _set_stdlib_bridge_active(active: bool) -> None:
     """Suspend or restore root attachment for ``add()`` sinks.
 
-    Called by :mod:`structguru.integrations.stdlib` on install/uninstall. While
+    Called by ``structguru.integrations.stdlib`` on install/uninstall. While
     the bridge is active, third-party records reach ``add()`` sinks through the
     native path, so the direct root attachment is dropped; uninstalling restores
     it for every sink still registered.
@@ -555,7 +555,7 @@ if hasattr(os, "register_at_fork"):
 
 
 class _Catcher(ContextDecorator):
-    """Context manager / decorator returned by :meth:`Logger.catch`."""
+    """Context manager / decorator returned by ``Logger.catch``."""
 
     def __init__(
         self,
@@ -632,8 +632,8 @@ class _Catcher(ContextDecorator):
 class Logger:
     """A Loguru-like facade for native structured logging.
 
-    *   ``trace``, ``debug``, ``info``, ``success``, ``warning``, ``error``,
-        ``critical``, ``exception`` methods.
+    *   ``trace``, ``debug``, ``info``, ``success``, ``warning``, ``warn``,
+        ``error``, ``critical``, ``fatal``, ``exception`` methods.
     *   ``bind()`` — create child loggers with persistent context.
     *   ``contextualize()`` — add request-scoped context via *contextvars*.
     *   ``add()`` / ``remove()`` — manage logging handlers (sinks).
@@ -669,7 +669,7 @@ class Logger:
     def _clone(self, **overrides: Any) -> Logger:
         """Return a shallow copy with *overrides* applied.
 
-        Equivalent to :func:`dataclasses.replace`, which re-runs ``__init__``
+        Equivalent to ``dataclasses.replace``, which re-runs ``__init__``
         for every field, but a plain ``__dict__`` copy runs in a third of the
         time. ``bind()`` and ``opt()`` sit on the per-request hot path and the
         stdlib bridge calls both for every record.
@@ -714,7 +714,7 @@ class Logger:
         exceptions are handled while awaiting the decorated call.
         Level names are case-insensitive; unknown names raise ``ValueError``
         when the catcher is constructed. ``trace`` logs at ``DEBUG``, matching
-        :meth:`trace`.
+        ``trace``.
         """
         return _Catcher(self, exception, level, message, reraise)
 
@@ -772,13 +772,13 @@ class Logger:
         self._log("warning", message, args, kwargs)
 
     def warn(self, message: Any, /, *args: Any, **kwargs: Any) -> None:
-        """Log at ``WARNING`` level — alias of :meth:`warning`."""
+        """Log at ``WARNING`` level — alias of ``warning``."""
         self.warning(message, *args, **kwargs)
 
     def error(self, message: Any, /, *args: Any, **kwargs: Any) -> None:
         """Log at ``ERROR`` level.
 
-        Pass ``exc_info=True`` (or use :meth:`exception`) to attach the active
+        Pass ``exc_info=True`` (or use ``exception``) to attach the active
         exception.
         """
         self._log("error", message, args, kwargs)
@@ -788,7 +788,7 @@ class Logger:
         self._log("critical", message, args, kwargs)
 
     def fatal(self, message: Any, /, *args: Any, **kwargs: Any) -> None:
-        """Log at ``CRITICAL`` level — alias of :meth:`critical`."""
+        """Log at ``CRITICAL`` level — alias of ``critical``."""
         self.critical(message, *args, **kwargs)
 
     def exception(self, message: Any, /, *args: Any, **kwargs: Any) -> None:
@@ -907,7 +907,7 @@ class Logger:
         sink:
             A callable accepting a single string (the rendered log line),
             a file path (``str``/``Path``), a stream-like object with ``.write``,
-            or a :class:`logging.Handler` (for third-party stdlib interop).
+            or a ``logging.Handler`` (for third-party stdlib interop).
         level:
             Minimum level for this sink: a case-insensitive name or a
             non-negative integer, validated like ``configure(level=...)``
@@ -917,7 +917,7 @@ class Logger:
         Returns
         -------
         HandlerId
-            A process-wide identifier that any logger can pass to :meth:`remove`.
+            A process-wide identifier that any logger can pass to ``remove``.
 
         Note
         ----
@@ -930,17 +930,17 @@ class Logger:
         ``BaseException`` subclasses, are isolated on the worker so later
         records and lifecycle operations can complete.
 
-        A :class:`logging.Handler` is used as given: its own formatter and
+        A ``logging.Handler`` is used as given: its own formatter and
         filters apply to each record, whose message is the rendered line, and
         its level and formatter are left unchanged for the loggers it already
         serves. Only ``level`` gates what this sink receives.
-        :meth:`remove` closes it.
+        ``remove`` closes it.
 
         Third-party records arrive raw (unrendered) via the stdlib root logger.
         Install the bridge (``structguru.integrations.stdlib``) to receive them
         rendered and redacted through the native path instead; while it is
         installed the raw root-logger delivery is suspended, so a sink never
-        sees the same record twice. :meth:`remove` waits for raw deliveries in
+        sees the same record twice. ``remove`` waits for raw deliveries in
         progress as it does for native ones.
         """
         # Validate before opening a file or registering anything. Unset means

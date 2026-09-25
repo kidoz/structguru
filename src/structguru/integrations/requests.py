@@ -1,10 +1,10 @@
 """Requests integration for outbound structured request logging.
 
-Provides a wrapper for `requests.Session` (or monkey-patch) to automatically
-log outbound requests and their responses.
+Provides ``StructguruRequestsSession``, a ``requests.Session`` subclass, and
+``get_logging_session()`` to log outbound requests and their responses.
 
 Requires the ``requests`` extra. Unlike the other adapters this one imports its
-framework at module scope: :class:`StructguruRequestsSession` subclasses
+framework at module scope: ``StructguruRequestsSession`` subclasses
 ``requests.Session``, so the base class has to exist when the class is created.
 Importing this module is already an explicit opt-in — nothing in ``structguru``
 imports it for you — so the dependency is never pulled in implicitly.

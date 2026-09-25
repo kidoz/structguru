@@ -30,7 +30,7 @@ def setup_query_logging(
     Parameters
     ----------
     engine:
-        A :class:`sqlalchemy.engine.Engine`.
+        A ``sqlalchemy.engine.Engine``.
     slow_threshold_ms:
         Log a ``Slow query`` warning (``slow=True``) when a query takes at
         least this long (milliseconds). ``0`` marks every query as slow.

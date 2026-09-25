@@ -5,8 +5,10 @@ A lightweight replacement for ``structlog.contextvars``, backed by a single
 merges into a new dict and sets a token; ``bound_contextvars`` restores on exit.
 
 This is request-scoped (via Python ``contextvars``), not thread-scoped. An
-``asyncio`` task inherits a copy of the context active when it was created; a
-new thread starts with an empty one and must propagate context explicitly.
+``asyncio`` task inherits a copy of the context active when it was created. A
+new thread starts with an empty context on the default build; on free-threaded
+CPython (``sys.flags.thread_inherit_context``) it inherits a copy of the
+creator's. Pass context to worker threads explicitly on either build.
 """
 
 from __future__ import annotations

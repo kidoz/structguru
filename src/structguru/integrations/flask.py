@@ -33,7 +33,7 @@ def setup_flask_logging(
     Parameters
     ----------
     app:
-        A :class:`flask.Flask` application.
+        A ``flask.Flask`` application.
     request_id_header:
         Header name to read an existing request ID from.
     log_request:
@@ -50,7 +50,7 @@ def setup_flask_logging(
     cleared after every other application ``teardown_request`` hook has run.
 
     A streamed response body (a generator, with or without
-    :func:`flask.stream_with_context`) is produced with the request context
+    ``flask.stream_with_context``) is produced with the request context
     bound, and its summary is logged when the body is exhausted, fails, or is
     closed, so ``duration_ms`` covers the streaming time. Bodies passed through
     to the server untouched (``send_file``) are summarized when the response is
