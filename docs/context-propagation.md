@@ -40,6 +40,16 @@ does not change the bound context, but nested mutable values remain shared.
 scope is a plain block. Adapters usually cannot use it, because bind and
 release happen in different callbacks.
 
+A block can also exit in a different context than it entered: a generator
+resumed under a fresh context copy for every `next()` (Starlette's
+`iterate_in_threadpool`, anyio's `run_sync`), or an async generator finalized by
+the event loop. The token cannot restore that context. If the context the
+block exits in still holds exactly the mapping the block installed (a copy of
+the entering context), the exit restores the entry values there; otherwise it
+leaves the context untouched, so a generator finalized while another request
+runs cannot change that request's context. It never raises;
+`logger.contextualize()` behaves the same way.
+
 ## The adapter contract
 
 Every adapter must satisfy three rules:
@@ -122,10 +132,18 @@ shared fixture in `tests/conftest.py` restores logging state only.
   test that reads or asserts on context.
 - **Close generators explicitly.** A partially-consumed generator is
   *suspended*, not finished: its `finally` has not run, so its context is still
-  bound. Cleanup happens whenever the object is garbage collected — which may
-  be in the middle of an unrelated later test. Call `.close()` and assert the
-  context is clean, as `test_streaming_partial_consumption_cleans_up_on_close`
-  does.
+  bound. For a synchronous generator, cleanup happens whenever the object is
+  garbage collected — which may be in the middle of an unrelated later test.
+  Call `.close()` and assert the context is clean, as
+  `test_streaming_partial_consumption_cleans_up_on_close` does.
+- **Close async generators with `aclose()`.** Garbage collection does not
+  clean up a suspended async generator in place: the event loop schedules its
+  `aclose()` as a separate task, which runs in its own copy of the context. A
+  `with bound_contextvars(...)` or `logger.contextualize()` block inside it
+  therefore exits in that task, and the context of the code that was iterating
+  keeps the fields bound. Consume async generators through
+  `contextlib.aclosing()` (or `await agen.aclose()`) so cleanup runs in the
+  iterating task, before it logs anything else.
 - **Cover the pre-iteration window.** Asserting that context is bound *during*
   iteration will not catch a leak in the interval before it. Create the
   iterator, assert the context is empty, and only then consume it.
@@ -137,5 +155,15 @@ it = iter(stream)
 assert next(it) == "item-0"
 assert get_contextvars()["request_id"] == "req-1"
 it.close()  # cleanup runs here, not at GC
+assert "request_id" not in get_contextvars()
+```
+
+```python
+from contextlib import aclosing
+
+async with aclosing(stream_events()) as events:
+    async for event in events:
+        if event.done:
+            break  # aclose() runs here, in this task's context
 assert "request_id" not in get_contextvars()
 ```

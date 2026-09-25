@@ -43,9 +43,25 @@ def get_contextvars() -> dict[str, Any]:
 
 @contextmanager
 def bound_contextvars(**kwargs: Any) -> Iterator[None]:
-    """Bind *kwargs* for the duration of the ``with`` block, then restore."""
-    token = _ctx.set({**_ctx.get(), **kwargs})
+    """Bind *kwargs* for the duration of the ``with`` block, then restore.
+
+    Exiting in the context the block entered restores that context exactly.
+    A block can also exit in another context: a generator resumed under a
+    fresh context copy per ``next()`` (Starlette's ``iterate_in_threadpool``),
+    or an async generator finalized by the event loop. Exit never raises
+    there. It restores the entry context only if the context it exits in
+    still holds exactly the mapping the block installed (a copy of the
+    entering context); any other context, such as another request's, is left
+    untouched.
+    """
+    previous = _ctx.get()
+    installed = {**previous, **kwargs}
+    token = _ctx.set(installed)
     try:
         yield
     finally:
-        _ctx.reset(token)
+        try:
+            _ctx.reset(token)
+        except (ValueError, RuntimeError):
+            if _ctx.get() is installed:
+                _ctx.set(previous)
