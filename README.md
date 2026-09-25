@@ -485,7 +485,7 @@ logging dictionary, application and launcher examples, and access-log options.
 from structguru.integrations.celery import setup_celery_logging
 
 setup_celery_logging(propagate_context=True, context_keys=["request_id"])
-# Binds task_id/task_name to context, propagates selected keys via headers
+# Binds task_id/task_name; propagates selected keys (redacted, JSON-safe) via headers
 ```
 
 ### Flask

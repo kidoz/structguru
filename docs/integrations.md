@@ -375,6 +375,30 @@ setup_celery_logging(
 )
 ```
 
+The header receives the context the way the renderer would log it, so it is safe
+for every transport and serializer:
+
+- Values are coerced to JSON-safe scalars, lists, and string-keyed mappings.
+  `UUID`, `Decimal`, and paths become strings; dates and times use ISO 8601;
+  enums use their value; sets and tuples become lists; integers outside the
+  64-bit range become strings; `NaN`/infinity become `null`. Any other object
+  becomes an `<unsupported: TypeName>` marker; its `str()` or `repr()` is never
+  exported.
+- Strings are truncated to 1024 characters, containers to 100 items, and
+  nesting to 8 levels.
+- Keys that the active runtime redacts (`sensitive_keys`, or the defaults such as
+  `password` and `token`) are sent as `[REDACTED]` at every nesting level, so
+  secrets do not reach the broker. Value patterns (`sensitive_patterns`) are not
+  applied to the header; they still apply when the worker renders its logs.
+- If the context cannot be exported, the header is omitted. Publishing a task
+  never fails because of bound context.
+
+Call `setup_celery_logging()` once per process. Later calls do not connect
+duplicate handlers; a later call with different options emits a
+`RuntimeWarning` and leaves the first configuration active. If the call fails
+because Celery cannot be imported, nothing is connected and a later call can
+retry.
+
 ## Flask
 
 `setup_flask_logging` registers `before_request` and `after_request` hooks for structured request logging.

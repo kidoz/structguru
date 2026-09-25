@@ -5,7 +5,11 @@ from __future__ import annotations
 import uuid
 from urllib.parse import urlsplit, urlunsplit
 
+from structguru.redaction import DEFAULT_SENSITIVE_KEYS
+
 REQUEST_ID_MAX_LEN = 128
+REDACTED = "[REDACTED]"
+TRUNCATED_SUFFIX = "...[truncated]"
 
 
 def sanitize_url(raw: object) -> str:
@@ -62,3 +66,19 @@ def coerce_request_id(raw: object, *, max_len: int = REQUEST_ID_MAX_LEN) -> str:
     if isinstance(raw, str) and raw and len(raw) <= max_len and raw.isprintable():
         return raw
     return str(uuid.uuid4())
+
+
+def active_sensitive_keys() -> frozenset[str]:
+    """Return the lower-cased keys the active runtime redacts when rendering.
+
+    Custom ``sensitive_keys`` replace the defaults, exactly as in the native
+    renderer. Without a configured runtime (or if it cannot be read) the
+    defaults from :data:`structguru.redaction.DEFAULT_SENSITIVE_KEYS` apply.
+    """
+    try:
+        from structguru import _runtime
+
+        keys = _runtime.sensitive_keys()
+    except Exception:  # noqa: BLE001 - fall back to the defaults, never fail the caller
+        keys = None
+    return frozenset(key.lower() for key in (DEFAULT_SENSITIVE_KEYS if keys is None else keys))
