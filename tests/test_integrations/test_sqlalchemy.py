@@ -146,7 +146,7 @@ def test_documented_log_all_recipe_logs_fast_queries_at_debug() -> None:
     buf = io.StringIO()
     configure(service="test", level="DEBUG", stream=buf)
     engine = sqlalchemy.create_engine("sqlite:///:memory:")
-    # The "Logging All Queries" recipe from docs/integrations.md.
+    # The "log all queries" recipe from docs/how-to/integrations/sqlalchemy.md.
     setup_query_logging(engine, log_all=True)
     with engine.connect() as connection:
         connection.execute(sqlalchemy.text("select 1"))

@@ -100,7 +100,7 @@ line-length = 99
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "D"]
-# The public API reference under docs/api/ is generated entirely from these
+# The public API reference under docs/reference/ is generated entirely from these
 # docstrings, so a missing one is an invisible hole in the published docs.
 ignore = [
     # Boolean properties read better as "True when ..." than as an imperative.

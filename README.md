@@ -157,8 +157,10 @@ The message is formatted whenever positional or keyword arguments are passed, as
 do not count, so `logger.exception("{{x}}")` logs `{{x}}` like `logger.error`. Fields
 named in a nested format spec (`"{x:{width}}"`) are consumed too. A placeholder that
 names a sensitive key — as the root (`{token}`) or an attribute or index
-(`{creds[password]}`) — is interpolated as `[REDACTED]`. A value interpolated whole
-(`{creds}`) is covered by `sensitive_patterns` only. The message is positional-only,
+(`{creds[password]}`) — is interpolated as `[REDACTED]`. A mapping, sequence, set,
+dataclass, or namespace interpolated whole (`{creds}`) renders with the values under
+sensitive keys redacted; other objects' own `str()` text is covered by
+`sensitive_patterns` only. The message is positional-only,
 so `message=` and `self=` are ordinary fields. A template that fails to format, or a
 message whose `str()` raises, is logged raw or as a placeholder with a one-shot
 `UserWarning`; logging calls do not raise for their arguments.
@@ -459,7 +461,7 @@ even in block mode. `lifecycle_metrics()["rejected"]` counts these native delive
 without queue-full warnings and survives shutdown and configuration changes; forked
 children start at zero. A rejected record reaches no other destination either: the
 synchronous stream, callable sinks, and Sentry follow the native writer's outcome.
-Calls begun while logging is disabled are no-ops and are not counted. See the [lifecycle contract](docs/api/config.md#runtime-control) for details.
+Calls begun while logging is disabled are no-ops and are not counted. See the [lifecycle contract](docs/reference/configuration.md) and [how delivery works](docs/explanation/delivery-and-lifecycle.md) for details.
 
 ## Framework integrations
 
@@ -476,7 +478,7 @@ app.add_middleware(StructguruMiddleware, request_id_header="X-Request-ID")
 
 Route Granian's server logs through `StructguruHandler` using `--log-config`,
 and use `StructguruMiddleware` for ASGI request IDs and structured summaries.
-The [Granian integration guide](docs/integrations.md#granian) includes a complete
+The [Granian guide](docs/how-to/integrations/granian.md) includes a complete
 logging dictionary, application and launcher examples, and access-log options.
 
 ### Celery
@@ -611,7 +613,12 @@ bridge = install_stdlib_bridge_from_env()
 
 ## Documentation & Examples
 
-- **[Integrations Guide](docs/integrations.md)** — Detailed instructions for setting up frameworks.
+The [documentation](docs/index.md) follows [Diátaxis](https://diataxis.fr/):
+
+- **[Tutorials](docs/tutorials/index.md)** — Learn structguru step by step, from the first log line to a logged web service.
+- **[How-to guides](docs/how-to/index.md)** — Configure, route, redact, and integrate with frameworks (FastAPI, Granian, Flask, Django, Celery, gRPC, SQLAlchemy, HTTPX, Requests).
+- **[Reference](docs/reference/index.md)** — API, settings and environment variables, record format, metrics, and integration details.
+- **[Explanation](docs/explanation/index.md)** — Architecture, delivery guarantees, context propagation, and redaction design.
 - **[Full-stack Example](examples/full_stack_fastapi/main.py)** — FastAPI + Celery + SQLAlchemy in action.
 - **[Existing-loggers Example](examples/stdlib_existing_loggers/main.py)** — Configure the stdlib policy and bridge replacement from code or environment.
 
