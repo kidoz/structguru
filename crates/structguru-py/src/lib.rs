@@ -1132,21 +1132,10 @@ fn convert_py_value_inner(
         return Ok(Value::Bool(obj.extract()?));
     }
     if obj.is_exact_instance_of::<PyInt>() {
-        return match obj.extract::<i64>() {
-            Ok(value) => Ok(Value::Int(value)),
-            // Outside i64: emit the decimal digits verbatim as a JSON number so
-            // the value stays lossless, as `json.dumps` does.
-            Err(_) => recover(obj, convert_big_int(obj)),
-        };
+        return convert_int(obj);
     }
     if obj.is_exact_instance_of::<PyFloat>() {
-        let value: f64 = obj.extract()?;
-        // orjson emits `null` for NaN/Infinity; serde_json would error, so map here.
-        return Ok(if value.is_finite() {
-            Value::Float(value)
-        } else {
-            Value::Null
-        });
+        return convert_float(obj);
     }
     if let Ok(value) = obj.cast::<PyString>() {
         return Ok(Value::String(string_to_owned(value)));
@@ -1273,12 +1262,39 @@ fn decode_surrogates(value: &Bound<'_, PyString>) -> String {
         .collect()
 }
 
+/// An `int`, or an instance of a subclass, as a JSON number. The value is read
+/// from the object itself, never through a method a subclass may override.
+fn convert_int(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
+    match obj.extract::<i64>() {
+        Ok(value) => Ok(Value::Int(value)),
+        // Outside i64: emit the decimal digits verbatim as a JSON number so
+        // the value stays lossless, as `json.dumps` does.
+        Err(_) => recover(obj, convert_big_int(obj)),
+    }
+}
+
+/// A `float`, or an instance of a subclass such as `numpy.float64`, read
+/// without calling any method the subclass overrides.
+fn convert_float(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
+    let value: f64 = obj.extract()?;
+    // orjson emits `null` for NaN/Infinity; serde_json would error, so map here.
+    Ok(if value.is_finite() {
+        Value::Float(value)
+    } else {
+        Value::Null
+    })
+}
+
 fn convert_big_int(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
-    // `str()` of an exact int is `-?[0-9]+`, which is valid JSON. It can still
-    // raise `ValueError` past `sys.get_int_max_str_digits()`; `recover` turns
-    // that into the marker.
-    let digits = obj.str()?;
-    Ok(Value::Raw(string_to_owned(&digits)))
+    // `int.__repr__` gives `-?[0-9]+`, which is valid JSON, even for a
+    // subclass that overrides `__str__` or `__repr__`. It can still raise
+    // `ValueError` past `sys.get_int_max_str_digits()`; `recover` turns that
+    // into the marker.
+    let digits = obj
+        .py()
+        .get_type::<PyInt>()
+        .call_method1("__repr__", (obj,))?;
+    Ok(Value::Raw(string_to_owned(digits.cast::<PyString>()?)))
 }
 
 fn convert_dict(
@@ -1359,6 +1375,16 @@ fn convert_exotic_leaf(
         // otherwise recurse forever at constant depth, bypass MAX_VALUE_DEPTH,
         // and overflow the native stack into an uncatchable process abort.
         return convert_py_value_inner(&value, depth + 1, containers);
+    }
+
+    // int and float subclasses (numpy.float64 is a float subclass) render
+    // their number. Checked after Enum, so an IntEnum member keeps rendering
+    // its `.value`.
+    if obj.is_instance_of::<PyInt>() {
+        return convert_int(obj);
+    }
+    if obj.is_instance_of::<PyFloat>() {
+        return convert_float(obj);
     }
 
     // datetime.datetime / datetime.date / datetime.time: `isoformat()` gives

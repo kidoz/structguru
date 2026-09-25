@@ -367,7 +367,8 @@ traceback still ship:
 - `<cycle: dict>` for a container that refers back to itself.
 - `<max depth exceeded>` beyond 64 levels of nesting.
 
-Integers outside the 64-bit range are written as JSON numbers, non-string
+Integers outside the 64-bit range are written as JSON numbers, `int` and
+`float` subclasses (such as `numpy.float64`) are written by value, non-string
 mapping keys are rendered as strings (`{200: 3}` becomes `{"200": 3}`), and
 unpaired surrogates in text become U+FFFD. Markers are redacted like any other
 string. The policy applies to native `logger` fields and to `extra=` fields

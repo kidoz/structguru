@@ -361,6 +361,78 @@ def test_native_record_text_arguments_decode_surrogate_pairs() -> None:
     assert record["k\U0001f600"] == "v\U0001f600\ufffd"
 
 
+def test_native_converts_int_and_float_subclasses_by_value() -> None:
+    # The numeric value is read directly: no method the subclass overrides
+    # (numpy.float64 is a float subclass) runs during conversion.
+    class Port(int):
+        def __str__(self) -> str:
+            raise AssertionError("str() must not be called")
+
+        __repr__ = __str__
+
+        def __int__(self) -> int:
+            raise AssertionError("int() must not be called")
+
+        __index__ = __int__
+
+    class Ratio(float):
+        def __repr__(self) -> str:
+            raise AssertionError("repr() must not be called")
+
+        def __float__(self) -> float:
+            raise AssertionError("float() must not be called")
+
+    assert rust._convert_value_debug(Port(8080)) == 8080
+    assert rust._convert_value_debug(Port(2**70)) == 2**70
+    assert rust._render_json_debug([Port(-(2**70))]) == f"[{-(2**70)}]"
+    assert rust._convert_value_debug(Ratio(1.5)) == 1.5
+    assert rust._convert_value_debug(Ratio("nan")) is None
+    assert rust._convert_value_debug({Port(1): Ratio(0.5)}) == {"1": 0.5}
+
+
+def test_native_int_subclass_over_str_digit_limit_falls_back_to_marker() -> None:
+    import sys
+
+    class Big(int):
+        pass
+
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(640)
+    try:
+        assert rust._convert_value_debug(Big(10**5000)) == "<unsupported: Big>"
+    finally:
+        sys.set_int_max_str_digits(previous)
+
+
+def test_native_numeric_enums_and_bools_keep_their_conversion() -> None:
+    import enum
+
+    class Priority(enum.IntEnum):
+        HIGH = 1
+
+    class Access(enum.IntFlag):
+        READ = 4
+        WRITE = 2
+
+    class Scale(float, enum.Enum):
+        HALF = 0.5
+
+    class Status(int, enum.Enum):
+        def __new__(cls, code: int, label: str) -> Status:
+            member = int.__new__(cls, code)
+            member._value_ = label
+            return member
+
+        OK = (200, "ok")
+
+    assert rust._convert_value_debug(Priority.HIGH) == 1
+    assert rust._convert_value_debug(Access.READ | Access.WRITE) == 6
+    assert rust._convert_value_debug(Scale.HALF) == 0.5
+    # An Enum renders its .value even when the member is an int.
+    assert rust._convert_value_debug(Status.OK) == "ok"
+    assert rust._convert_value_debug([True, False]) == [True, False]
+
+
 @pytest.mark.parametrize(
     "value",
     [
