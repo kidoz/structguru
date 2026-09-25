@@ -18,12 +18,12 @@ import inspect
 import itertools
 import logging
 import os
+import re
 import string
 import sys
 import threading
-import warnings
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ContextDecorator, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,7 +33,9 @@ from structguru import _runtime
 from structguru._contextvars import _ctx, bound_contextvars
 from structguru._levels import METHOD_LEVELS
 from structguru._native_dispatch import callback_scope, in_callback
+from structguru.exceptions import _redacted_message_repr
 from structguru.otel import add_otel_context
+from structguru.redaction import DEFAULT_SENSITIVE_KEYS
 from structguru.settings import _level_number
 
 HandlerId: TypeAlias = int
@@ -127,25 +129,83 @@ def _emit_rendered(handler: logging.Handler, line: str, level: int = logging.INF
     handler.handle(record)
 
 
-@functools.lru_cache(maxsize=1024)
-def _extract_format_keys(msg: str) -> frozenset[str] | Exception:
-    """Extract format keys or return an Exception if malformed."""
+_NO_KEYS: frozenset[str] = frozenset()
+# Logging controls, not template arguments: alone they never trigger formatting.
+_CONTROL_KWARGS = frozenset({"exc_info", "stack_info"})
+# Templates longer than this are parsed on every call instead of cached, so the
+# caches never pin large (and unredacted) dynamic message text.
+_MAX_CACHED_TEMPLATE = 512
+_REDACTED = "[REDACTED]"
+_FORMATTER = string.Formatter()
+_FIELD_PART = re.compile(r"\.([^.\[]*)|\[([^\]]*)\]")
+
+# Argument types formatted as themselves: never containers to redact.
+_SCALAR_TYPES = frozenset({str, int, float, bool, type(None)})
+_OBJECT_STR: object = object.__str__
+_OBJECT_FORMAT: object = object.__format__
+
+# (placeholder roots consumed from kwargs, lower-cased names on every path,
+#  whether a name is a default sensitive key, whether a placeholder reaches
+#  into an argument by attribute or index)
+_Template: TypeAlias = tuple[frozenset[str], frozenset[str], bool, bool]
+
+
+def _field_path(field_name: str) -> tuple[str, list[str]]:
+    """Split a replacement field name into its root and attribute/index names."""
+    end = len(field_name)
+    for separator in ".[":
+        position = field_name.find(separator)
+        if 0 <= position < end:
+            end = position
+    parts = [attribute or index for attribute, index in _FIELD_PART.findall(field_name, end)]
+    return field_name[:end], parts
+
+
+def _parse_template(msg: str) -> _Template | Exception:
+    """Collect a template's placeholder names, or return the parse error.
+
+    Replacement fields nested in a format spec (``{x:{width}}``) count too.
+    """
     consumed: set[str] = set()
+    names: set[str] = set()
+    has_path = False
+    pending = [msg]
     try:
-        for _, field_name, _, _ in string.Formatter().parse(msg):
-            if field_name is not None:
-                root = field_name.split(".")[0].split("[")[0]
+        while pending:
+            for _, field_name, format_spec, _ in _FORMATTER.parse(pending.pop()):
+                if field_name is None:
+                    continue
+                root, path = _field_path(field_name)
                 if root and not root.isdigit():
                     consumed.add(root)
-        return frozenset(consumed)
-    except Exception as exc:
+                    names.add(root.lower())
+                if path:
+                    has_path = True
+                    names.update(part.lower() for part in path)
+                if format_spec and "{" in format_spec:
+                    pending.append(format_spec)
+    except Exception as exc:  # noqa: BLE001 - malformed template, reported by the caller
         return exc
+    default_key = not DEFAULT_SENSITIVE_KEYS.isdisjoint(names)
+    return frozenset(consumed), frozenset(names), default_key, has_path
+
+
+_extract_format_keys = functools.lru_cache(maxsize=1024)(_parse_template)
+
+
+def _template_key(msg: str) -> str | int:
+    """Key a long template by its hash so the warning cache holds no text."""
+    return msg if len(msg) <= _MAX_CACHED_TEMPLATE else hash(msg)
 
 
 @functools.lru_cache(maxsize=256)
-def _warn_format_failure(msg: str, exc_type_name: str) -> None:
-    """Emit a ``UserWarning`` at most once per unique (template, error type)."""
-    warnings.warn(
+def _warn_format_failure(template: str | int, exc_type_name: str) -> None:
+    """Emit a ``UserWarning`` at most once per unique (template, error type).
+
+    Like the runtime's diagnostics, the warning never raises into the logging
+    call: under ``-W error`` it goes to ``sys.unraisablehook`` instead.
+    """
+    _runtime._warn(
         f"structguru: failed to format log message ({exc_type_name}); "
         "using the unformatted template",
         # Do not expose the user's source line either: it may contain literals
@@ -154,36 +214,171 @@ def _warn_format_failure(msg: str, exc_type_name: str) -> None:
     )
 
 
+@functools.lru_cache(maxsize=256)
+def _warn_unprintable_message(type_name: str, exc_type_name: str) -> None:
+    """Emit a ``UserWarning`` at most once per (message type, error type).
+
+    The warning never raises into the logging call; see
+    :func:`_warn_format_failure`.
+    """
+    _runtime._warn(
+        f"structguru: failed to convert log message to str ({exc_type_name}); using a placeholder",
+        stacklevel=2,
+    )
+
+
+def _message_text(message: object) -> str:
+    """Convert a non-string message, never raising into the logging call."""
+    try:
+        return str(message)
+    except Exception as exc:  # noqa: BLE001 - logging must not raise for its argument
+        _warn_unprintable_message(type(message).__qualname__, type(exc).__name__)
+        return f"<unprintable {type(message).__name__} object>"
+
+
+_sensitive_cache: tuple[object, frozenset[str]] = (None, DEFAULT_SENSITIVE_KEYS)
+
+
+def _sensitive_names(keys: Sequence[str]) -> frozenset[str]:
+    """Lower-case configured redaction keys once per configuration."""
+    global _sensitive_cache
+    cached_keys, names = _sensitive_cache
+    if keys is not cached_keys:
+        names = frozenset(key.lower() for key in keys)
+        _sensitive_cache = (keys, names)
+    return names
+
+
+class _RedactingFormatter(string.Formatter):
+    """``str.format`` rendering any placeholder that names a sensitive key redacted.
+
+    A key, attribute, or index name matches case-insensitively, as the renderer
+    matches field keys, and the value behind it is never looked up. A container
+    a placeholder interpolates as its ``repr()`` (a mapping, sequence, set,
+    dataclass, or namespace, under ``!r``, or without its own ``__str__`` and
+    ``__format__``) renders with values under sensitive keys redacted, as
+    exception locals do; with nothing to redact it formats as usual.
+    """
+
+    def __init__(self, sensitive: frozenset[str]) -> None:
+        super().__init__()
+        self._sensitive = sensitive
+
+    def get_field(self, field_name: str, args: Sequence[Any], kwargs: Mapping[str, Any]) -> Any:
+        root, path = _field_path(field_name)
+        if any(name.lower() in self._sensitive for name in (root, *path)):
+            return _REDACTED, root
+        return super().get_field(field_name, args, kwargs)
+
+    def convert_field(self, value: Any, conversion: str | None) -> Any:
+        cls = type(value)
+        if cls not in _SCALAR_TYPES and (
+            conversion in ("r", "a")
+            or (
+                getattr(cls, "__str__", None) is _OBJECT_STR
+                and (conversion == "s" or getattr(cls, "__format__", None) is _OBJECT_FORMAT)
+            )
+        ):
+            rendered = _redacted_message_repr(value, self._sensitive)
+            if rendered is not None:
+                # A format spec then applies to the text as to any string.
+                if conversion == "a":
+                    return rendered.encode("ascii", "backslashreplace").decode("ascii")
+                return rendered
+        return super().convert_field(value, conversion)
+
+
+def _may_expose_nested_secret(
+    text: str,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    consumed: frozenset[str],
+    has_path: bool,
+    sensitive: frozenset[str],
+) -> bool:
+    """True when plain formatting may have exposed a value under a sensitive key.
+
+    Only a non-scalar argument, or an object reached by attribute or index,
+    can carry a nested key, and its text then names that key. Scalar-only
+    calls cost one type lookup per argument; the text is scanned only after.
+    """
+    if not has_path:
+        for value in args:
+            if type(value) not in _SCALAR_TYPES:
+                break
+        else:
+            for name in consumed:
+                if type(kwargs.get(name)) not in _SCALAR_TYPES:
+                    break
+            else:
+                return False
+    # A case-insensitive regex alternation is several times slower than this.
+    lowered = text.lower()
+    return any(key in lowered for key in sensitive)
+
+
 def _safe_format(
     message: Any,
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
+    runtime: _runtime._RuntimeState | None = None,
 ) -> tuple[str, frozenset[str]]:
     """Safely format *message* with ``str.format``, imitating Loguru style.
 
     Returns a tuple of (formatted_message, consumed_keys). *consumed_keys*
     contains the kwarg names that were used as format placeholders.
 
-    Formatting errors (``KeyError``, ``IndexError``, ``ValueError``) fall back
-    to the raw message and emit a one-shot :class:`UserWarning` per template.
+    The template is formatted whenever positional or keyword arguments other
+    than ``exc_info``/``stack_info`` are present, like ``str.format`` in
+    loguru. A placeholder naming a sensitive key of *runtime* (the defaults
+    without one) is interpolated as ``[REDACTED]``, and so is a value under
+    such a key inside a container a placeholder interpolates, or reaches by
+    attribute or index. Any formatting failure falls back to the raw
+    template, and a message whose ``str()`` fails to a placeholder, each with
+    a one-shot :class:`UserWarning`; logging never raises for its arguments.
     """
-    msg = message if type(message) is str else str(message)
-    if not (args or kwargs) or "{" not in msg:
-        return msg, frozenset()
+    msg = message if type(message) is str else _message_text(message)
+    if not (args or kwargs) or ("{" not in msg and "}" not in msg):
+        return msg, _NO_KEYS
+    if (
+        not args
+        and ("exc_info" in kwargs or "stack_info" in kwargs)
+        and kwargs.keys() <= _CONTROL_KWARGS
+    ):
+        return msg, _NO_KEYS
 
-    keys_or_exc = _extract_format_keys(msg)
-    if isinstance(keys_or_exc, Exception):
+    template = (
+        _extract_format_keys(msg) if len(msg) <= _MAX_CACHED_TEMPLATE else _parse_template(msg)
+    )
+    if isinstance(template, Exception):
         # Malformed brace syntax — surface it but don't break logging.
-        _warn_format_failure(msg, type(keys_or_exc).__name__)
-        return msg, frozenset()
+        _warn_format_failure(_template_key(msg), type(template).__name__)
+        return msg, _NO_KEYS
 
+    consumed, names, names_default_key, has_path = template
+    # Match the keys the renderer uses: the defaults unless configured.
+    keys = runtime.settings.sensitive_keys if runtime is not None else None
     try:
-        return msg.format(*args, **kwargs), keys_or_exc
-    except (LookupError, AttributeError, TypeError, ValueError) as exc:
-        # Template/arg mismatch from user code (missing key, bad attribute,
-        # unknown conversion, etc.). Fall back to the raw message.
-        _warn_format_failure(msg, type(exc).__name__)
-        return msg, frozenset()
+        if keys is None:
+            sensitive = DEFAULT_SENSITIVE_KEYS
+            redact = names_default_key
+        else:
+            sensitive = _sensitive_names(keys)
+            redact = not names.isdisjoint(sensitive)
+        if not redact:
+            text = msg.format(*args, **kwargs)
+            if not sensitive or not _may_expose_nested_secret(
+                text, args, kwargs, consumed, has_path, sensitive
+            ):
+                return text, consumed
+        # The pure-Python formatter is several times slower than str.format,
+        # so it only re-renders a template whose plain text could hold a secret.
+        return _RedactingFormatter(sensitive).vformat(msg, args, kwargs), consumed
+    except Exception as exc:  # noqa: BLE001 - user __format__/__str__ may raise anything
+        # Template/arg mismatch or a failing argument conversion from user
+        # code (missing key, bad attribute, raising __format__, etc.).
+        _warn_format_failure(_template_key(msg), type(exc).__name__)
+        return msg, _NO_KEYS
 
 
 _id_counter = itertools.count(1)
@@ -460,7 +655,7 @@ class Logger:
         clone.__dict__.update(overrides)
         return clone
 
-    def bind(self, **kwargs: Any) -> Logger:
+    def bind(self, /, **kwargs: Any) -> Logger:
         """Return a *new* logger with permanently bound context.
 
         Only the bound fields are copied. Sinks are process-global, so the child
@@ -471,7 +666,7 @@ class Logger:
         return self._clone(_bound=merged)
 
     @contextmanager
-    def contextualize(self, **kwargs: Any) -> Iterator[Logger]:
+    def contextualize(self, /, **kwargs: Any) -> Iterator[Logger]:
         """Apply context for the duration of a ``with`` block."""
         with bound_contextvars(**kwargs):
             yield self
@@ -516,7 +711,7 @@ class Logger:
 
     # -- logging methods ----------------------------------------------------
 
-    def trace(self, message: Any, *args: Any, **kwargs: Any) -> None:
+    def trace(self, message: Any, /, *args: Any, **kwargs: Any) -> None:
         """Log at ``DEBUG`` level.
 
         A loguru-compatible alias; structguru has no separate ``TRACE`` level,
@@ -524,19 +719,23 @@ class Logger:
         """
         self._log("debug", message, args, kwargs)
 
-    def debug(self, message: Any, *args: Any, **kwargs: Any) -> None:
+    def debug(self, message: Any, /, *args: Any, **kwargs: Any) -> None:
         """Log at ``DEBUG`` level.
 
-        *message* is brace-formatted with *args* / *kwargs*; keys consumed by
-        the format string are dropped, and the rest become structured fields.
+        *message* is brace-formatted with *args* / *kwargs* when any are given
+        (``exc_info`` and ``stack_info`` do not count); keys consumed by the
+        format string are dropped, and the rest become structured fields. A
+        placeholder naming a sensitive key is interpolated as ``[REDACTED]``.
+        *message* is positional-only, so ``message=`` and ``self=`` are fields.
+        Formatting failures log the raw template with a one-shot warning.
         """
         self._log("debug", message, args, kwargs)
 
-    def info(self, message: Any, *args: Any, **kwargs: Any) -> None:
+    def info(self, message: Any, /, *args: Any, **kwargs: Any) -> None:
         """Log at ``INFO`` level."""
         self._log("info", message, args, kwargs)
 
-    def success(self, message: Any, *args: Any, **kwargs: Any) -> None:
+    def success(self, message: Any, /, *args: Any, **kwargs: Any) -> None:
         """Log at ``INFO`` level.
 
         A loguru-compatible alias; structguru has no separate ``SUCCESS``
@@ -544,15 +743,15 @@ class Logger:
         """
         self._log("info", message, args, kwargs)
 
-    def warning(self, message: Any, *args: Any, **kwargs: Any) -> None:
+    def warning(self, message: Any, /, *args: Any, **kwargs: Any) -> None:
         """Log at ``WARNING`` level."""
         self._log("warning", message, args, kwargs)
 
-    def warn(self, message: Any, *args: Any, **kwargs: Any) -> None:
+    def warn(self, message: Any, /, *args: Any, **kwargs: Any) -> None:
         """Log at ``WARNING`` level — alias of :meth:`warning`."""
         self.warning(message, *args, **kwargs)
 
-    def error(self, message: Any, *args: Any, **kwargs: Any) -> None:
+    def error(self, message: Any, /, *args: Any, **kwargs: Any) -> None:
         """Log at ``ERROR`` level.
 
         Pass ``exc_info=True`` (or use :meth:`exception`) to attach the active
@@ -560,15 +759,15 @@ class Logger:
         """
         self._log("error", message, args, kwargs)
 
-    def critical(self, message: Any, *args: Any, **kwargs: Any) -> None:
+    def critical(self, message: Any, /, *args: Any, **kwargs: Any) -> None:
         """Log at ``CRITICAL`` level."""
         self._log("critical", message, args, kwargs)
 
-    def fatal(self, message: Any, *args: Any, **kwargs: Any) -> None:
+    def fatal(self, message: Any, /, *args: Any, **kwargs: Any) -> None:
         """Log at ``CRITICAL`` level — alias of :meth:`critical`."""
         self.critical(message, *args, **kwargs)
 
-    def exception(self, message: Any, *args: Any, **kwargs: Any) -> None:
+    def exception(self, message: Any, /, *args: Any, **kwargs: Any) -> None:
         """Log at ``ERROR`` level with exception information."""
         kwargs.setdefault("exc_info", True)
         self._log("error", message, args, kwargs)
@@ -607,7 +806,9 @@ class Logger:
             return
 
         stack_info = kwargs.get("stack_info") or self._opt_stack_info
-        formatted_msg, consumed_keys = _safe_format(message, args, kwargs)
+        # Read before placeholders consume kwargs: "{exc_info}" must not drop it.
+        exc_info = kwargs.get("exc_info", self._opt_exc_info)
+        formatted_msg, consumed_keys = _safe_format(message, args, kwargs, runtime)
 
         # Strip kwargs that were consumed by brace-formatting so they don't
         # leak into the structured log fields (matches loguru behaviour).
@@ -620,7 +821,6 @@ class Logger:
         if record_filter is not None and not record_filter.allow(formatted_msg, level_number):
             return
 
-        exc_info = kwargs.get("exc_info", self._opt_exc_info)
         name = self.name if self.name is not None else _caller_module_name()
         # Exception and stack capture are Python-owned (frame walking). The
         # renderer adds "exception" as the last field and places "stack"

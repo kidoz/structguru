@@ -151,6 +151,17 @@ logger.info("User {user_id} logged in", user_id=42, ip="10.0.0.1")
 # user_id is consumed by formatting and not duplicated
 ```
 
+The message is formatted whenever positional or keyword arguments are passed, as
+`str.format` would (`"a }} b"` becomes `"a } b"`); `exc_info` and `stack_info` alone
+do not count, so `logger.exception("{{x}}")` logs `{{x}}` like `logger.error`. Fields
+named in a nested format spec (`"{x:{width}}"`) are consumed too. A placeholder that
+names a sensitive key — as the root (`{token}`) or an attribute or index
+(`{creds[password]}`) — is interpolated as `[REDACTED]`. A value interpolated whole
+(`{creds}`) is covered by `sensitive_patterns` only. The message is positional-only,
+so `message=` and `self=` are ordinary fields. A template that fails to format, or a
+message whose `str()` raises, is logged raw or as a placeholder with a one-shot
+`UserWarning`; logging calls do not raise for their arguments.
+
 ### Bound context
 
 ```python
@@ -429,7 +440,7 @@ Public API:
 Behavior notes:
 
 - **Overflow**: the default `maxsize=8192` uses `overflow="block"` to wait for queue space. Use `overflow="drop"` for drop-newest behavior with metrics and rate-limited warnings. `maxsize=0` explicitly opts into an unbounded queue.
-- **Redaction, level filtering, exceptions, and OpenTelemetry** injection are supported natively; redaction covers the message, field names, string values, and integers at any depth before rendering or Sentry export (see the redaction API reference for the exact coverage). `sensitive_keys` overrides the default redaction keys. Rust's linear-time regex engine rejects backreferences and look-around with `ValueError` at configuration time.
+- **Redaction, level filtering, exceptions, and OpenTelemetry** injection are supported natively; redaction covers the message, field names, string values, and integers at any depth before rendering or Sentry export, and message placeholders that name a sensitive key are interpolated as `[REDACTED]` (see the redaction API reference for the exact coverage). `sensitive_keys` overrides the default redaction keys. Rust's linear-time regex engine rejects backreferences and look-around with `ValueError` at configuration time.
 - **Sampling & rate limiting** (`sample_rate`, `rate_limit_max`, `rate_limit_period`) are applied as native pre-render filters — dropped records cost zero rendering. `sampled` and `rate_limited` counters are distinct from the transport `dropped` counter. `sample_max_level` restricts sampling to records at or below that level; more severe records always pass.
 - **Metric hooks** (`metric_processor=...`) invoke a structlog-style processor (e.g. `MetricProcessor`) for every *kept* record on the caller's thread, with `(None, method, {"event": message, **fields})`. Dropped records (level/sampling/rate-limit) never reach it; hook errors are swallowed.
 - **Fork/shutdown safe** — the writer is flushed on exit and respawned in forked children (gunicorn/celery prefork). Rotating-file writers sharing a path coordinate through an owner-only `.lock` sidecar; distributed hosts should still prefer stdout and an external collector.

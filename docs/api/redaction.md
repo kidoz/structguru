@@ -10,7 +10,11 @@ Two independent mechanisms apply:
 - **Key-based redaction** replaces the *value* of any field whose key is
   considered sensitive (case-insensitively), at any depth (nested maps and
   lists included). The key itself is kept. Naming `message`, `logger`,
-  `service`, or `stack` in `sensitive_keys` redacts that whole text.
+  `service`, or `stack` in `sensitive_keys` redacts that whole text. In the
+  message, a placeholder that names a sensitive key is interpolated as
+  `[REDACTED]`, and a mapping, sequence, set, dataclass, or namespace that a
+  placeholder interpolates as its `repr()` renders with the values under
+  sensitive keys redacted.
 - **Pattern-based redaction** rewrites every match of a regex, in declaration
   order, in:
     - the message, the logger name, the service name, and `stack` text;

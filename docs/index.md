@@ -52,7 +52,10 @@ update(
 ```
 
 Key and pattern redaction covers the message and structured fields before data
-is rendered, queued, or forwarded to Sentry.
+is rendered, queued, or forwarded to Sentry. A message placeholder that names a
+sensitive key (`"login token={token}"`) is interpolated as `[REDACTED]`, and a
+placeholder that interpolates a container (`logger.info("{}", {"token": t})`)
+renders it with the values under sensitive keys redacted.
 
 Patterns run on Rust's linear-time regex engine, which rejects look-around and
 backreferences at `configure()` time; rewrite them as capture groups with

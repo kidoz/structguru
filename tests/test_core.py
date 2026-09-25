@@ -7,9 +7,13 @@ import json
 import logging
 import os
 import stat
+import sys
 import threading
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from conftest import configure
@@ -899,10 +903,106 @@ logger.add(io.StringIO())
     assert status == 1 and "arg-type" in stdout, stdout + stderr
 
 
+def _memory_records() -> list[dict[str, Any]]:
+    _runtime.flush()
+    return [json.loads(line) for line in _runtime.drain_messages()]
+
+
 def test_logger_repr_hides_bound_and_option_values() -> None:
     log = Logger(name="svc").bind(access_token="CANARY-BOUND").opt(exception=ValueError("CANARY"))
     assert "CANARY" not in repr(log)
     assert "svc" in repr(log)
+
+
+@dataclass
+class _Login:
+    user: str
+    password: str
+
+
+@dataclass
+class _Named:
+    name: str
+    password: str
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class _Request:
+    def __init__(self, headers: dict[str, str]) -> None:
+        self.headers = headers
+
+
+class TestPlaceholderRedaction:
+    @pytest.mark.parametrize(
+        "template, kwargs, expected",
+        [
+            ("login token={token}", {"token": "CANARY"}, "login token=[REDACTED]"),
+            ("auth {Authorization!r}", {"Authorization": "CANARY"}, "auth '[REDACTED]'"),
+            ("pw={creds[password]}", {"creds": {"password": "CANARY"}}, "pw=[REDACTED]"),
+            ("{user.api_key:>12}", {"user": SimpleNamespace(api_key="CANARY")}, "  [REDACTED]"),
+        ],
+    )
+    def test_sensitive_placeholders_are_interpolated_redacted(
+        self, template: str, kwargs: dict[str, Any], expected: str
+    ) -> None:
+        _runtime.configure(target="memory")
+        Logger().info(template, user_id=7, **kwargs)
+        _runtime.flush()
+        line = _runtime.drain_messages()[-1]
+        assert "CANARY" not in line
+        record = json.loads(line)
+        assert record["message"] == expected
+        assert record["user_id"] == 7
+
+    def test_custom_sensitive_keys_replace_the_defaults(self) -> None:
+        _runtime.configure(target="memory", sensitive_keys=["PIN"])
+        Logger().info("pin={pin} token={token}", pin="1234", token="visible")
+        assert _memory_records()[-1]["message"] == "pin=[REDACTED] token=visible"
+
+    @pytest.mark.parametrize(
+        "template, args, kwargs, expected",
+        [
+            ("{}", ({"password": "CANARY"},), {}, "{'password': [REDACTED]}"),
+            ("{data}", (), {"data": {"token": "CANARY"}}, "{'token': [REDACTED]}"),
+            ("{!r:>26}", ({"secret": "CANARY"},), {}, "    {'secret': [REDACTED]}"),
+            ("{!s}", ([{"Cookie": "CANARY"}],), {}, "[{'Cookie': [REDACTED]}]"),
+            (
+                "{0}",
+                ([("Authorization", "CANARY"), ("Accept", "json")],),
+                {},
+                "[('Authorization', [REDACTED]), ('Accept', 'json')]",
+            ),
+            ("{req.headers}", (), {"req": _Request({"token": "CANARY"})}, "{'token': [REDACTED]}"),
+            ("{}", (_Login("alice", "CANARY"),), {}, "_Login(user='alice', password=[REDACTED])"),
+            ("{}", (SimpleNamespace(api_key="CANARY"),), {}, "namespace(api_key=[REDACTED])"),
+        ],
+    )
+    def test_interpolated_containers_are_redacted(
+        self, template: str, args: tuple[Any, ...], kwargs: dict[str, Any], expected: str
+    ) -> None:
+        _runtime.configure(target="memory")
+        Logger().info(template, *args, **kwargs)
+        _runtime.flush()
+        line = _runtime.drain_messages()[-1]
+        assert "CANARY" not in line
+        assert json.loads(line)["message"] == expected
+
+    def test_containers_without_secrets_format_as_usual(self) -> None:
+        _runtime.configure(target="memory")
+        wide = list(range(500))
+        Logger().info("{} {} {} {}", {"user": "alice"}, wide, _Named("alice", "pw"), 3)
+        expected = f"{{'user': 'alice'}} {wide} alice 3"
+        assert _memory_records()[-1]["message"] == expected
+
+    def test_container_redaction_follows_configured_keys(self) -> None:
+        _runtime.configure(target="memory", sensitive_keys=["PIN"])
+        Logger().info("{}", {"pin": "CANARY", "password": "shown"})
+        assert _memory_records()[-1]["message"] == "{'pin': [REDACTED], 'password': 'shown'}"
+        _runtime.configure(target="memory", sensitive_keys=[])
+        Logger().info("{}", {"password": "shown"})
+        assert _memory_records()[-1]["message"] == "{'password': 'shown'}"
 
 
 class TestRemoveById:
@@ -978,3 +1078,153 @@ class TestAddLevelValidation:
             log.add(io.StringIO(), level=level)  # type: ignore[arg-type]
         assert core._sinks == before
         assert log._handlers == {}
+
+
+class TestFormattingDecision:
+    def test_exception_formats_templates_like_error(self) -> None:
+        _runtime.configure(target="memory")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            try:
+                raise ValueError("boom")
+            except ValueError:
+                Logger().exception("json: {{}} and {name}")
+                Logger().exception("escaped only {{x}}")
+                Logger().error("escaped only {{x}}", exc_info=True, stack_info=False)
+                with Logger().catch(message="caught {{x}}"):
+                    raise
+        records = _memory_records()
+        assert [record["message"] for record in records] == [
+            "json: {{}} and {name}",
+            "escaped only {{x}}",
+            "escaped only {{x}}",
+            "caught {{x}}",
+        ]
+        assert all("ValueError: boom" in record["exception"] for record in records)
+
+    def test_control_keywords_alone_do_not_format(self) -> None:
+        result = _safe_format("x {{y}}", (), {"exc_info": True, "stack_info": False})
+        assert result == ("x {{y}}", frozenset())
+
+
+class _Unprintable:
+    def __str__(self) -> str:
+        raise RuntimeError("private detail")
+
+
+class _BadFormat:
+    def __format__(self, spec: str) -> str:
+        raise ZeroDivisionError
+
+
+class TestLoggingNeverRaises:
+    def test_unprintable_message_logs_a_placeholder(self) -> None:
+        class Unprintable(Exception):
+            def __str__(self) -> str:
+                raise RuntimeError("private detail")
+
+        _runtime.configure(target="memory")
+        with pytest.warns(UserWarning, match=r"convert log message.*RuntimeError") as captured:
+            Logger().error(Unprintable())
+        assert "private detail" not in str(captured[0].message)
+        _runtime.flush()
+        line = _runtime.drain_messages()[-1]
+        assert json.loads(line)["message"] == "<unprintable Unprintable object>"
+        assert "private detail" not in line
+
+    def test_raising_format_argument_keeps_the_template(self) -> None:
+        class BadFormat:
+            def __format__(self, spec: str) -> str:
+                raise RuntimeError("private detail")
+
+        _runtime.configure(target="memory")
+        with pytest.warns(UserWarning, match="RuntimeError"):
+            Logger().info("value {b}", b=BadFormat())
+        assert _memory_records()[-1]["message"] == "value {b}"
+
+    @pytest.mark.parametrize(
+        ("message", "args", "kwargs", "expected"),
+        [
+            pytest.param(_Unprintable(), (), {}, "<unprintable _Unprintable object>", id="str"),
+            pytest.param("{", (1,), {}, "{", id="malformed"),
+            pytest.param("{a}", (), {"b": 1}, "{a}", id="missing-key"),
+            pytest.param("{x}", (), {"x": _BadFormat()}, "{x}", id="raising-format"),
+        ],
+    )
+    def test_warnings_as_errors_go_to_unraisablehook(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        message: object,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        expected: str,
+    ) -> None:
+        core._warn_unprintable_message.cache_clear()
+        unraisable: list[BaseException | None] = []
+        monkeypatch.setattr(sys, "unraisablehook", lambda hook: unraisable.append(hook.exc_value))
+        _runtime.configure(target="memory")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            Logger().info(message, *args, **kwargs)
+        assert _memory_records()[-1]["message"] == expected
+        assert len(unraisable) == 1
+        assert isinstance(unraisable[0], UserWarning)
+        assert "structguru: failed to" in str(unraisable[0])
+
+    def test_reserved_parameter_names_become_fields(self) -> None:
+        _runtime.configure(target="memory")
+        log = Logger()
+        log.info("plain", self=1)
+        log.bind(self=2).warning("bound")
+        with log.contextualize(self=3):
+            log.error("contextual", message="ignored field")
+        records = _memory_records()
+        assert [(record["message"], record["self"]) for record in records] == [
+            ("plain", 1),
+            ("bound", 2),
+            ("contextual", 3),
+        ]
+
+
+def test_long_templates_are_not_cached() -> None:
+    import gc
+    import tracemalloc
+
+    core._extract_format_keys.cache_clear()
+    tracemalloc.start()
+    try:
+        before = tracemalloc.get_traced_memory()[0]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            for index in range(40):
+                template = "x" * 100_000 + f" {{missing{index % 2}}}"
+                _safe_format(template, (), {"other": index})
+        gc.collect()
+        retained = tracemalloc.get_traced_memory()[0] - before
+    finally:
+        tracemalloc.stop()
+    assert retained < 1_000_000
+    assert core._extract_format_keys.cache_info().currsize == 0
+    assert len([w for w in caught if "failed to format" in str(w.message)]) == 2
+
+
+class TestBraceEdgeCases:
+    def test_nested_format_spec_fields_are_consumed(self) -> None:
+        assert _safe_format("{x:{width}}", (), {"x": 1, "width": 5}) == (
+            "    1",
+            frozenset({"x", "width"}),
+        )
+
+    def test_escapes_are_formatted_whenever_arguments_are_present(self) -> None:
+        assert _safe_format("a }} b", (), {"x": 1}) == ("a } b", frozenset())
+        assert _safe_format("a }} b", (), {}) == ("a }} b", frozenset())
+
+    def test_exc_info_placeholder_keeps_the_exception(self) -> None:
+        _runtime.configure(target="memory")
+        try:
+            raise ValueError("kept")
+        except ValueError:
+            Logger().error("val {exc_info} {x}", exc_info=True, x=1)
+        record = _memory_records()[-1]
+        assert record["message"] == "val True 1"
+        assert "ValueError: kept" in record["exception"]
