@@ -42,6 +42,9 @@ def native_options_from_env(
                     except ValueError as exc:
                         msg = f"{name} must be a number, got {value!r}"
                         raise ValueError(msg) from exc
+                elif field == "level" and value.strip().isascii() and value.strip().isdigit():
+                    # A numeric threshold, as configure(level=10) accepts.
+                    config[field] = int(value)
                 else:
                     config[field] = value
                 break

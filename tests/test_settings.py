@@ -319,6 +319,34 @@ def test_level_change_during_record_preserves_all_deliveries(change: Any, format
     assert [event["event"] for event in sentry] == ["already admitted"]
 
 
+@pytest.mark.parametrize(
+    "environ, level",
+    [({"LOG_LEVEL": "10"}, 10), ({"STRUCTGURU_LEVEL": " 25 "}, 25), ({"LOG_LEVEL": "0"}, 0)],
+)
+def test_numeric_environment_levels_are_integer_thresholds(
+    environ: dict[str, str], level: int
+) -> None:
+    assert Settings.from_env(environ).level == level
+
+
+@pytest.mark.parametrize("value", ["-5", "1.5", "²"])
+def test_non_integer_numeric_environment_levels_are_rejected(value: str) -> None:
+    with pytest.raises(ValueError, match="level must be"):
+        Settings.from_env({"STRUCTGURU_LEVEL": value})
+
+
+def test_import_accepts_a_numeric_level_environment_value() -> None:
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", "import structguru; print(structguru.get_config().level)"],
+        env={**os.environ, "LOG_LEVEL": "10", "STRUCTGURU_TARGET": "null"},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "10"
+
+
 def test_atexit_handlers_registered_before_explicit_configure_still_log() -> None:
     code = (
         "import atexit\n"

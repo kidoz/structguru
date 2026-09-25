@@ -30,7 +30,7 @@ The switches do not disable explicit configuration. The stdlib bridge is configu
 
 Settings accept ordinary Python values. Strings are not coerced by `from_mapping()`.
 Levels accept known case-insensitive names or non-negative integer thresholds, excluding
-booleans. Native regex and sink initialization errors leave the active runtime unchanged.
+booleans. The level environment variables accept either form (`LOG_LEVEL=10`). Native regex and sink initialization errors leave the active runtime unchanged.
 
 ## Runtime control
 

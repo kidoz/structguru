@@ -113,6 +113,7 @@ thresholds. Unknown names, booleans and negative integers raise `ValueError`.
 | `STRUCTGURU_AUTOCONFIGURE` | enabled | inverse of `STRUCTGURU_LEGACY` |
 
 New names win over their fallbacks; old names remain supported without warnings.
+Level variables accept a name or a non-negative integer threshold (`LOG_LEVEL=10`).
 Rate limits use `MAX` or `MAX/PERIOD`, with integer counts and seconds for the period.
 Autoconfiguration accepts `1/0`, `true/false`, `yes/no`, or `on/off` and controls import
 only. Set it to `0` before import to configure explicitly later. Invalid selected values
