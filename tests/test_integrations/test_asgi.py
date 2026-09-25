@@ -274,3 +274,259 @@ async def test_cancellation_is_logged_as_cancelled_and_propagated(response_start
     # No status is invented for a request that never started its response.
     assert record.get("status_code") == (200 if response_started else None)
     assert get_contextvars() == {}
+
+
+def _http_scope(headers: list[tuple[bytes, bytes]] | None = None) -> dict:
+    return {
+        "type": "http",
+        "method": "GET",
+        "path": "/p",
+        "headers": headers or [],
+        "client": ("10.0.0.1", 1),
+    }
+
+
+async def _receive() -> dict:
+    return {"type": "http.request", "body": b""}
+
+
+async def test_outer_context_is_restored_and_request_starts_clean() -> None:
+    from structguru._contextvars import bind_contextvars, clear_contextvars, get_contextvars
+
+    configure(service="test", stream=io.StringIO())
+    seen: list[dict] = []
+
+    async def app(scope: dict, receive: Any, send: Any) -> None:
+        seen.append(get_contextvars())
+        await _simple_app(scope, receive, send)
+
+    async def send(message: dict) -> None:
+        pass
+
+    middleware = StructguruMiddleware(app)
+    clear_contextvars()
+    bind_contextvars(tenant="acme")
+    try:
+        await middleware(_http_scope([(b"x-request-id", b"rid")]), _receive, send)
+        assert "tenant" not in seen[0]
+        assert seen[0]["request_id"] == "rid"
+        assert get_contextvars() == {"tenant": "acme"}
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await StructguruMiddleware(_error_app)(_http_scope(), _receive, send)
+        assert get_contextvars() == {"tenant": "acme"}
+    finally:
+        clear_contextvars()
+
+
+async def test_response_echoes_request_id_under_the_configured_header() -> None:
+    configure(service="test", stream=io.StringIO())
+    sent: list[dict] = []
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    middleware = StructguruMiddleware(_simple_app, request_id_header="X-Correlation-ID")
+    await middleware(_http_scope([(b"x-correlation-id", b"corr-1")]), _receive, send)
+    assert sent[0]["headers"] == [(b"x-correlation-id", b"corr-1")]
+
+    async def app_with_header(scope: dict, receive: Any, send: Any) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"X-Correlation-ID", b"from-app")],
+            }
+        )
+        await send({"type": "http.response.body", "body": b""})
+
+    sent.clear()
+    await StructguruMiddleware(app_with_header, request_id_header="X-Correlation-ID")(
+        _http_scope(), _receive, send
+    )
+    assert sent[0]["headers"] == [(b"X-Correlation-ID", b"from-app")]
+
+
+async def test_duration_ends_when_the_response_body_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from structguru.integrations import asgi as asgi_module
+
+    clock = [100.0]
+    monkeypatch.setattr(asgi_module, "time", SimpleNamespace(perf_counter=lambda: clock[0]))
+    buf = io.StringIO()
+    configure(service="test", stream=buf)
+
+    async def app(scope: dict, receive: Any, send: Any) -> None:
+        await send({"type": "http.response.start", "status": 201, "headers": []})
+        clock[0] += 0.5
+        await send({"type": "http.response.body", "body": b"a", "more_body": True})
+        clock[0] += 0.5
+        await send({"type": "http.response.body", "body": b"b", "more_body": False})
+        clock[0] += 30.0  # background work after the client has the response
+        from structguru import logger
+
+        logger.info("background work")
+
+    async def send(message: dict) -> None:
+        pass
+
+    await StructguruMiddleware(app)(_http_scope(), _receive, send)
+    background, summary = [json.loads(line) for line in buf.getvalue().splitlines()]
+    assert background["message"] == "background work"
+    assert background["path"] == "/p"
+    assert summary["message"] == "Request completed"
+    assert summary["status_code"] == 201
+    assert summary["duration_ms"] == 1000.0
+
+
+async def test_starlette_background_task_is_excluded_from_duration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("starlette")
+    from types import SimpleNamespace
+
+    from starlette.applications import Starlette
+    from starlette.background import BackgroundTask
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route
+
+    from structguru.integrations import asgi as asgi_module
+
+    clock = [0.0]
+    monkeypatch.setattr(asgi_module, "time", SimpleNamespace(perf_counter=lambda: clock[0]))
+    buf = io.StringIO()
+    configure(service="test", stream=buf)
+
+    async def slow_background() -> None:
+        clock[0] += 10.0
+
+    async def endpoint(request: Any) -> PlainTextResponse:
+        clock[0] += 0.25
+        return PlainTextResponse("ok", background=BackgroundTask(slow_background))
+
+    app = StructguruMiddleware(Starlette(routes=[Route("/", endpoint)]))
+    scope = {
+        **_http_scope(),
+        "path": "/",
+        "query_string": b"",
+        "scheme": "http",
+        "server": ("test", 80),
+        "root_path": "",
+        "http_version": "1.1",
+        "asgi": {"version": "3.0"},
+    }
+
+    async def send(message: dict) -> None:
+        pass
+
+    await app(scope, _receive, send)
+    assert clock[0] == 10.25
+    record = json.loads(buf.getvalue())
+    assert record["message"] == "Request completed"
+    assert record["duration_ms"] == 250.0
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        KeyboardInterrupt(),
+        SystemExit(1),
+        BaseExceptionGroup("group", [KeyboardInterrupt()]),
+    ],
+)
+async def test_base_exceptions_are_logged_as_failures(error: BaseException) -> None:
+    from structguru._contextvars import get_contextvars
+
+    buf = io.StringIO()
+    configure(service="test", stream=buf)
+
+    async def app(scope: dict, receive: Any, send: Any) -> None:
+        raise error
+
+    async def send(message: dict) -> None:
+        pass
+
+    with pytest.raises(BaseException) as caught:
+        await StructguruMiddleware(app)(_http_scope(), _receive, send)
+    assert caught.value is error
+    record = json.loads(buf.getvalue())
+    assert record["message"] == "Request failed"
+    assert record["level"] == "ERROR"
+    assert record["status_code"] == 500
+    assert get_contextvars() == {}
+
+
+async def test_extracted_headers_are_bounded_printable_and_redacted() -> None:
+    from structguru._contextvars import get_contextvars
+
+    buf = io.StringIO()
+    configure(service="test", stream=buf)
+    contexts: list[dict] = []
+
+    async def app(scope: dict, receive: Any, send: Any) -> None:
+        contexts.append(get_contextvars())
+        await _simple_app(scope, receive, send)
+
+    async def send(message: dict) -> None:
+        pass
+
+    credential_headers = [
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "x-auth-token",
+        "x-session-id",
+        "X-Goog-Api-Key",
+    ]
+    headers = [(name.lower().encode(), b"CANARY-" + name.encode()) for name in credential_headers]
+    headers += [
+        (b"x-tenant-id", b"acme"),
+        (b"x-big", b"A" * 20_000),
+        (b"x-ctl", b"line\r\nX-Injected: 1"),
+        (b"x-latin", b"\xff\xfe"),
+    ]
+    middleware = StructguruMiddleware(
+        app, extract_headers=[*credential_headers, "x-tenant-id", "x-big", "x-ctl", "x-latin"]
+    )
+    await middleware(_http_scope(headers), _receive, send)
+
+    context = contexts[0]
+    for name in credential_headers:
+        assert context[name.lower()] == "[REDACTED]"
+    assert context["x-tenant-id"] == "acme"
+    assert context["x-big"].startswith("A" * 256)
+    assert len(context["x-big"]) < 300
+    assert "x-ctl" not in context
+    assert "x-latin" not in context
+    output = buf.getvalue()
+    assert "CANARY" not in output
+    assert "A" * 300 not in output
+    assert "X-Injected" not in output
+
+
+async def test_extracted_header_redaction_follows_custom_sensitive_keys() -> None:
+    from structguru import configure as configure_runtime
+    from structguru._contextvars import get_contextvars
+
+    configure_runtime(target="null", sensitive_keys=["tenant"])
+    contexts: list[dict] = []
+
+    async def app(scope: dict, receive: Any, send: Any) -> None:
+        contexts.append(get_contextvars())
+        await _simple_app(scope, receive, send)
+
+    async def send(message: dict) -> None:
+        pass
+
+    middleware = StructguruMiddleware(app, extract_headers=["x-tenant-id", "x-api-key"])
+    await middleware(
+        _http_scope([(b"x-tenant-id", b"acme"), (b"x-api-key", b"k")]), _receive, send
+    )
+    # The well-known credential header stays redacted with custom keys.
+    assert contexts[0]["x-tenant-id"] == "[REDACTED]"
+    assert contexts[0]["x-api-key"] == "[REDACTED]"

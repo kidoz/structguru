@@ -186,12 +186,15 @@ async def root():
 ```python
 app.add_middleware(
     StructguruMiddleware,
-    request_id_header="X-Correlation-ID",  # Custom header to read (case-insensitive)
+    request_id_header="X-Correlation-ID",  # Header to read and echo (case-insensitive)
     logger_name="api.http",  # Custom logger name
     log_request=True,  # Log a summary line on completion
     extract_headers=["x-tenant-id", "x-device-id"],  # Additional headers to extract and bind
 )
 ```
+
+The request ID is echoed on the response under `request_id_header`, unless the
+application already set that header.
 
 ### Context Variables Bound
 - `request_id`: Extracted from header or generated as a UUID4.
@@ -199,6 +202,34 @@ app.add_middleware(
 - `path`: The request path.
 - `client_ip`: The client's IP address.
 - Any headers specified in `extract_headers` will be bound as context variables (e.g. `x-tenant-id`).
+
+Extracted header values must be UTF-8 and printable — values with control
+characters are dropped — and are truncated to 256 characters with a
+`...[truncated]` marker. Credential-bearing headers are bound as `[REDACTED]`:
+`authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`,
+`x-auth-token`, `x-access-token`, CSRF/XSRF token headers,
+`x-amz-security-token`, and any header whose dash-separated words contain one
+of the active sensitive keys (`x-session-id` matches `session_id`, `x-goog-api-key`
+matches `api_key`).
+
+The request runs with a clean context that holds only its own fields. Context
+bound by an outer middleware is not visible inside the request and is restored
+when the middleware returns, on every exit path.
+
+### Request Summary
+
+`duration_ms` ends when the final `http.response.body` message is sent, so work
+the application does after the client has the response — Starlette
+`BackgroundTasks`, for example — is not counted, although it still runs, and
+logs, inside the request context. The summary itself is written once the
+application returns, so a failure in that later work is still reported:
+
+- `Request completed` (`INFO`) with the response status.
+- `Request failed` (`ERROR`) when the application raises, including
+  `KeyboardInterrupt`, `SystemExit`, and exception groups; the exception is
+  re-raised unchanged. Without a started response the status is `500`.
+- `Request cancelled` (`INFO`) when the request task is cancelled, for example
+  on client disconnect; no status is invented.
 
 ## Granian
 
