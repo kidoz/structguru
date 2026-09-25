@@ -60,6 +60,7 @@ class _NativeWriter(Protocol):
         contextvars: dict[str, Any],
         exception: Any,
         stack: str | None,
+        created: float | None = None,
     ) -> int: ...
 
     def log_capture(
@@ -74,6 +75,7 @@ class _NativeWriter(Protocol):
         exception: Any,
         stack: str | None,
         json_copy: bool,
+        created: float | None = None,
     ) -> tuple[int, str, str | None]: ...
 
     def flush(self) -> None: ...
@@ -288,6 +290,8 @@ _stream_error_count = 0
 # A callable sink that makes no progress for this long during flush() or
 # shutdown() is abandoned with a warning instead of blocking the process.
 _CALLABLE_STALL_TIMEOUT = 10.0
+# Largest level number handed to the callable dispatcher (a signed 64-bit int).
+_MAX_LEVELNO = 2**63 - 1
 _drop_lock = threading.Lock()
 _lifecycle_rejected = 0
 
@@ -1020,21 +1024,36 @@ def render_and_enqueue(
     contextvars: dict[str, Any],
     exception: Any,
     stack: str | None,
+    created: float | None = None,
+    levelno: int | None = None,
 ) -> str | None:
     """Merge, render, and enqueue one record; return redacted JSON for Sentry when enabled.
 
     The writer merges ``bound``, ``kwargs`` (minus ``exc_info``/``stack_info``),
     and ``contextvars`` with the facade's semantics, adds ``exception`` as a
-    field, redacts, timestamps (cached per second), renders in the configured
-    format, and pushes the line, all in one native call using the snapshot's
+    field, redacts, timestamps (``created`` Unix seconds when given, otherwise
+    the current time, cached per second), renders in the configured format,
+    and pushes the line, all in one native call using the snapshot's
     compiled ``config``. The common production shape never builds a Python
     string; the line comes back only when a stream sink, callable sinks, or the
     Sentry hook need it.
+
+    Callable sinks select and receive the record by ``levelno`` (a bridged
+    stdlib record's own number) when given, otherwise by ``level``'s number.
     """
     writer = runtime.writer
     if runtime.fused and _callable_dispatcher.idle():
         outcome = writer.log(
-            runtime.config, logger, level, message, bound, kwargs, contextvars, exception, stack
+            runtime.config,
+            logger,
+            level,
+            message,
+            bound,
+            kwargs,
+            contextvars,
+            exception,
+            stack,
+            created,
         )
         if outcome:
             _note_enqueue_outcome(outcome)
@@ -1050,6 +1069,7 @@ def render_and_enqueue(
         exception,
         stack,
         runtime.sentry_processor is not None,
+        created,
     )
     if outcome:
         _note_enqueue_outcome(outcome)
@@ -1071,7 +1091,8 @@ def render_and_enqueue(
     # once shutdown() has begun.
     _callable_dispatcher.enqueue(
         line,
-        METHOD_LEVELS.get(level, 20),
+        # A stdlib level may be any int; the dispatcher takes a 64-bit one.
+        METHOD_LEVELS.get(level, 20) if levelno is None else min(levelno, _MAX_LEVELNO),
         overflow=runtime.overflow,
     )
     # Nor does Sentry, once shutdown() has disabled logging.

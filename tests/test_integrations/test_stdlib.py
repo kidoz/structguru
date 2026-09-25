@@ -267,6 +267,189 @@ def test_level_normalization(
     assert _records()[-1]["level"] == expected
 
 
+def test_bridge_thresholds_custom_levels_by_their_number(clean_root: None) -> None:
+    # A record between two named levels is judged by its own number, not by
+    # the named level below it; only the rendered level name is banded.
+    _runtime.configure(service="app", target="memory", level=25)
+    install_stdlib_bridge(level="DEBUG")
+    log = logging.getLogger("svc.custom")
+    for levelno in (20, 24, 25, 26, 35):
+        log.log(levelno, f"at {levelno}")
+    assert [(record["message"], record["level"]) for record in _records()] == [
+        ("at 25", "INFO"),
+        ("at 26", "INFO"),
+        ("at 35", "WARN"),
+    ]
+
+
+def test_bridge_thresholds_trace_band_records_by_their_number() -> None:
+    # Numbers 5-9 render as DEBUG, but stay below a DEBUG threshold.
+    handler = StructguruHandler()
+    record = logging.makeLogRecord({"name": "svc", "msg": "fine", "levelno": 7})
+    _runtime.configure(service="app", target="memory", level="DEBUG")
+    handler.handle(record)
+    assert _records() == []
+    _runtime.configure(service="app", target="memory", level="TRACE")
+    handler.handle(record)
+    assert [(rec["message"], rec["level"]) for rec in _records()] == [("fine", "DEBUG")]
+
+
+def test_bridge_samples_custom_levels_by_their_number(clean_root: None) -> None:
+    # Records more severe than sample_max_level always pass, including a
+    # custom level just above it.
+    _runtime.configure(
+        service="app", target="memory", level="DEBUG", sample_rate=0.0, sample_max_level="INFO"
+    )
+    install_stdlib_bridge(level="DEBUG")
+    log = logging.getLogger("svc.sampled")
+    log.log(logging.INFO, "info")
+    log.log(25, "notice")
+    log.log(logging.WARNING, "warning")
+    assert [record["message"] for record in _records()] == ["notice", "warning"]
+    metrics = _runtime.writer_metrics()
+    assert metrics is not None
+    assert metrics["sampled"] == 1
+
+
+def test_bridge_routes_custom_levels_to_sinks_by_their_number(clean_root: None) -> None:
+    # A sink added at a custom level receives a bridged record at that level,
+    # and a handler sink sees the record's own number.
+    _runtime.configure(service="app", target="memory", level="DEBUG")
+    lines: list[str] = []
+    seen: list[int] = []
+
+    class _Levels(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            seen.append(record.levelno)
+
+    handler = _Levels()
+    tokens = [Logger().add(lines.append, level=25), Logger().add(handler, level=25)]
+    try:
+        install_stdlib_bridge(level="DEBUG")
+        log = logging.getLogger("svc.routed")
+        for levelno in (24, 25, 30):
+            log.log(levelno, f"at {levelno}")
+        _runtime.flush()
+        assert [json.loads(line)["message"] for line in lines] == ["at 25", "at 30"]
+        assert seen == [25, 30]
+    finally:
+        for token in tokens:
+            Logger().remove(token)
+
+
+@pytest.mark.parametrize(
+    "created", ["1700000000", 10**400, None, object()], ids=["str", "huge", "none", "object"]
+)
+def test_bridge_falls_back_to_the_current_time_for_unusable_creation_times(
+    native_memory: None, created: object
+) -> None:
+    # A filter or record factory may set any object; the record must survive.
+    import datetime
+
+    record = logging.makeLogRecord(
+        {"name": "odd", "msg": "odd created", "levelno": logging.INFO, "created": created}
+    )
+    before = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=1)
+    StructguruHandler().handle(record)
+    [rendered] = _records()
+    assert rendered["message"] == "odd created"
+    assert rendered["timestamp"] >= before.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+@pytest.mark.parametrize(
+    ("created", "expected"),
+    [
+        (1_000_000_000.0, "2001-09-09T01:46:40.000000Z"),
+        (1_000_000_000.123456, "2001-09-09T01:46:40.123456Z"),
+        (1_700_000_000.9999996, "2023-11-14T22:13:21.000000Z"),
+        (-1.5, "1969-12-31T23:59:58.500000Z"),
+    ],
+)
+def test_bridge_renders_record_creation_time(
+    native_memory: None, created: float, expected: str
+) -> None:
+    # A replayed or queued record keeps the time it was created, not the time
+    # the bridge rendered it.
+    record = logging.makeLogRecord(
+        {"name": "replayed", "msg": "old event", "levelno": logging.INFO, "created": created}
+    )
+    StructguruHandler().handle(record)
+    assert _records()[-1]["timestamp"] == expected
+
+
+@pytest.mark.parametrize("format", ["json", "console"])
+def test_bridge_creation_time_reaches_stream_sinks(format: str) -> None:
+    import io
+
+    stream = io.StringIO()
+    _runtime.configure(target="memory", format=format, colors=False, stream_sink=stream)
+    record = logging.makeLogRecord(
+        {"name": "replayed", "msg": "old event", "levelno": logging.INFO, "created": 1e9}
+    )
+    StructguruHandler().handle(record)
+    _runtime.flush()
+    [line] = _runtime.drain_messages()
+    assert line == stream.getvalue()
+    assert "2001-09-09T01:46:40.000000Z" in line
+
+
+def test_bridge_creation_time_matches_datetime_rounding(native_memory: None) -> None:
+    import datetime as dt
+    import random
+
+    rng = random.Random(1234)
+    created = [rng.uniform(-2e9, 4e9) for _ in range(300)]
+    created += [rng.randrange(0, 2**31) + rng.randrange(0, 10**6) / 1e6 for _ in range(300)]
+    handler = StructguruHandler()
+    for value in created:
+        handler.handle(
+            logging.makeLogRecord(
+                {"name": "svc", "msg": "m", "levelno": logging.INFO, "created": value}
+            )
+        )
+    rendered = [record["timestamp"] for record in _records()]
+    assert rendered == [
+        dt.datetime.fromtimestamp(value, dt.UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        for value in created
+    ]
+
+
+def test_bridge_keeps_creation_time_through_queue_listener(
+    native_memory: None, clean_root: None
+) -> None:
+    import queue
+    from logging.handlers import QueueHandler, QueueListener
+
+    records: queue.SimpleQueue[logging.LogRecord] = queue.SimpleQueue()
+    listener = QueueListener(records, StructguruHandler())
+    listener.start()
+    try:
+        QueueHandler(records).handle(
+            logging.makeLogRecord(
+                {"name": "queued", "msg": "from 2001", "levelno": logging.INFO, "created": 1e9}
+            )
+        )
+    finally:
+        listener.stop()
+    [record] = _records()
+    assert record["message"] == "from 2001"
+    assert record["timestamp"] == "2001-09-09T01:46:40.000000Z"
+
+
+@pytest.mark.parametrize("created", [float("nan"), float("inf"), 1e20])
+def test_bridge_unrepresentable_creation_time_uses_current_time(
+    native_memory: None, created: float
+) -> None:
+    import datetime as dt
+
+    record = logging.makeLogRecord(
+        {"name": "svc", "msg": "m", "levelno": logging.INFO, "created": created}
+    )
+    StructguruHandler().handle(record)
+    timestamp = _records()[-1]["timestamp"]
+    assert timestamp.startswith(f"{dt.datetime.now(dt.UTC).year}-")
+
+
 def test_bridge_level_filters_child_with_explicit_lower_level(
     native_memory: None, clean_root: None
 ) -> None:

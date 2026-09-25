@@ -691,13 +691,19 @@ fn render_record(
     exception: Option<&Bound<'_, PyAny>>,
     stack: Option<&Bound<'_, PyString>>,
     json_copy: bool,
+    created: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<(String, Option<String>)> {
     let entries = merge_record_fields(bound, kwargs, contextvars, exception)?;
+    // A filter or record factory may set `created` to anything; a value that
+    // is not a representable number stamps the current time instead.
+    let created = created.and_then(|value| value.extract::<f64>().ok());
     let logger = string_to_cow(logger);
     let message = string_to_cow(message);
     let stack = stack.map(string_to_cow);
     let stack = stack.as_deref();
-    let timestamp = structguru_core::now_iso8601();
+    let timestamp = created
+        .and_then(structguru_core::unix_to_iso8601)
+        .unwrap_or_else(structguru_core::now_iso8601);
     if config.console {
         let json = if json_copy {
             Some(config.render_json(
@@ -979,10 +985,13 @@ impl NativeStringWriter {
     /// kwargs (overriding a bound key in place; `exc_info` and `stack_info`
     /// are never fields), then contextvars for keys still absent, then
     /// `exception` as the `exception` field. The record renders in `config`'s
-    /// format and is pushed without ever becoming a Python string. Returns the
-    /// outcome code: 0 accepted, 1 full, 2 closed.
+    /// format and is pushed without ever becoming a Python string. `created`
+    /// (Unix seconds, as `LogRecord.created`) sets the `timestamp` field; by
+    /// default, or when it is not a representable number (any object is
+    /// accepted), the current time does.
+    /// Returns the outcome code: 0 accepted, 1 full, 2 closed.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (config, logger, level, message, bound, kwargs, contextvars, exception, stack))]
+    #[pyo3(signature = (config, logger, level, message, bound, kwargs, contextvars, exception, stack, created=None))]
     fn log(
         &self,
         py: Python<'_>,
@@ -995,6 +1004,7 @@ impl NativeStringWriter {
         contextvars: &Bound<'_, PyDict>,
         exception: Option<&Bound<'_, PyAny>>,
         stack: Option<&Bound<'_, PyString>>,
+        created: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<u8> {
         let config = config.get();
         let (line, _) = render_record(
@@ -1008,6 +1018,7 @@ impl NativeStringWriter {
             exception,
             stack,
             false,
+            created,
         )?;
         Ok(self.enqueue_owned(py, line, config.blocking).code())
     }
@@ -1019,7 +1030,7 @@ impl NativeStringWriter {
     /// record for the Sentry hook when `json_copy` is set, rendered separately
     /// in console mode.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (config, logger, level, message, bound, kwargs, contextvars, exception, stack, json_copy))]
+    #[pyo3(signature = (config, logger, level, message, bound, kwargs, contextvars, exception, stack, json_copy, created=None))]
     fn log_capture(
         &self,
         py: Python<'_>,
@@ -1033,6 +1044,7 @@ impl NativeStringWriter {
         exception: Option<&Bound<'_, PyAny>>,
         stack: Option<&Bound<'_, PyString>>,
         json_copy: bool,
+        created: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<(u8, String, Option<String>)> {
         let config = config.get();
         let (line, json) = render_record(
@@ -1046,6 +1058,7 @@ impl NativeStringWriter {
             exception,
             stack,
             json_copy,
+            created,
         )?;
         let outcome = self.enqueue_owned(py, line.clone(), config.blocking);
         Ok((outcome.code(), line, json))
@@ -1141,15 +1154,15 @@ impl NativeFilter {
     /// Returns `True` when the record should be kept (rendered).
     ///
     /// `key` is the rate-limit grouping key (usually the formatted message);
-    /// `level` is the canonical method name.
+    /// `level` is the record's numeric level as in `logging`, so a custom
+    /// stdlib level ranks by its own number, or a method name such as
+    /// `"info"`.
     #[pyo3(signature = (key, level))]
-    fn allow(&self, key: &Bound<'_, PyString>, level: &str) -> bool {
+    fn allow(&self, key: &Bound<'_, PyString>, level: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let level = record_level(level)?;
         // Filter the same text the renderer emits, including surrogate
         // replacement, while retaining a borrowed fast path for valid UTF-8.
-        match key.to_str() {
-            Ok(key) => self.pipeline.allow(key, level),
-            Err(_) => self.pipeline.allow(&key.to_string_lossy(), level),
-        }
+        Ok(self.pipeline.allow(&string_to_cow(key), level))
     }
 
     /// Whether any filter stage is configured.
@@ -1165,6 +1178,20 @@ impl NativeFilter {
         result.set_item("rate_limited", stats.rate_limited)?;
         Ok(result)
     }
+}
+
+/// A filter rank for a level given as a `logging` number or a method name.
+/// Numbers outside `u32` saturate, so ordering is kept.
+fn record_level(level: &Bound<'_, PyAny>) -> PyResult<u32> {
+    if let Ok(number) = level.cast::<PyInt>() {
+        return Ok(match number.extract::<i64>() {
+            Ok(value) => u32::try_from(value.max(0)).unwrap_or(u32::MAX),
+            Err(_) if number.lt(0)? => 0,
+            Err(_) => u32::MAX,
+        });
+    }
+    let name = level.cast::<PyString>()?;
+    Ok(structguru_core::method_level_number(&string_to_cow(name)))
 }
 
 /// Marker emitted in place of a value nested deeper than `MAX_VALUE_DEPTH`.

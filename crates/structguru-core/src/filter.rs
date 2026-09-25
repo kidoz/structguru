@@ -18,23 +18,26 @@ pub enum Decision {
 /// A pre-render filter deciding whether a record should be rendered.
 pub trait RecordFilter: Send + Sync {
     /// Inspect `key` (the rate-limit grouping key, usually the formatted message)
-    /// and `level` (the canonical method name) and return `Keep` or `Drop`.
-    fn allow(&self, key: &str, level: &str) -> Decision;
+    /// and `level` (the record's numeric level, as in `logging`) and return
+    /// `Keep` or `Drop`.
+    fn allow(&self, key: &str, level: u32) -> Decision;
 }
 
 /// Numeric level for a method name; unknown names rank as `info`.
-fn method_level_num(method: &str) -> u8 {
-    crate::level_number(method).unwrap_or(20)
+pub fn method_level_number(method: &str) -> u32 {
+    u32::from(crate::level_number(method).unwrap_or(20))
 }
 
 /// Probabilistic sampler: keeps a record with probability `rate`.
 ///
 /// With `max_level_num` set, only records at or below that level are sampled;
 /// more severe records always pass — the native analog of wrapping
-/// `SamplingProcessor` in `ConditionalProcessor(max_level=...)`.
+/// `SamplingProcessor` in `ConditionalProcessor(max_level=...)`. Levels
+/// compare by number, so a custom stdlib level between two named ones ranks
+/// by its own value.
 pub struct Sampler {
     rate: f64,
-    max_level_num: Option<u8>,
+    max_level_num: Option<u32>,
 }
 
 impl Sampler {
@@ -43,15 +46,15 @@ impl Sampler {
     pub fn new(rate: f64, max_level: Option<&str>) -> Self {
         Self {
             rate: rate.clamp(0.0, 1.0),
-            max_level_num: max_level.map(method_level_num),
+            max_level_num: max_level.map(method_level_number),
         }
     }
 }
 
 impl RecordFilter for Sampler {
-    fn allow(&self, _key: &str, level: &str) -> Decision {
+    fn allow(&self, _key: &str, level: u32) -> Decision {
         if let Some(max) = self.max_level_num
-            && method_level_num(level) > max
+            && level > max
         {
             return Decision::Keep;
         }
@@ -201,7 +204,7 @@ fn evict_least_recent(state: &mut RateLimiterState, keep: usize) {
 }
 
 impl RecordFilter for RateLimiter {
-    fn allow(&self, key: &str, _level: &str) -> Decision {
+    fn allow(&self, key: &str, _level: u32) -> Decision {
         self.allow_key(key, Instant::now())
     }
 }
@@ -254,8 +257,9 @@ impl Pipeline {
         }
     }
 
-    /// Returns `false` when any stage drops the record.
-    pub fn allow(&self, key: &str, level: &str) -> bool {
+    /// Returns `false` when any stage drops the record. `level` is the
+    /// record's numeric level; see [`method_level_number`] for method names.
+    pub fn allow(&self, key: &str, level: u32) -> bool {
         for stage in &self.stages {
             let (decision, sampled, rate_limited) = match stage {
                 Stage::Sampler(f) => {
@@ -300,7 +304,7 @@ mod tests {
     fn sampler_rate_zero_drops_all() {
         let s = Sampler::new(0.0, None);
         for _ in 0..100 {
-            assert_eq!(s.allow("k", "info"), Decision::Drop);
+            assert_eq!(s.allow("k", 20), Decision::Drop);
         }
     }
 
@@ -308,7 +312,7 @@ mod tests {
     fn sampler_rate_one_keeps_all() {
         let s = Sampler::new(1.0, None);
         for _ in 0..100 {
-            assert_eq!(s.allow("k", "info"), Decision::Keep);
+            assert_eq!(s.allow("k", 20), Decision::Keep);
         }
     }
 
@@ -318,7 +322,7 @@ mod tests {
         let s = Sampler::new(0.5, None);
         let mut kept = 0;
         for _ in 0..1000 {
-            if s.allow("k", "info") == Decision::Keep {
+            if s.allow("k", 20) == Decision::Keep {
                 kept += 1;
             }
         }
@@ -329,20 +333,45 @@ mod tests {
     fn sampler_max_level_gates_sampling_to_low_levels() {
         // rate=0 would drop everything, but only records <= INFO are sampled.
         let s = Sampler::new(0.0, Some("info"));
-        assert_eq!(s.allow("k", "debug"), Decision::Drop);
-        assert_eq!(s.allow("k", "info"), Decision::Drop);
-        assert_eq!(s.allow("k", "success"), Decision::Drop);
-        assert_eq!(s.allow("k", "warning"), Decision::Keep);
-        assert_eq!(s.allow("k", "error"), Decision::Keep);
-        assert_eq!(s.allow("k", "critical"), Decision::Keep);
+        for (method, expected) in [
+            ("debug", Decision::Drop),
+            ("info", Decision::Drop),
+            ("success", Decision::Drop),
+            ("warning", Decision::Keep),
+            ("error", Decision::Keep),
+            ("critical", Decision::Keep),
+        ] {
+            assert_eq!(
+                s.allow("k", method_level_number(method)),
+                expected,
+                "{method}"
+            );
+        }
+    }
+
+    #[test]
+    fn sampler_max_level_ranks_custom_levels_by_number() {
+        // A stdlib level between INFO (20) and WARNING (30) is more severe
+        // than INFO, so it is never sampled.
+        let s = Sampler::new(0.0, Some("info"));
+        assert_eq!(s.allow("k", 19), Decision::Drop);
+        assert_eq!(s.allow("k", 20), Decision::Drop);
+        assert_eq!(s.allow("k", 21), Decision::Keep);
+        assert_eq!(s.allow("k", 25), Decision::Keep);
+    }
+
+    #[test]
+    fn unknown_method_names_rank_as_info() {
+        assert_eq!(method_level_number("notice"), 20);
+        assert_eq!(method_level_number("WARN"), 30);
     }
 
     #[test]
     fn pipeline_level_gated_sampler_counts_only_gated_drops() {
         let p = Pipeline::new(0.0, Some("debug"), None, Duration::from_secs(60));
-        assert!(!p.allow("k", "debug"));
-        assert!(p.allow("k", "info"));
-        assert!(p.allow("k", "error"));
+        assert!(!p.allow("k", 10));
+        assert!(p.allow("k", 20));
+        assert!(p.allow("k", 40));
         let stats = p.stats();
         assert_eq!(stats.sampled, 1);
     }
@@ -411,7 +440,7 @@ mod tests {
         let p = Pipeline::new(1.0, None, None, Duration::from_secs(60));
         assert!(p.is_empty());
         for _ in 0..10 {
-            assert!(p.allow("k", "info"));
+            assert!(p.allow("k", 20));
         }
         let stats = p.stats();
         assert_eq!(stats.sampled, 0);
@@ -422,7 +451,7 @@ mod tests {
     fn pipeline_sampler_only_counts_sampled() {
         let p = Pipeline::new(0.0, None, None, Duration::from_secs(60));
         for _ in 0..5 {
-            assert!(!p.allow("k", "info"));
+            assert!(!p.allow("k", 20));
         }
         let stats = p.stats();
         assert_eq!(stats.sampled, 5);
@@ -432,9 +461,9 @@ mod tests {
     #[test]
     fn pipeline_rate_limiter_only_counts_rate_limited() {
         let p = Pipeline::new(1.0, None, Some(2), Duration::from_secs(60));
-        assert!(p.allow("k", "info"));
-        assert!(p.allow("k", "info"));
-        assert!(!p.allow("k", "info"));
+        assert!(p.allow("k", 20));
+        assert!(p.allow("k", 20));
+        assert!(!p.allow("k", 20));
         let stats = p.stats();
         assert_eq!(stats.sampled, 0);
         assert_eq!(stats.rate_limited, 1);
@@ -445,7 +474,7 @@ mod tests {
         // rate=0 drops everything; the rate limiter never runs, so its counter stays 0.
         let p = Pipeline::new(0.0, None, Some(2), Duration::from_secs(60));
         for _ in 0..10 {
-            assert!(!p.allow("k", "info"));
+            assert!(!p.allow("k", 20));
         }
         let stats = p.stats();
         assert_eq!(stats.sampled, 10);
@@ -456,9 +485,9 @@ mod tests {
     fn pipeline_sampler_then_rate_limiter_both_count() {
         // rate=1 so the sampler always keeps; the rate limiter governs drops.
         let p = Pipeline::new(1.0, None, Some(1), Duration::from_secs(60));
-        assert!(p.allow("alpha", "info"));
-        assert!(!p.allow("alpha", "info"));
-        assert!(p.allow("beta", "info"));
+        assert!(p.allow("alpha", 20));
+        assert!(!p.allow("alpha", 20));
+        assert!(p.allow("beta", 20));
         let stats = p.stats();
         assert_eq!(stats.sampled, 0);
         assert_eq!(stats.rate_limited, 1);

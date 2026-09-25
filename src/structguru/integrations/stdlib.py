@@ -93,6 +93,12 @@ class StructguruHandler(logging.Handler):
     message is passed verbatim (no brace re-formatting), so literal ``{...}`` in
     a message is never misinterpreted.
 
+    The level threshold and sampling judge a record by its own ``levelno``, so a
+    custom level such as 25 ranks above ``INFO`` even though it renders as
+    ``INFO``. The ``timestamp`` field is the record's ``created`` time, so a
+    record replayed or delivered late through a ``QueueListener`` keeps the
+    time it was logged.
+
     An ``extra=`` value the native renderer cannot represent — Django's
     ``log_response()`` attaches the raw request as ``extra["request"]``, for
     example — is replaced by a ``<unsupported: WSGIRequest>`` marker rather than
@@ -137,13 +143,31 @@ class StructguruHandler(logging.Handler):
                 target = target.bind(**extras)
             if record.exc_info:
                 target = target.opt(exception=record.exc_info)
-            emit_method = getattr(target, method_for_level_number(record.levelno))
+            method = method_for_level_number(record.levelno)
+            if method == "trace":
+                method = "debug"  # what Logger.trace() logs as
+            # ``_log`` rather than the level method: only it takes the record's
+            # own number and creation time.
             if record.stack_info:
                 # A positional placeholder preserves the already-formatted text,
                 # even when stack_info introduces keyword arguments to _log().
-                emit_method("{}", record.getMessage(), stack_info=record.stack_info)
+                target._log(
+                    method,
+                    "{}",
+                    (record.getMessage(),),
+                    {"stack_info": record.stack_info},
+                    levelno=record.levelno,
+                    created=record.created,
+                )
             else:
-                emit_method(record.getMessage())
+                target._log(
+                    method,
+                    record.getMessage(),
+                    (),
+                    {},
+                    levelno=record.levelno,
+                    created=record.created,
+                )
         except Exception:  # noqa: BLE001 - a logging handler must never raise
             self.handleError(record)
 

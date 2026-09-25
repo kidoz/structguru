@@ -106,6 +106,34 @@ def test_filters_accept_surrogate_messages(filter_kind: str, redaction: bool) ->
     assert metrics["rate_limited"] == (1 if filter_kind == "rate_limit" else 0)
 
 
+def test_rate_limit_keys_on_the_rendered_message_text() -> None:
+    # A surrogate pair split across code points renders as the character it
+    # encodes, so it groups with the same message spelled normally.
+    _runtime.configure(target="memory", rate_limit_max=1)
+    structguru.logger.info("done \ud83d" + "\ude00")
+    structguru.logger.info("done \U0001f600")
+    _runtime.flush()
+    assert [json.loads(line)["message"] for line in _runtime.drain_messages()] == [
+        "done \U0001f600"
+    ]
+    assert _runtime.writer_metrics()["rate_limited"] == 1
+
+
+def test_native_filter_ranks_numeric_levels() -> None:
+    from structguru import _rust
+
+    record_filter = _rust.NativeFilter(sample_rate=0.0, sample_max_level="INFO")
+    # A stdlib number between two named levels ranks by its own value.
+    assert record_filter.allow("k", 25)
+    assert record_filter.allow("k", 2**80)
+    assert not record_filter.allow("k", 20)
+    assert not record_filter.allow("k", -5)
+    # Method names still rank through the level table.
+    assert record_filter.allow("k", "warning")
+    assert not record_filter.allow("k", "info")
+    assert record_filter.stats() == {"sampled": 3, "rate_limited": 0}
+
+
 def test_pattern_redacts_matching_substring_in_string_value() -> None:
     email = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
     _runtime.configure(service="svc", target="memory", level="DEBUG", sensitive_patterns=[email])

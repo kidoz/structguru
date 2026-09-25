@@ -571,6 +571,8 @@ class Logger:
         message: Any,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
+        levelno: int | None = None,
+        created: float | None = None,
     ) -> None:
         """Internal dispatch — native Rust path (the only path since v1.0).
 
@@ -578,6 +580,11 @@ class Logger:
         module name, exception and stack capture, and the hooks. The Rust
         writer merges bound fields, kwargs, and contextvars, redacts, renders,
         and enqueues the record in one call.
+
+        The stdlib bridge passes a record's own ``levelno``, which the level
+        threshold, sampling, and callable-sink routing use instead of
+        *method*'s number, and its ``created`` time (Unix seconds) for the
+        ``timestamp`` field.
         """
         # One coherent snapshot follows the record through every processing stage.
         # Reconfigure/disable may retire its writer, but cannot invalidate this
@@ -587,7 +594,8 @@ class Logger:
             return
 
         # Cheap disabled path: level-filter before any formatting.
-        if METHOD_LEVELS.get(method, 20) < runtime.level_threshold:
+        level_number = METHOD_LEVELS.get(method, 20) if levelno is None else levelno
+        if level_number < runtime.level_threshold:
             return
 
         stack_info = kwargs.get("stack_info") or self._opt_stack_info
@@ -601,7 +609,7 @@ class Logger:
         # Pre-render filter (sampling/rate-limit): decide before building fields.
         # Keys on the formatted message, matching the rate-limiter's grouping.
         record_filter = runtime.record_filter
-        if record_filter is not None and not record_filter.allow(formatted_msg, method):
+        if record_filter is not None and not record_filter.allow(formatted_msg, level_number):
             return
 
         exc_info = kwargs.get("exc_info", self._opt_exc_info)
@@ -636,7 +644,17 @@ class Logger:
             field_names = tuple(fields)
             bound, kwargs, contextvars, exception = fields, _NO_FIELDS, _NO_FIELDS, None
         sentry_line = _runtime.render_and_enqueue(
-            runtime, name, method, formatted_msg, bound, kwargs, contextvars, exception, stack
+            runtime,
+            name,
+            method,
+            formatted_msg,
+            bound,
+            kwargs,
+            contextvars,
+            exception,
+            stack,
+            created,
+            level_number,
         )
         if sentry_line is not None:
             _runtime.notify_sentry(

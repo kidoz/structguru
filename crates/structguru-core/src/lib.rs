@@ -9,8 +9,10 @@ mod render;
 mod value;
 mod worker;
 
-pub use clock::now_iso8601;
-pub use filter::{Decision, FilterStats, Pipeline, RateLimiter, RecordFilter, Sampler};
+pub use clock::{now_iso8601, unix_to_iso8601};
+pub use filter::{
+    Decision, FilterStats, Pipeline, RateLimiter, RecordFilter, Sampler, method_level_number,
+};
 pub use render::{DEFAULT_SENSITIVE_KEYS, RedactionPattern, render_line, render_line_console};
 pub use value::{Value, ValueStats, collapse_duplicate_keys};
 pub use worker::{
