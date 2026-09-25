@@ -50,6 +50,12 @@ session = get_logging_session()
 session.get("https://example.com")
 ```
 
+The logged `http_url` is the URL requests actually sends, including `params=`
+and session-level `params`, with credentials and query values removed: a bare
+`?` shows that parameters were present. Responses with a 4xx/5xx status, and
+calls that raise — including `KeyboardInterrupt` and `SystemExit` — are logged
+as `Outbound HTTP Request Failed` at `ERROR` before the exception propagates.
+
 ## Standard Library Integration
 
 Third-party libraries log through the standard `logging` module. To render those

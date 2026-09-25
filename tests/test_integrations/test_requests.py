@@ -120,3 +120,43 @@ def test_requests_invalid_port_preserves_original_exception(
     record = _records(buf)[0]
     assert record["http_url"] == "<unparsable-url>"
     assert record["message"] == "Outbound HTTP Request Failed"
+
+
+@responses.activate
+def test_requests_logged_url_marks_params_supplied_separately() -> None:
+    buf = io.StringIO()
+    configure(service="test", level="DEBUG", stream=buf)
+    responses.add(responses.GET, "http://test.local/api", json={}, status=200)
+
+    session = get_logging_session()
+    session.get("http://test.local/api", params={"api_key": "SECRET"})
+    session.params = {"token": "SESSION-SECRET"}
+    session.get("http://test.local/api")
+    session.params = {}
+    session.get("http://test.local/api", params={"dropped": None})
+
+    urls = [record["http_url"] for record in _records(buf)]
+    assert urls == ["http://test.local/api?", "http://test.local/api?", "http://test.local/api"]
+    assert "SECRET" not in buf.getvalue()
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
+def test_requests_base_exception_is_logged_as_failure(
+    monkeypatch: pytest.MonkeyPatch, error_type: type[BaseException]
+) -> None:
+    import requests
+
+    error = error_type()
+
+    def interrupted(*args: object, **kwargs: object) -> None:
+        raise error
+
+    monkeypatch.setattr(requests.Session, "request", interrupted)
+    buf = io.StringIO()
+    configure(stream=buf)
+    with pytest.raises(error_type) as caught:
+        get_logging_session().get("https://host/path")
+    assert caught.value is error
+    [record] = _records(buf)
+    assert record["message"] == "Outbound HTTP Request Failed"
+    assert record["level"] == "ERROR"
