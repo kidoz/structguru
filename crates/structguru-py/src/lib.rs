@@ -733,7 +733,7 @@ impl NativeStringWriter {
         file_backup_count: usize,
         also_stdout: bool,
     ) -> PyResult<Self> {
-        use structguru_core::{MultiSink, RotatingFileSink, SinkError, StringSink, WriteSink};
+        use structguru_core::{MultiSink, RotatingFileSink, SinkError, StdoutSink, StringSink};
 
         // File creation and sidecar lock acquisition can block. Keep only
         // Rust-owned arguments across detachment so other Python threads can
@@ -750,7 +750,7 @@ impl NativeStringWriter {
                     sinks.push(Box::new(file));
                 }
                 if also_stdout {
-                    sinks.push(Box::new(WriteSink::new(std::io::stdout())));
+                    sinks.push(Box::new(StdoutSink));
                 }
 
                 let writer = if !sinks.is_empty() {

@@ -644,6 +644,64 @@ def test_fork_is_bounded_while_other_threads_keep_logging(tmp_path: Path) -> Non
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_forked_child_stdout_writer_ignores_parent_blocked_in_write() -> None:
+    """A parent worker blocked writing to stdout must not stall the child's writer.
+
+    After the pre-fork flush, the parent's fd 1 becomes a full pipe nobody reads,
+    so its worker is blocked inside a stdout write at fork time. The child points
+    fd 1 at ``/dev/null``; any hang there comes from inherited stdout state.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+            import os, signal, threading, time, warnings
+            warnings.simplefilter("ignore", DeprecationWarning)
+            read_end, write_end = os.pipe()
+            os.dup2(write_end, 1)
+            draining = threading.Event()
+            draining.set()
+
+            def drain():
+                while draining.is_set():
+                    os.read(read_end, 65536)
+
+            def block_stdout_worker():
+                # Runs after structguru's pre-fork flush: stop draining and queue
+                # more than a pipe's worth of records so the worker blocks mid-write.
+                draining.clear()
+                for _ in range(1000):
+                    sg.logger.info("x" * 200)
+                time.sleep(0.3)
+
+            # Before-fork hooks run in reverse order, so this runs after structguru's.
+            os.register_at_fork(before=block_stdout_worker)
+            threading.Thread(target=drain, daemon=True).start()
+            import structguru as sg
+
+            sg.configure(service="svc", target="stdout", maxsize=2048)
+            pid = os.fork()
+            if pid == 0:
+                signal.alarm(5)
+                os.dup2(os.open(os.devnull, os.O_WRONLY), 1)
+                sg.logger.info("child")
+                sg.flush()
+                os._exit(0 if sg.writer_metrics()["written"] == 1 else 3)
+            _, status = os.waitpid(pid, 0)
+            os.write(2, f"child wait status {status}".encode())
+            # The parent's worker stays blocked on the pipe; skip the exit drain.
+            os._exit(0 if os.waitstatus_to_exitcode(status) == 0 else 1)
+        """),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_shutdown_abandons_a_callable_sink_that_never_returns() -> None:
     """A sink stuck forever must not hold shutdown (and interpreter exit) open."""
     result = subprocess.run(

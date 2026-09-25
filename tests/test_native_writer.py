@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
 import pytest
 import structguru._rust as rust
 
@@ -79,6 +84,42 @@ def test_native_string_writer_close_is_idempotent_and_rejects_new_messages() -> 
     assert writer.messages() == ["before close"]
     assert writer.metrics()["closed"] is True
     assert writer.metrics()["worker_done"] is True
+
+
+def test_native_stdout_writer_counts_closed_stdout_as_sink_errors(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+            import os
+            import structguru._rust as rust
+
+            os.close(1)
+
+            def deliver(**kwargs):
+                writer = rust._NativeStringWriter(8, **kwargs)
+                for i in range(3):
+                    assert writer.try_enqueue(f"lost {i}\\n")
+                writer.flush()
+                metrics = writer.metrics()
+                writer.close()
+                return metrics["written"], metrics["sink_errors"]
+
+            assert deliver(target="stdout") == (0, 3)
+            # A read-only fd 1 fails writes the same way and keeps the log file
+            # from being opened as fd 1. The file copy lands; the mirror fails.
+            os.dup2(os.open(os.devnull, os.O_RDONLY), 1)
+            assert deliver(file_path="app.log", also_stdout=True) == (3, 3)
+        """),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "app.log").read_text().splitlines() == ["lost 0", "lost 1", "lost 2"]
 
 
 def test_native_string_writer_counts_sink_errors_without_stopping() -> None:

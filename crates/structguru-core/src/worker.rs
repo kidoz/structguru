@@ -130,6 +130,48 @@ where
     }
 }
 
+/// Sink that writes each record to the process's standard output.
+///
+/// On unix every record is one `write_all` straight to file descriptor 1, with
+/// no user-space buffer and no lock. `std::io::stdout()` guards a process-global
+/// lock that the parent's worker may hold at `fork()`, and a forked child's
+/// replacement worker would then block on it forever. The descriptor is looked
+/// up by number on every write and is never duplicated or closed, so output
+/// follows a later `dup2` onto fd 1 (pytest's `capfd`, daemonizers), and a
+/// closed fd 1 is a counted sink error instead of a silently swallowed write.
+#[derive(Debug, Default)]
+pub struct StdoutSink;
+
+impl StringSink for StdoutSink {
+    fn write(&mut self, message: String) -> Result<(), SinkError> {
+        write_stdout(message.as_bytes()).map_err(|err| SinkError::new(err.to_string()))
+    }
+
+    #[cfg(not(unix))]
+    fn flush(&mut self) -> Result<(), SinkError> {
+        std::io::stdout()
+            .flush()
+            .map_err(|err| SinkError::new(err.to_string()))
+    }
+}
+
+#[cfg(unix)]
+fn write_stdout(bytes: &[u8]) -> std::io::Result<()> {
+    use std::mem::ManuallyDrop;
+    use std::os::fd::FromRawFd;
+
+    // SAFETY: the handle borrows fd 1 for this one write and `ManuallyDrop`
+    // keeps it from ever being closed. This is how the standard library's own
+    // raw stdout writes; a closed fd 1 only makes `write` fail with EBADF.
+    let mut stdout = ManuallyDrop::new(unsafe { File::from_raw_fd(1) });
+    stdout.write_all(bytes)
+}
+
+#[cfg(not(unix))]
+fn write_stdout(bytes: &[u8]) -> std::io::Result<()> {
+    std::io::stdout().write_all(bytes)
+}
+
 pub struct FailingSink {
     handle: MemorySinkHandle,
     fail_after: usize,
@@ -558,12 +600,12 @@ impl StringWriter {
         Self::with_paused(maxsize, true)
     }
 
-    /// Writer that drains to the process's stdout (line-buffered by the OS).
+    /// Writer that drains to the process's stdout, one write per record.
     pub fn new_stdout(maxsize: usize) -> Self {
         Self::with_sink(
             maxsize,
             false,
-            Box::new(WriteSink::new(std::io::stdout())),
+            Box::new(StdoutSink),
             MemorySinkHandle::default(),
         )
     }
