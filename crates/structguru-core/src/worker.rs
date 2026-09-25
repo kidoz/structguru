@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -219,9 +219,12 @@ impl StringSink for FailingSink {
 ///
 /// Writers sharing one path coordinate every rotation through an owner-only
 /// sidecar lock file. This keeps prefork workers from renaming or deleting each
-/// other's active files and backups.
+/// other's active files and backups. A relative `path` is resolved against the
+/// working directory once, at construction, so a later `chdir` cannot move it.
 pub struct RotatingFileSink {
-    file: Option<BufWriter<File>>,
+    /// Unbuffered: each record is one `write_all`, so a failed record is never
+    /// retained in memory and written later.
+    file: Option<File>,
     lock_file: File,
     path: PathBuf,
     max_bytes: usize,
@@ -229,6 +232,9 @@ pub struct RotatingFileSink {
     bytes_written: usize,
     /// (device, inode) of the open active handle; `None` when unknown.
     active_identity: Option<(u64, u64)>,
+    /// A failed write left a partial line without its newline in the active
+    /// file; the next record starts on a new line so the two stay separate.
+    torn: bool,
 }
 
 /// Stable identity of a file for rotation detection (unix only; `None` elsewhere).
@@ -253,20 +259,20 @@ impl RotatingFileSink {
         max_bytes: usize,
         backup_count: usize,
     ) -> Result<Self, SinkError> {
-        let path = path.into();
+        let path =
+            std::path::absolute(path.into()).map_err(|err| SinkError::new(err.to_string()))?;
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
             fs::create_dir_all(parent).map_err(|err| SinkError::new(err.to_string()))?;
         }
         let lock_file = open_lock(&path)?;
-        File::lock(&lock_file).map_err(|err| SinkError::new(err.to_string()))?;
+        lock_exclusive(&lock_file)?;
         let opened = open_append(&path);
         let unlock_result = File::unlock(&lock_file);
         let file = opened?;
         unlock_result.map_err(|err| SinkError::new(err.to_string()))?;
         let meta = file
-            .get_ref()
             .metadata()
             .map_err(|err| SinkError::new(err.to_string()))?;
         let bytes_written = meta.len() as usize;
@@ -279,17 +285,29 @@ impl RotatingFileSink {
             backup_count,
             bytes_written,
             active_identity,
+            torn: false,
         })
     }
 
+    fn rotates(&self) -> bool {
+        self.max_bytes > 0 && self.backup_count > 0
+    }
+
+    /// Open the active path and track the new handle's identity and size.
+    fn reopen(&mut self) -> Result<(), SinkError> {
+        let file = open_append(&self.path)?;
+        let meta = file.metadata().ok();
+        self.bytes_written = meta.as_ref().map_or(0, |meta| meta.len() as usize);
+        self.active_identity = meta.as_ref().and_then(file_identity);
+        self.torn = false;
+        self.file = Some(file);
+        Ok(())
+    }
+
     fn rotate(&mut self) -> Result<(), SinkError> {
-        // Flush and drop the actual active handle before renaming. Windows does
-        // not permit renaming a file while this process still has it open.
-        if let Some(mut file) = self.file.take() {
-            file.flush()
-                .map_err(|err| SinkError::new(err.to_string()))?;
-            drop(file);
-        }
+        // Drop the active handle before renaming. Windows does not permit
+        // renaming a file while this process still has it open.
+        self.file = None;
 
         // Perform the rename shuffle, but ALWAYS reopen an active handle
         // afterwards — even if a step failed partway (disk full, permission
@@ -297,20 +315,14 @@ impl RotatingFileSink {
         // would make the next write/flush unusable; historically that path
         // panicked and killed the worker thread, hanging every logging caller.
         let shuffle = self.shuffle_backups();
-        match open_append(&self.path) {
-            Ok(file) => {
-                // Track the reopened file's real length: 0 after a successful
-                // rotation (fresh active file), or the surviving size if the
-                // active rename failed, so the threshold check stays meaningful.
-                let meta = file.get_ref().metadata().ok();
-                self.bytes_written = meta.as_ref().map(|meta| meta.len() as usize).unwrap_or(0);
-                self.active_identity = meta.as_ref().and_then(file_identity);
-                self.file = Some(file);
-                shuffle
-            }
+        match self.reopen() {
+            // The reopened size is 0 after a successful rotation (fresh active
+            // file), or the surviving size if the active rename failed, so the
+            // threshold check stays meaningful.
+            Ok(()) => shuffle,
             // Reopen failed too: surface the original shuffle error if any,
-            // otherwise the reopen error. `self.file` stays `None`; write/flush
-            // recover by retrying the open rather than panicking.
+            // otherwise the reopen error. `self.file` stays `None`; write
+            // recovers by retrying the open rather than panicking.
             Err(reopen) => Err(shuffle.err().unwrap_or(reopen)),
         }
     }
@@ -335,98 +347,97 @@ impl RotatingFileSink {
         fs::rename(&self.path, &first).map_err(|err| SinkError::new(err.to_string()))
     }
 
-    /// Return the active file, reopening it if a prior rotation left it closed.
-    /// Never panics: a reopen failure is reported as a countable sink error.
-    fn active_file(&mut self) -> Result<&mut BufWriter<File>, SinkError> {
-        if self.file.is_none() {
-            let file = open_append(&self.path)?;
-            self.active_identity = file
-                .get_ref()
-                .metadata()
-                .ok()
-                .as_ref()
-                .and_then(file_identity);
-            self.file = Some(file);
-        }
-        self.file
-            .as_mut()
-            .ok_or_else(|| SinkError::new("rotating file sink has no active file"))
-    }
-
-    /// Reopen the active path after another process may have rotated it.
+    /// Reopen the active path after another process or an external tool
+    /// (logrotate) renamed or deleted it, or after a failed reopen left no
+    /// handle. Never panics: a reopen failure is a countable sink error.
     fn refresh_active_file(&mut self) -> Result<(), SinkError> {
         // Fast path: one stat. If the path still resolves to the handle we hold,
-        // no other process rotated it; only refresh the size (another writer
-        // may have appended) and keep the handle open.
-        if self.file.is_some()
-            && let Some(active) = self.active_identity
-            && let Ok(meta) = fs::metadata(&self.path)
-            && file_identity(&meta) == Some(active)
-        {
-            self.bytes_written = meta.len() as usize;
-            return Ok(());
+        // nobody rotated it; only refresh the size (another writer may have
+        // appended) and keep the handle open.
+        if self.file.is_some() {
+            match self.active_identity {
+                Some(active) => {
+                    if let Ok(meta) = fs::metadata(&self.path)
+                        && file_identity(&meta) == Some(active)
+                    {
+                        self.bytes_written = meta.len() as usize;
+                        return Ok(());
+                    }
+                }
+                // Without file identities (non-unix) only a coordinated
+                // rotation can replace the active file.
+                None if !self.rotates() => return Ok(()),
+                None => {}
+            }
         }
-        if let Some(mut file) = self.file.take() {
-            file.flush()
-                .map_err(|err| SinkError::new(err.to_string()))?;
-        }
-        let file = open_append(&self.path)?;
-        let meta = file
-            .get_ref()
-            .metadata()
-            .map_err(|err| SinkError::new(err.to_string()))?;
-        self.bytes_written = meta.len() as usize;
-        self.active_identity = file_identity(&meta);
-        self.file = Some(file);
-        Ok(())
+        self.file = None;
+        self.reopen()
     }
 
     fn write_locked(&mut self, message: String) -> Result<(), SinkError> {
-        let bytes = message.as_bytes();
-        if self.max_bytes > 0 && self.backup_count > 0 {
-            self.refresh_active_file()?;
-        }
+        self.refresh_active_file()?;
         // Match RotatingFileHandler: when the active file is non-empty, roll
         // before writing the record that would reach or cross the threshold.
-        if self.max_bytes > 0
-            && self.backup_count > 0
+        if self.rotates()
             && self.bytes_written > 0
-            && self.bytes_written.saturating_add(bytes.len()) >= self.max_bytes
+            && self.bytes_written.saturating_add(message.len()) >= self.max_bytes
         {
             self.rotate()?;
         }
-        self.active_file()?
-            .write_all(bytes)
-            .map_err(|err| SinkError::new(err.to_string()))?;
-        self.bytes_written += bytes.len();
-        // Do not retain buffered bytes after releasing the process lock: another
-        // worker may rotate the path immediately afterwards.
-        self.active_file()?
-            .flush()
-            .map_err(|err| SinkError::new(err.to_string()))
+        let terminated;
+        let bytes = if self.torn {
+            terminated = ["\n", message.as_str()].concat();
+            terminated.as_bytes()
+        } else {
+            message.as_bytes()
+        };
+        let Some(file) = self.file.as_mut() else {
+            return Err(SinkError::new("rotating file sink has no active file"));
+        };
+        let (written, result) = write_counted(file, bytes);
+        self.bytes_written += written;
+        if written > 0 {
+            self.torn = bytes[written - 1] != b'\n';
+        }
+        result.map_err(|err| SinkError::new(err.to_string()))
     }
 }
 
 impl StringSink for RotatingFileSink {
     fn write(&mut self, message: String) -> Result<(), SinkError> {
-        File::lock(&self.lock_file).map_err(|err| SinkError::new(err.to_string()))?;
+        lock_exclusive(&self.lock_file)?;
         let write_result = self.write_locked(message);
         let unlock_result =
             File::unlock(&self.lock_file).map_err(|err| SinkError::new(err.to_string()));
         write_result.and(unlock_result)
     }
+}
 
-    fn flush(&mut self) -> Result<(), SinkError> {
-        // No active handle (e.g. a prior rotation could not reopen) → nothing
-        // buffered to flush; the next write retries the open. Never panic.
-        match self.file.as_mut() {
-            Some(file) => file.flush().map_err(|err| SinkError::new(err.to_string())),
-            None => Ok(()),
+/// Take the sidecar lock, retrying a wait interrupted by a signal.
+fn lock_exclusive(lock_file: &File) -> Result<(), SinkError> {
+    loop {
+        match lock_file.lock() {
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            result => return result.map_err(|err| SinkError::new(err.to_string())),
         }
     }
 }
 
-fn open_append(path: &Path) -> Result<BufWriter<File>, SinkError> {
+/// `write_all` that also reports how many bytes reached the file before an error.
+fn write_counted(file: &mut File, bytes: &[u8]) -> (usize, std::io::Result<()>) {
+    let mut written = 0;
+    while written < bytes.len() {
+        match file.write(&bytes[written..]) {
+            Ok(0) => return (written, Err(ErrorKind::WriteZero.into())),
+            Ok(count) => written += count,
+            Err(err) if err.kind() == ErrorKind::Interrupted => {}
+            Err(err) => return (written, Err(err)),
+        }
+    }
+    (written, Ok(()))
+}
+
+fn open_append(path: &Path) -> Result<File, SinkError> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);
     // Log files routinely carry sensitive data (that is why redaction exists),
@@ -438,10 +449,9 @@ fn open_append(path: &Path) -> Result<BufWriter<File>, SinkError> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let file = options
+    options
         .open(path)
-        .map_err(|err| SinkError::new(err.to_string()))?;
-    Ok(BufWriter::new(file))
+        .map_err(|err| SinkError::new(err.to_string()))
 }
 
 fn open_lock(path: &Path) -> Result<File, SinkError> {

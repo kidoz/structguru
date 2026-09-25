@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import signal
 import subprocess
 import sys
 import textwrap
@@ -136,3 +137,126 @@ def test_native_string_writer_counts_sink_errors_without_stopping() -> None:
     assert writer.metrics()["written"] == 1
     assert writer.metrics()["sink_errors"] == 2
     writer.close()
+
+
+def test_native_file_writer_resolves_relative_path_at_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.chdir(first)
+    writer = rust._NativeStringWriter(
+        8, file_path="app.log", file_max_bytes=12, file_backup_count=1
+    )
+    monkeypatch.chdir(second)
+    for message in ("one\n", "two after chdir\n", "three\n"):
+        assert writer.try_enqueue(message)
+        writer.flush()
+    writer.close()
+
+    assert writer.metrics()["sink_errors"] == 0
+    assert sorted(path.name for path in second.iterdir()) == []
+    assert (first / "app.log").read_text() == "three\n"
+    assert (first / "app.log.1").read_text() == "two after chdir\n"
+
+
+@pytest.mark.parametrize(("max_bytes", "backup_count"), [(0, 5), (1 << 20, 0)])
+def test_native_file_writer_follows_external_rotation_without_rotation_enabled(
+    tmp_path: Path, max_bytes: int, backup_count: int
+) -> None:
+    path = tmp_path / "app.log"
+    writer = rust._NativeStringWriter(
+        8, file_path=str(path), file_max_bytes=max_bytes, file_backup_count=backup_count
+    )
+    assert writer.try_enqueue("before\n")
+    writer.flush()
+    path.rename(tmp_path / "app.log.rotated")  # logrotate "create" mode
+    assert writer.try_enqueue("after rename\n")
+    writer.flush()
+    (tmp_path / "app.log.rotated").unlink()
+    path.unlink()  # an operator deletes the active log
+    assert writer.try_enqueue("after delete\n")
+    writer.flush()
+    writer.close()
+
+    assert path.read_text() == "after delete\n"
+    assert writer.metrics()["written"] == 3
+    assert writer.metrics()["sink_errors"] == 0
+
+
+@pytest.mark.skipif(not hasattr(signal, "pthread_sigmask"), reason="requires POSIX signals")
+def test_native_file_writer_retries_lock_wait_interrupted_by_a_signal(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+            import fcntl, json, os, signal, sys, time
+            import structguru as sg
+
+            path = os.path.join(sys.argv[1], "app.log")
+            sg.configure(service="svc", file_path=path)
+            # A Python handler installs without SA_RESTART; blocking the signal
+            # here routes it to the writer thread, which waits in flock().
+            signal.signal(signal.SIGUSR1, lambda *args: None)
+            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
+            other = os.open(path + ".lock", os.O_RDWR)
+            fcntl.flock(other, fcntl.LOCK_EX)  # another process holds the lock
+            sg.logger.info("victim")
+            time.sleep(0.2)
+            os.kill(os.getpid(), signal.SIGUSR1)
+            time.sleep(0.2)
+            fcntl.flock(other, fcntl.LOCK_UN)
+            sg.flush()
+            metrics = sg.writer_metrics()
+            assert (metrics["written"], metrics["sink_errors"]) == (1, 0), metrics
+            assert [json.loads(line)["message"] for line in open(path)] == ["victim"]
+            sg.shutdown()
+        """),
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGXFSZ"), reason="requires RLIMIT_FSIZE")
+def test_native_file_writer_never_writes_failed_records_later(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+            import os, resource, signal, sys
+            import structguru._rust as rust
+
+            path = os.path.join(sys.argv[1], "app.log")
+            writer = rust._NativeStringWriter(8, file_path=path)
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+            # Writes past 25 bytes fail with EFBIG; the third record is torn.
+            resource.setrlimit(resource.RLIMIT_FSIZE, (25, resource.RLIM_INFINITY))
+            for i in range(5):
+                assert writer.try_enqueue(f"record {i:02d}\\n")
+                writer.flush()
+            failing = writer.metrics()
+            unlimited = resource.RLIM_INFINITY
+            resource.setrlimit(resource.RLIMIT_FSIZE, (unlimited, unlimited))
+            assert writer.try_enqueue("recovered\\n")
+            writer.flush()
+            writer.close()
+            metrics = writer.metrics()
+            assert (failing["written"], failing["sink_errors"]) == (2, 3), failing
+            assert (metrics["written"], metrics["sink_errors"]) == (3, 3), metrics
+            # The torn fragment ends its own line; failed records never reappear.
+            assert open(path).read() == "record 00\\nrecord 01\\nrecor\\nrecovered\\n"
+        """),
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
