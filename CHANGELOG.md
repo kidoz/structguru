@@ -30,6 +30,10 @@ All notable changes to this project are documented here. The format is based on
   Diagnostics bypass redaction by design, so a failing sink whose exception
   embedded the record it was writing could dump the full unredacted record
   into a warning.
+- The Sentry how-to no longer reads as a redaction guarantee: the raw
+  exception passed to `sentry_sdk.capture_exception` lets the SDK attach
+  unredacted frame locals unless it is initialised with
+  `include_local_variables=False`, and the docs now say so.
 
 ## [1.4.0] - 2026-09-25
 

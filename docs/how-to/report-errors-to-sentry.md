@@ -63,10 +63,25 @@ Records at or above `event_level` without an exception are then sent through
 
 ## Keep secrets out of Sentry
 
-Nothing extra is needed. The message and fields Sentry receives are the ones
-the renderer has already redacted with your `sensitive_keys` and
-`sensitive_patterns`. The raw exception object is passed only to
-`capture_exception`. See [Redact sensitive data](redact-sensitive-data.md).
+Everything structguru renders is redacted before export: the message and
+fields Sentry receives are the ones the renderer has already redacted with
+your `sensitive_keys` and `sensitive_patterns`. The one raw object that
+reaches Sentry is the exception. `SentryProcessor` passes the raw exception
+object to `sentry_sdk.capture_exception`, and what the SDK then extracts from
+it is governed by the SDK's own settings, not structguru's redaction. By
+default the SDK attaches the raw, unredacted local variables of every stack
+frame to the event (`include_local_variables=True`). Turn that off when you
+initialize the SDK:
+
+```python
+sentry_sdk.init(
+    dsn="https://<key>@<org>.ingest.sentry.io/<project>",
+    include_local_variables=False,
+)
+```
+
+For finer control, scrub the event in the SDK's `before_send` hook. See
+[Redact sensitive data](redact-sensitive-data.md).
 
 ## Avoid duplicate events with the stdlib bridge
 

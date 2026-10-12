@@ -87,7 +87,11 @@ With the defaults, `logger.error("...")` without an exception produces only a
 breadcrumb, and `logger.exception("...")` produces a captured event. `exc_info`
 may be `True` (resolved with `sys.exc_info()`), an exception instance, or a
 `(type, value, traceback)` tuple; the raw exception is used only for
-`capture_exception()`. The processor returns `event_dict` unchanged.
+`capture_exception()`. What the SDK extracts from that exception, such as
+frame locals, is governed by the SDK's own settings, outside structguru's
+redaction (see
+[Keep secrets out of Sentry](../../how-to/report-errors-to-sentry.md#keep-secrets-out-of-sentry)).
+The processor returns `event_dict` unchanged.
 
 ## API
 
