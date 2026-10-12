@@ -121,13 +121,15 @@ fn apply_patterns(text: &str, patterns: &[RedactionPattern], replacement: &str) 
     }
 }
 
-/// Internal marker set by `RedactingProcessor`, mirrored from
-/// `structguru.redaction.REDACTED_MARKER_KEY`. `strip_redaction_marker`
-/// removes it before rendering on the standard path; drop it here too so a
-/// user field of the same name never reaches the output.
-const REDACTED_MARKER_KEY: &str = "_structguru_redacted";
+/// Internal marker set by `RedactingProcessor`. This constant is the single
+/// source of truth: `structguru.redaction.REDACTED_MARKER_KEY` is built from
+/// it at import. `strip_redaction_marker` removes it before rendering on the
+/// standard path; drop it here too so a user field of the same name never
+/// reaches the output.
+pub const REDACTED_MARKER_KEY: &str = "_structguru_redacted";
 
-/// Default sensitive keys, mirroring `structguru.redaction.DEFAULT_SENSITIVE_KEYS`.
+/// Default sensitive keys. This constant is the single source of truth:
+/// `structguru.redaction.DEFAULT_SENSITIVE_KEYS` is built from it at import.
 pub const DEFAULT_SENSITIVE_KEYS: &[&str] = &[
     "password",
     "passwd",

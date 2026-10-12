@@ -42,6 +42,20 @@ fn level_table() -> Vec<(&'static str, u8)> {
     structguru_core::LEVEL_TABLE.to_vec()
 }
 
+/// The core's default sensitive keys; `structguru.redaction` builds
+/// `DEFAULT_SENSITIVE_KEYS` from this list at import.
+#[pyfunction]
+fn _default_sensitive_keys() -> Vec<&'static str> {
+    structguru_core::DEFAULT_SENSITIVE_KEYS.to_vec()
+}
+
+/// The core's redaction marker key; `structguru.redaction` builds
+/// `REDACTED_MARKER_KEY` from it at import.
+#[pyfunction]
+fn _redacted_marker_key() -> &'static str {
+    structguru_core::REDACTED_MARKER_KEY
+}
+
 #[pyfunction]
 fn _convert_value_debug<'py>(
     py: Python<'py>,
@@ -1613,6 +1627,8 @@ fn rust_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(syslog_severity, module)?)?;
     module.add_function(wrap_pyfunction!(normalized_syslog_severity, module)?)?;
     module.add_function(wrap_pyfunction!(level_table, module)?)?;
+    module.add_function(wrap_pyfunction!(_default_sensitive_keys, module)?)?;
+    module.add_function(wrap_pyfunction!(_redacted_marker_key, module)?)?;
     module.add_function(wrap_pyfunction!(_convert_value_debug, module)?)?;
     module.add_function(wrap_pyfunction!(_conversion_stats, module)?)?;
     module.add_function(wrap_pyfunction!(_render_json_debug, module)?)?;

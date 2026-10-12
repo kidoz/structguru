@@ -104,6 +104,29 @@ def test_native_redaction_applied() -> None:
     assert native["user"] == "alice"
 
 
+def test_default_sensitive_keys_match_native_redaction() -> None:
+    """Every key in the Python-visible default set is redacted natively.
+
+    Guards the single-sourcing of ``DEFAULT_SENSITIVE_KEYS``: the Rust core
+    owns the list and ``structguru.redaction`` builds from it at import, so
+    this fails if the two ever drift.
+    """
+    assert isinstance(structguru.DEFAULT_SENSITIVE_KEYS, frozenset)
+    kwargs = dict.fromkeys(sorted(structguru.DEFAULT_SENSITIVE_KEYS), "canary")
+    native = _native_json({}, "info", "m", **kwargs)
+    for key in structguru.DEFAULT_SENSITIVE_KEYS:
+        assert native[key] == "[REDACTED]"
+
+
+def test_redacted_marker_key_is_stripped_from_output() -> None:
+    """A field carrying the marker key never reaches the rendered record."""
+    from structguru.redaction import REDACTED_MARKER_KEY
+
+    native = _native_json({}, "info", "m", **{REDACTED_MARKER_KEY: True, "user": "alice"})
+    assert REDACTED_MARKER_KEY not in native
+    assert native["user"] == "alice"
+
+
 def test_native_brace_formatting_consumes_kwarg() -> None:
     native = _native_json({}, "info", "hi {name}", name="world", extra=1)
     assert native["message"] == "hi world"
