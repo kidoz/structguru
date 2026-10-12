@@ -57,8 +57,10 @@ clean: ## Remove build artifacts and caches
 build: clean ## Build sdist and wheel
 	uv build
 
-publish-test: build ## Publish to TestPyPI
+# Escape hatches only: the canonical publish path is the wheels.yml workflow
+# (Trusted Publishing). Local publishes must still pass the full quality gate.
+publish-test: check build ## Publish to TestPyPI
 	uv publish --publish-url https://test.pypi.org/legacy/
 
-publish: build ## Publish to PyPI
+publish: check build ## Publish to PyPI
 	uv publish
