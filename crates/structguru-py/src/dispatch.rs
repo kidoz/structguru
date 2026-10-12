@@ -214,7 +214,7 @@ const DELIVERY_BATCH: usize = 64;
 const MAX_CACHED_LEVELS: usize = 64;
 
 /// Seconds from Python into a stall bound; `None` waits without limit.
-fn stall_duration(seconds: Option<f64>) -> Option<Duration> {
+pub(crate) fn stall_duration(seconds: Option<f64>) -> Option<Duration> {
     seconds.map(|s| Duration::try_from_secs_f64(s.max(0.0)).unwrap_or(Duration::MAX))
 }
 

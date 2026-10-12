@@ -4,6 +4,7 @@ import signal
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -260,3 +261,22 @@ def test_native_file_writer_never_writes_failed_records_later(tmp_path: Path) ->
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_flush_stall_timeout_abandons_a_writer_that_makes_no_progress() -> None:
+    # A paused worker never drains: flush must give up within the bound, report
+    # the undrained record, and leave close() unable to hang on a stale join.
+    writer = rust._NativeStringWriter(8, paused=True)
+    try:
+        assert writer.try_enqueue("stuck")
+        began = time.monotonic()
+        assert writer.flush(stall_timeout=0.2) == 1
+        assert time.monotonic() - began < 3
+        metrics = writer.metrics()
+        assert metrics["closed"] is True
+        assert metrics["worker_done"] is True
+        assert not writer.try_enqueue("late")
+        # The abandonment already leaked the thread handle; close cannot join.
+        assert writer.close() == 0
+    finally:
+        writer.close()

@@ -78,9 +78,9 @@ class _NativeWriter(Protocol):
         created: float | None = None,
     ) -> tuple[int, str, str | None]: ...
 
-    def flush(self) -> None: ...
+    def flush(self, stall_timeout: float | None = None) -> int: ...
 
-    def close(self) -> None: ...
+    def close(self, stall_timeout: float | None = None) -> int: ...
 
     def abandon(self) -> None: ...
 
@@ -289,6 +289,7 @@ _drop_count = 0
 _stream_error_count = 0
 # A callable sink that makes no progress for this long during flush() or
 # shutdown() is abandoned with a warning instead of blocking the process.
+# The same bound applies to the native writer's drain.
 _CALLABLE_STALL_TIMEOUT = 10.0
 # Largest level number handed to the callable dispatcher (a signed 64-bit int).
 _MAX_LEVELNO = 2**63 - 1
@@ -843,14 +844,14 @@ def _apply_settings(settings: Settings, *, expected: _RuntimeState | None = None
             _runtime = new_runtime
             _lifecycle_generation += 1
     if stale:
-        new_writer.close()
+        _note_writer_abandoned(new_writer.close(stall_timeout=_CALLABLE_STALL_TIMEOUT))
         return False
 
     # Closing a retired writer is safe while an in-flight logger still owns its
     # snapshot: the Rust writer rejects a late enqueue instead of invalidating the
     # Python object. No record can observe a partially updated configuration.
     if old_runtime is not None:
-        old_runtime.writer.close()
+        _note_writer_abandoned(old_runtime.writer.close(stall_timeout=_CALLABLE_STALL_TIMEOUT))
     _sync_callable_dispatcher()
 
     _register_lifecycle_hooks()
@@ -996,7 +997,7 @@ def shutdown() -> None:
         _runtime = None
         _lifecycle_generation += 1
     if old_runtime is not None:
-        old_runtime.writer.close()
+        _note_writer_abandoned(old_runtime.writer.close(stall_timeout=_CALLABLE_STALL_TIMEOUT))
     _sync_callable_dispatcher()
 
 
@@ -1171,6 +1172,16 @@ def _note_abandoned(count: int) -> None:
         )
 
 
+def _note_writer_abandoned(count: int) -> None:
+    """Warn when a stalled native sink forced the writer to abandon records."""
+    if count:
+        _warn(
+            f"structguru abandoned {count} native record(s): the writer's sink made "
+            f"no progress for {_CALLABLE_STALL_TIMEOUT:g}s; the writer is disabled",
+            stacklevel=3,
+        )
+
+
 def _reset_drop_count() -> None:
     """Reset the drop and stream error counters (used by tests)."""
     global _drop_count, _stream_error_count
@@ -1189,15 +1200,17 @@ def flush() -> None:
     guarantee — before asserting on output in a test, or at a checkpoint where
     losing buffered records would matter.
 
-    Not needed for normal shutdown: ``shutdown``, reconfiguration, fork, and
-    interpreter exit all drain automatically.
+    A sink that makes no progress for ``_CALLABLE_STALL_TIMEOUT`` is abandoned
+    with a warning rather than blocking the caller forever. Not needed for
+    normal shutdown: ``shutdown``, reconfiguration, fork, and interpreter exit
+    all drain automatically.
     """
     # Callbacks may log to the native writer or replace it by reconfiguring.
     # Drain them first, then flush the resulting runtime's writer.
     _note_abandoned(_callable_dispatcher.flush(stall_timeout=_CALLABLE_STALL_TIMEOUT))
     state = current_runtime()
     if state is not None:
-        state.writer.flush()
+        _note_writer_abandoned(state.writer.flush(stall_timeout=_CALLABLE_STALL_TIMEOUT))
 
 
 # Pre-1.0.5 name, kept as an alias: `flush` is the public spelling.

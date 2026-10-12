@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SinkError {
@@ -787,28 +788,39 @@ impl StringWriter {
     /// Records other threads enqueue afterwards are not waited for, so a flush
     /// under sustained load is bounded by the queue depth instead of waiting
     /// for a moment when the queue happens to be empty.
-    pub fn flush(&self) {
+    ///
+    /// With `stall`, a worker that makes no progress for that long (a sink
+    /// whose write never returns) is abandoned and the number of undrained
+    /// records returned; `None` waits without limit. See [`Self::close`].
+    pub fn flush(&self, stall: Option<Duration>) -> u64 {
         let mut state = self.lock_state();
         let target = state.counters.enqueued;
         if state.flushed_through >= target {
-            return;
+            return 0;
         }
         state.flush_target = Some(state.flush_target.map_or(target, |t| t.max(target)));
-        while state.flushed_through < target && !state.worker_done {
-            state = self
-                .shared
-                .drained
-                .wait(state)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (mut state, drained) = self.wait_drained(state, stall, |state| {
+            state.flushed_through >= target || state.worker_done
+        });
+        if drained {
+            return 0;
         }
+        self.abandon_stalled(&mut state)
     }
 
-    pub fn close(&self) {
+    /// Close the writer, waiting for the worker to drain the queue.
+    ///
+    /// With `stall`, a worker that makes no progress for that long is
+    /// abandoned: the writer rejects new records, blocked producers are
+    /// released, the stuck thread's handle is leaked (joining it would hang;
+    /// [`Self::abandon`] documents why leaking is the safe detach), and the
+    /// number of undrained records is returned. `None` waits without limit.
+    pub fn close(&self, stall: Option<Duration>) -> u64 {
         // Abandoned (post-fork) writers have no live worker thread to drain or
         // join, and their inherited state mutex may be permanently locked — never
         // touch it. `Drop` leaks the stale JoinHandle for the same reason.
         if self.abandoned.load(Ordering::Acquire) {
-            return;
+            return 0;
         }
         {
             let mut state = self.lock_state();
@@ -817,6 +829,12 @@ impl StringWriter {
             self.shared.space.notify_all(); // wake blocked producers so they see closed
         }
 
+        let state = self.lock_state();
+        let (mut state, done) = self.wait_drained(state, stall, |state| state.worker_done);
+        if !done {
+            return self.abandon_stalled(&mut state);
+        }
+        drop(state);
         let worker = self
             .worker
             .lock()
@@ -825,6 +843,75 @@ impl StringWriter {
         if let Some(worker) = worker {
             let _ = worker.join();
         }
+        0
+    }
+
+    /// Wait on `drained` until `done(state)`, or until the worker's completed
+    /// count has not advanced for `stall` (`None`: no limit). Returns the
+    /// guard and whether `done` was reached.
+    fn wait_drained<'a>(
+        &self,
+        mut state: MutexGuard<'a, WorkerState>,
+        stall: Option<Duration>,
+        done: impl Fn(&WorkerState) -> bool,
+    ) -> (MutexGuard<'a, WorkerState>, bool) {
+        // A limit beyond the clock's range (an infinite timeout) is no limit.
+        let deadline_after = |now: Instant| stall.and_then(|limit| now.checked_add(limit));
+        let mut last = state.counters.completed;
+        let mut deadline = deadline_after(Instant::now());
+        while !done(&state) {
+            match deadline {
+                Some(at) => {
+                    let now = Instant::now();
+                    if now >= at {
+                        return (state, false);
+                    }
+                    let (next, _) = self
+                        .shared
+                        .drained
+                        .wait_timeout(state, at - now)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state = next;
+                    let current = state.counters.completed;
+                    if current != last {
+                        last = current;
+                        deadline = deadline_after(Instant::now());
+                    }
+                }
+                None => {
+                    state = self
+                        .shared
+                        .drained
+                        .wait(state)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+            }
+        }
+        (state, true)
+    }
+
+    /// Give up on a worker that stopped making progress. The writer stops
+    /// accepting records and every waiter is woken; the stuck thread's handle
+    /// is leaked so no later close can join it. Returns the undrained count.
+    fn abandon_stalled(&self, state: &mut WorkerState) -> u64 {
+        state.closed = true;
+        state.worker_done = true;
+        state.flush_target = None;
+        let undrained = state.counters.enqueued - state.counters.completed;
+        self.shared.available.notify_all();
+        self.shared.drained.notify_all();
+        self.shared.space.notify_all();
+        // Lock order: `worker` is only ever taken while holding no state lock
+        // or (here) after it, never the reverse.
+        let worker = self
+            .worker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(worker) = worker {
+            std::mem::forget(worker);
+        }
+        undrained
     }
 
     pub fn resume(&self) {
@@ -887,7 +974,7 @@ impl Drop for StringWriter {
             }
             return;
         }
-        self.close();
+        let _ = self.close(None);
     }
 }
 
@@ -1022,14 +1109,14 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel();
         let flushing = Arc::clone(&writer);
         let thread = thread::spawn(move || {
-            flushing.flush();
+            flushing.flush(None);
             done_tx.send(()).unwrap();
         });
         let returned_early = done_rx.recv_timeout(Duration::from_millis(50)).is_ok();
         release_tx.send(()).unwrap();
         thread.join().unwrap();
         let errors = writer.metrics().sink_errors;
-        writer.close();
+        writer.close(None);
         assert!(!returned_early, "flush returned before the sink finished");
         assert_eq!(in_flight, 1);
         assert_eq!(errors, 1);
@@ -1063,7 +1150,7 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel();
         let flushing = Arc::clone(&writer);
         let thread = thread::spawn(move || {
-            flushing.flush();
+            flushing.flush(None);
             done_tx.send(()).unwrap();
         });
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -1082,13 +1169,137 @@ mod tests {
         let metrics = writer.metrics();
         token_tx.send(()).unwrap();
         thread.join().unwrap();
-        writer.close();
+        writer.close(None);
         assert!(
             returned,
             "flush waited for a record enqueued after it began"
         );
         assert_eq!(metrics.written, 2);
         assert_eq!(metrics.enqueued, 3);
+    }
+
+    /// A sink whose `write` never returns must not hang `flush` past the
+    /// stall bound: the flush gives up, abandons the writer, and reports the
+    /// undrained record; a later `close` returns immediately because the
+    /// stuck thread's handle was already leaked.
+    #[test]
+    fn flush_abandons_a_stalled_sink_within_the_bound() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        struct StuckSink {
+            entered: mpsc::Sender<()>,
+        }
+        impl StringSink for StuckSink {
+            fn write(&mut self, _: String) -> Result<(), SinkError> {
+                let _ = self.entered.send(());
+                loop {
+                    thread::park();
+                }
+            }
+        }
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let writer = StringWriter::with_boxed_sink(
+            8,
+            Box::new(StuckSink {
+                entered: entered_tx,
+            }),
+        );
+        writer.try_enqueue("record".into()).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let began = Instant::now();
+        let abandoned = writer.flush(Some(Duration::from_millis(100)));
+        assert_eq!(abandoned, 1, "the undrained record must be reported");
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "flush hung on the stalled sink"
+        );
+        let metrics = writer.metrics();
+        assert!(metrics.worker_done);
+        assert!(metrics.closed);
+        // The stalled thread's handle was leaked, so close cannot join it.
+        let began = Instant::now();
+        assert_eq!(writer.close(Some(Duration::from_millis(100))), 0);
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "close hung on the stalled sink"
+        );
+        // Dropping the writer must not join the leaked thread either.
+        drop(writer);
+    }
+
+    /// `close` itself is bounded: with a stalled sink it abandons the worker,
+    /// leaks the handle, and returns the undrained count instead of joining
+    /// forever.
+    #[test]
+    fn close_abandons_a_stalled_sink_within_the_bound() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        struct StuckSink {
+            entered: mpsc::Sender<()>,
+        }
+        impl StringSink for StuckSink {
+            fn write(&mut self, _: String) -> Result<(), SinkError> {
+                let _ = self.entered.send(());
+                loop {
+                    thread::park();
+                }
+            }
+        }
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let writer = StringWriter::with_boxed_sink(
+            8,
+            Box::new(StuckSink {
+                entered: entered_tx,
+            }),
+        );
+        writer.try_enqueue("record".into()).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let began = Instant::now();
+        let abandoned = writer.close(Some(Duration::from_millis(100)));
+        assert_eq!(abandoned, 1, "the undrained record must be reported");
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "close hung on the stalled sink"
+        );
+        let metrics = writer.metrics();
+        assert!(metrics.worker_done);
+        assert!(metrics.closed);
+        // Idempotent, and never joins the leaked thread.
+        assert_eq!(writer.close(Some(Duration::from_millis(100))), 0);
+        drop(writer);
+    }
+
+    /// A bounded flush on a worker that keeps making progress waits for the
+    /// records it targeted: the stall deadline resets on every completion.
+    #[test]
+    fn bounded_flush_waits_while_the_worker_progresses() {
+        use std::time::{Duration, Instant};
+
+        struct SlowSink;
+        impl StringSink for SlowSink {
+            fn write(&mut self, _: String) -> Result<(), SinkError> {
+                thread::sleep(Duration::from_millis(60));
+                Ok(())
+            }
+        }
+
+        let writer = StringWriter::with_boxed_sink(8, Box::new(SlowSink));
+        for i in 0..3 {
+            writer.try_enqueue(format!("record {i}")).unwrap();
+        }
+        // Each write takes 60ms; the bound is 150ms of *no progress*, so the
+        // ~180ms total drain must complete without abandonment.
+        let began = Instant::now();
+        assert_eq!(writer.flush(Some(Duration::from_millis(150))), 0);
+        assert!(began.elapsed() >= Duration::from_millis(150));
+        assert_eq!(writer.metrics().written, 3);
+        assert_eq!(writer.close(None), 0);
     }
 
     #[derive(Clone, Default)]
@@ -1146,8 +1357,8 @@ mod tests {
         assert_eq!(metrics.enqueued, 1);
         assert_eq!(metrics.dropped, 0, "a full queue is not a drop here");
         writer.resume();
-        writer.flush();
-        writer.close();
+        writer.flush(None);
+        writer.close(None);
     }
 
     #[test]
@@ -1158,7 +1369,7 @@ mod tests {
             writer.try_enqueue_with_reason("overflow".into()),
             Err(EnqueueError::Full("overflow".into()))
         );
-        writer.close();
+        writer.close(None);
         assert_eq!(
             writer.try_enqueue_with_reason("retired".into()),
             Err(EnqueueError::Closed("retired".into()))
@@ -1173,7 +1384,7 @@ mod tests {
 
         assert_eq!(writer.try_enqueue("first".to_owned()), Ok(()));
         assert_eq!(writer.try_enqueue("second".to_owned()), Ok(()));
-        writer.flush();
+        writer.flush(None);
 
         assert_eq!(writer.messages(), vec!["first", "second"]);
         let metrics = writer.metrics();
@@ -1190,7 +1401,7 @@ mod tests {
         for i in 0..50 {
             writer.enqueue_blocking(format!("m{i}")).unwrap();
         }
-        writer.flush();
+        writer.flush(None);
         let metrics = writer.metrics();
         assert_eq!(metrics.enqueued, 50);
         assert_eq!(metrics.dropped, 0);
@@ -1212,7 +1423,7 @@ mod tests {
         assert_eq!(metrics.dropped, 1);
         assert_eq!(metrics.depth, 1);
 
-        writer.close();
+        writer.close(None);
         assert_eq!(writer.messages(), vec!["kept"]);
     }
 
@@ -1222,7 +1433,7 @@ mod tests {
         writer.try_enqueue("x".to_owned()).unwrap();
         writer.abandon();
         // close() must not touch the state mutex or join the worker thread.
-        writer.close();
+        writer.close(None);
         let metrics = writer.metrics();
         assert!(!metrics.closed, "abandoned close must not mark closed");
         // Drop at end of scope must also be a no-op (detaches, never joins).
@@ -1233,8 +1444,8 @@ mod tests {
         let writer = StringWriter::new(0);
 
         assert_eq!(writer.try_enqueue("before close".to_owned()), Ok(()));
-        writer.close();
-        writer.close();
+        writer.close(None);
+        writer.close(None);
 
         assert_eq!(
             writer.try_enqueue("after close".to_owned()),
@@ -1268,7 +1479,7 @@ mod tests {
 
         let parent = StringWriter::new_null(8);
         assert_eq!(parent.try_enqueue("parent".to_owned()), Ok(()));
-        parent.flush();
+        parent.flush(None);
 
         // SAFETY: the child touches only this writer (abandon, then drop), spawns
         // fresh workers, and leaves through `_exit` without running destructors.
@@ -1283,8 +1494,8 @@ mod tests {
             let closed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 for child in &children {
                     assert_eq!(child.try_enqueue("child".to_owned()), Ok(()));
-                    child.flush();
-                    child.close();
+                    child.flush(None);
+                    child.close(None);
                 }
             }));
             // SAFETY: `_exit` skips destructors and atexit handlers, which is
@@ -1324,7 +1535,7 @@ mod tests {
         assert_eq!(writer.try_enqueue("first".to_owned()), Ok(()));
         assert_eq!(writer.try_enqueue("second".to_owned()), Ok(()));
         assert_eq!(writer.try_enqueue("third".to_owned()), Ok(()));
-        writer.flush();
+        writer.flush(None);
 
         assert_eq!(writer.messages(), vec!["first"]);
         let metrics = writer.metrics();
@@ -1347,7 +1558,7 @@ mod tests {
 
         assert_eq!(writer.try_enqueue("first\n".to_owned()), Ok(()));
         assert_eq!(writer.try_enqueue("second".to_owned()), Ok(()));
-        writer.flush();
+        writer.flush(None);
 
         assert_eq!(output.contents(), b"first\nsecond");
         let metrics = writer.metrics();
@@ -1370,7 +1581,7 @@ mod tests {
         assert_eq!(writer.try_enqueue("first".to_owned()), Ok(()));
         assert_eq!(writer.try_enqueue("second".to_owned()), Ok(()));
         assert_eq!(writer.try_enqueue("third".to_owned()), Ok(()));
-        writer.flush();
+        writer.flush(None);
 
         assert_eq!(output.contents(), b"first");
         let metrics = writer.metrics();
@@ -1651,7 +1862,7 @@ mod tests {
         let outer = MultiSink::new(vec![Box::new(inner), Box::new(b)]);
         let writer = StringWriter::with_boxed_sink(8, Box::new(outer));
         writer.enqueue_blocking("survives".to_owned()).unwrap();
-        writer.close();
+        writer.close(None);
         assert_eq!(handle.messages(), vec!["survives"]);
         assert_eq!(writer.metrics().written, 1);
         assert_eq!(writer.metrics().sink_errors, 2);

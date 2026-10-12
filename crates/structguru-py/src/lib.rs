@@ -1093,12 +1093,27 @@ impl NativeStringWriter {
         Ok((outcome.code(), line, json))
     }
 
-    fn flush(&self, py: Python<'_>) {
-        py.detach(|| self.writer.flush());
+    /// Block until every record enqueued before this call has been written
+    /// and the sink flushed.
+    ///
+    /// `stall_timeout` bounds the wait for a sink that stops making progress
+    /// (an unbuffered stdout write to a full pipe with a stopped reader never
+    /// returns); the writer is then abandoned — its stuck thread is leaked,
+    /// never killed — and the number of undrained records is returned, as the
+    /// callable dispatcher's abandonment path does. `None` waits without
+    /// limit.
+    #[pyo3(signature = (stall_timeout=None))]
+    fn flush(&self, py: Python<'_>, stall_timeout: Option<f64>) -> usize {
+        let abandoned = py.detach(|| self.writer.flush(dispatch::stall_duration(stall_timeout)));
+        usize::try_from(abandoned).unwrap_or(usize::MAX)
     }
 
-    fn close(&self, py: Python<'_>) {
-        py.detach(|| self.writer.close());
+    /// Drain and stop the writer; see `flush` for `stall_timeout` and the
+    /// return value. Idempotent.
+    #[pyo3(signature = (stall_timeout=None))]
+    fn close(&self, py: Python<'_>, stall_timeout: Option<f64>) -> usize {
+        let abandoned = py.detach(|| self.writer.close(dispatch::stall_duration(stall_timeout)));
+        usize::try_from(abandoned).unwrap_or(usize::MAX)
     }
 
     fn resume(&self) {

@@ -12,6 +12,14 @@ All notable changes to this project are documented here. The format is based on
   the release gates now test 3.11–3.15, and free-threaded 3.15t wheels join
   the 3.14t ones for Linux x86_64, macOS arm64, and Windows x64.
 
+### Fixed
+
+- `flush()`, `shutdown()`, and reconfiguration no longer block forever when
+  the native writer's sink stops making progress — for example a full stdout
+  pipe whose reader has stopped. A writer stuck for 10 seconds is abandoned
+  with a warning naming the number of undrained records, matching the stall
+  limit callable sinks already had.
+
 ## [1.4.0] - 2026-09-25
 
 ### Added

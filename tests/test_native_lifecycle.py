@@ -326,9 +326,9 @@ def test_final_native_drain_includes_callback_logs(
         def __getattr__(self, name: str):
             return getattr(state.writer, name)
 
-        def flush(self) -> None:
+        def flush(self, stall_timeout: float | None = None) -> int:
             order.append("native flush")
-            state.writer.flush()
+            return state.writer.flush(stall_timeout=stall_timeout)
 
     monkeypatch.setattr(_runtime, "_runtime", replace(state, writer=WriterProbe()))
     structguru.logger.info("outer record")
