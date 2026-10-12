@@ -27,7 +27,7 @@ typecheck: ## Run type checker (mypy strict)
 
 audit: ## Audit locked Python and Rust dependencies
 	uv audit --locked
-	cargo deny --locked check advisories
+	cargo deny --locked check advisories bans licenses
 
 sbom: ## Generate CycloneDX SBOMs for Python and Rust dependencies
 	mkdir -p dist
