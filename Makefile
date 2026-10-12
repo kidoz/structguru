@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install test bench lint format typecheck audit sbom python-check rust-check check clean build publish-test publish
+.PHONY: help install test bench lint format typecheck audit sbom docs python-check rust-check check clean build publish-test publish
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -33,6 +33,9 @@ sbom: ## Generate CycloneDX SBOMs for Python and Rust dependencies
 	mkdir -p dist
 	uv export --quiet --preview-features sbom-export --locked --all-extras --no-dev --format cyclonedx1.5 --output-file dist/structguru-python.cdx.json
 	uv run python scripts/generate_rust_sbom.py --output dist/structguru-rust.cdx.json
+
+docs: ## Build the documentation site (mkdocs strict)
+	uv run mkdocs build --strict
 
 python-check: lint typecheck test ## Run all required Python source quality gates
 
