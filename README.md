@@ -609,7 +609,7 @@ bridge = install_stdlib_bridge_from_env()
 
 - Python 3.11+
 - The compiled Rust extension (shipped as abi3 wheels for Linux/macOS/Windows, plus
-  free-threaded CPython 3.14t wheels for Linux x86_64, macOS arm64, and Windows x64)
+  free-threaded CPython 3.14t/3.15t wheels for Linux x86_64, macOS arm64, and Windows x64)
 
 ## Documentation & Examples
 

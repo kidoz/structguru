@@ -40,13 +40,16 @@ def test_publish_job_depends_on_release_and_supply_chain_gates() -> None:
 
 
 def test_free_threaded_wheels_are_built_and_smoke_tested() -> None:
-    # pip never selects the abi3 wheel on free-threaded CPython, so 3.14t needs
-    # its own version-specific wheels or every install compiles from the sdist.
+    # pip never selects the abi3 wheel on free-threaded CPython, so 3.14t and
+    # 3.15t need their own version-specific wheels or every install compiles
+    # from the sdist.
     workflow = Path(".github/workflows/wheels.yml").read_text(encoding="utf-8")
 
     assert "build-free-threaded:" in workflow
-    assert "uv python install 3.14t" in workflow
+    assert 'ft-python: "3.14t"' in workflow
+    assert 'ft-python: "3.15t"' in workflow
     assert "/opt/python/cp314-cp314t/bin/python" in workflow
+    assert "/opt/python/cp315-cp315t/bin/python" in workflow
     assert "assert not sys._is_gil_enabled()" in workflow
     assert "name: wheels-free-threaded-" in workflow
 

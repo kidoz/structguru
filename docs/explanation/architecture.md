@@ -162,8 +162,8 @@ twice and had to be kept in agreement. With one, redaction guarantees,
 lifecycle semantics, and performance work apply to every record.
 
 The cost is a compiled extension. structguru ships abi3 wheels for Linux,
-macOS, and Windows, and free-threaded CPython 3.14t wheels for Linux x86_64,
-macOS arm64, and Windows x64. Anywhere else, installing from the source
+macOS, and Windows, and free-threaded CPython 3.14t/3.15t wheels for Linux
+x86_64, macOS arm64, and Windows x64. Anywhere else, installing from the source
 distribution needs a Rust toolchain. Importing the package without its
 extension raises `RuntimeError`, and an invalid import-time environment value
 fails the import too. Both are deliberate: when the native runtime is the only
