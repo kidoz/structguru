@@ -3,20 +3,37 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from typing import Any
 
 import pytest
 
-from structguru import _runtime, core
-from structguru.integrations import stdlib as stdlib_integration
-from structguru.integrations.stdlib import StructguruHandler, uninstall_stdlib_bridge
+# Scrub ambient structguru configuration before `import structguru` below can
+# autoconfigure from it. The autouse fixture re-applies the same scrub around
+# every test, and because both edits mutate os.environ in place, subprocess
+# tests that pass env={**os.environ, **environ} inherit the scrubbed
+# environment too.
+_ambient = [name for name in os.environ if name == "LOG_LEVEL" or name.startswith("STRUCTGURU_")]
+for _name in _ambient:
+    del os.environ[_name]
+
+from structguru import _runtime, core  # noqa: E402
+from structguru.integrations import stdlib as stdlib_integration  # noqa: E402
+from structguru.integrations.stdlib import (  # noqa: E402
+    StructguruHandler,
+    uninstall_stdlib_bridge,
+)
 
 
 @pytest.fixture(autouse=True)
 def _reset_logging(monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[misc]
     """Reset root logger handlers and level after each test."""
-    monkeypatch.delenv("STRUCTGURU_STDLIB_DISABLE_EXISTING_LOGGERS", raising=False)
+    # Re-apply the import-time scrub above around every test so a test that
+    # exports structguru variables cannot leak them into the next one.
+    for name in list(os.environ):
+        if name == "LOG_LEVEL" or name.startswith("STRUCTGURU_"):
+            monkeypatch.delenv(name, raising=False)
     root = logging.getLogger()
     original_handlers = list(root.handlers)
     original_level = root.level
