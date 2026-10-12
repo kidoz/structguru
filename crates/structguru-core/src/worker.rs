@@ -978,7 +978,41 @@ impl Drop for StringWriter {
     }
 }
 
+/// Marks the worker done however `worker_loop` exits, a sink panic included,
+/// so flushers and `close()` wake instead of waiting on a dead thread forever.
+struct WorkerExit {
+    shared: Arc<WorkerShared>,
+}
+
+impl Drop for WorkerExit {
+    fn drop(&mut self) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.worker_done {
+            // The normal exit path already reported itself.
+            return;
+        }
+        // A panic in the sink killed the loop. The interrupted operation
+        // counts as a sink error, and the writer closes for good: nothing
+        // will ever drain again, so producers must be rejected and woken
+        // rather than accumulate or wait for space that never frees.
+        state.counters.sink_errors += 1;
+        state.closed = true;
+        state.worker_done = true;
+        state.flush_target = None;
+        self.shared.available.notify_all();
+        self.shared.drained.notify_all();
+        self.shared.space.notify_all();
+    }
+}
+
 fn worker_loop(shared: Arc<WorkerShared>, mut sink: Box<dyn StringSink>) {
+    let _exit = WorkerExit {
+        shared: Arc::clone(&shared),
+    };
     loop {
         let message = {
             let mut state = shared
@@ -1176,6 +1210,42 @@ mod tests {
         );
         assert_eq!(metrics.written, 2);
         assert_eq!(metrics.enqueued, 3);
+    }
+
+    /// A sink whose `write` panics kills the worker thread. The exit guard
+    /// must still mark the worker done, so `flush` and `close` return instead
+    /// of waiting on the dead thread, and producers are rejected instead of
+    /// queueing into a void.
+    #[test]
+    fn panicking_sink_marks_worker_done_and_unblocks_flush_and_close() {
+        use std::time::{Duration, Instant};
+
+        struct PanicSink;
+        impl StringSink for PanicSink {
+            fn write(&mut self, _: String) -> Result<(), SinkError> {
+                panic!("test sink write panicked");
+            }
+        }
+
+        let writer = StringWriter::with_boxed_sink(8, Box::new(PanicSink));
+        writer.try_enqueue("record".into()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !writer.metrics().worker_done {
+            assert!(Instant::now() < deadline, "worker panic never surfaced");
+            thread::sleep(Duration::from_millis(1));
+        }
+        // Must return at once: the guard set worker_done and notified drained.
+        assert_eq!(writer.flush(None), 0);
+        assert_eq!(
+            writer.try_enqueue("late".into()),
+            Err("late".into()),
+            "a dead worker's writer must reject new records"
+        );
+        let metrics = writer.metrics();
+        assert!(metrics.closed);
+        assert_eq!(metrics.sink_errors, 1, "the panicked write is a sink error");
+        // close() joins the dead thread, which must not hang either.
+        assert_eq!(writer.close(None), 0);
     }
 
     /// A sink whose `write` never returns must not hang `flush` past the

@@ -19,6 +19,10 @@ All notable changes to this project are documented here. The format is based on
   pipe whose reader has stopped. A writer stuck for 10 seconds is abandoned
   with a warning naming the number of undrained records, matching the stall
   limit callable sinks already had.
+- A panic inside a native sink no longer kills the writer thread silently,
+  which used to leave `flush()` waiting forever and producers enqueueing into
+  a queue nobody drained. The interruption is counted in `sink_errors`, the
+  writer closes, and blocked flushers and producers wake up.
 
 ## [1.4.0] - 2026-09-25
 
