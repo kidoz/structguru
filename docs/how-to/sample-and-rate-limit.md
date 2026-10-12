@@ -37,8 +37,9 @@ logger.warning("Upstream slow", attempt=attempt)  # limited as one message
 logger.warning("Upstream {n} slow", n=attempt)  # a new message every time: never limited
 ```
 
-The limiter tracks at most 8192 distinct messages and forgets the least recently
-seen one when full.
+The limiter tracks at most 8192 distinct messages. When a new message would
+exceed that, messages with no records inside the window are removed first,
+then the least recently seen tenth of the table.
 
 ## Configure from the environment
 
