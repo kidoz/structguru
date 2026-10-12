@@ -974,7 +974,7 @@ def _report_fork_respawn_failure(exc: Exception) -> None:
     """
     message = (
         "structguru: logging is disabled in this forked process because the log "
-        f"writer could not be restarted: {type(exc).__name__}: {exc}\n"
+        f"writer could not be restarted: {type(exc).__name__}: {_diagnostic_detail(exc)}\n"
     )
     try:
         os.write(2, message.encode("utf-8", "replace"))
@@ -1137,6 +1137,23 @@ def _note_drop() -> None:
         _warn(f"structguru native logging dropped {dropped} record(s): queue full", stacklevel=3)
 
 
+# Diagnostics intentionally bypass redaction, so the exception text they carry
+# is capped instead: a sink exception can embed the record it failed to write.
+_DIAGNOSTIC_DETAIL_LIMIT = 500
+
+
+def _diagnostic_detail(exc: BaseException) -> str:
+    """Return ``str(exc)`` capped at ``_DIAGNOSTIC_DETAIL_LIMIT`` characters."""
+    try:
+        detail = str(exc)
+    except Exception:  # noqa: BLE001 - diagnostics must never break logging
+        return "<unprintable>"
+    if len(detail) > _DIAGNOSTIC_DETAIL_LIMIT:
+        omitted = len(detail) - _DIAGNOSTIC_DETAIL_LIMIT
+        return f"{detail[:_DIAGNOSTIC_DETAIL_LIMIT]}… [{omitted} chars truncated]"
+    return detail
+
+
 def _note_stream_error(exc: BaseException) -> None:
     """Count a synchronous stream sink failure and warn at a bounded rate."""
     global _stream_error_count
@@ -1144,13 +1161,9 @@ def _note_stream_error(exc: BaseException) -> None:
         _stream_error_count += 1
         errors = _stream_error_count
     if errors == 1 or errors % 1000 == 0:
-        try:
-            detail = str(exc)
-        except Exception:  # noqa: BLE001 - diagnostics must never break logging
-            detail = "<unprintable>"
         _warn(
             f"structguru stream sink write failed {errors} time(s), "
-            f"latest {type(exc).__name__}: {detail}",
+            f"latest {type(exc).__name__}: {_diagnostic_detail(exc)}",
             stacklevel=3,
         )
 

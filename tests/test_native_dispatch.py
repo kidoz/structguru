@@ -702,6 +702,35 @@ def test_stall_timeout_beyond_the_clock_range_means_no_limit(stall: float) -> No
     dispatcher.disable()
 
 
+def test_sink_error_diagnostic_caps_exception_detail() -> None:
+    # A sink exception can embed the record it failed to deliver; diagnostics
+    # bypass redaction, so the detail is capped (500 chars + truncation marker).
+    dispatcher = CallableSinkDispatcher()
+    huge = "x" * 5000
+
+    def failing(line: str) -> None:
+        raise ValueError(huge)
+
+    dispatcher.configure([failing], maxsize=8)
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            dispatcher.enqueue("record", 20, overflow="drop")
+            assert dispatcher.flush() == 0
+        diagnostics = [
+            str(warning.message)
+            for warning in caught
+            if "callable sink raised" in str(warning.message)
+        ]
+        assert len(diagnostics) == 1, caught
+        assert "ValueError" in diagnostics[0]
+        assert "x" * 500 in diagnostics[0]
+        assert "… [4500 chars truncated]" in diagnostics[0]
+        assert huge not in diagnostics[0]
+    finally:
+        dispatcher.disable()
+
+
 def test_abandoned_dispatch_stays_disabled_until_the_next_configure() -> None:
     dispatcher = CallableSinkDispatcher()
     entered, release = threading.Event(), threading.Event()

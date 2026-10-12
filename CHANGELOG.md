@@ -24,6 +24,13 @@ All notable changes to this project are documented here. The format is based on
   a queue nobody drained. The interruption is counted in `sink_errors`, the
   writer closes, and blocked flushers and producers wake up.
 
+### Security
+
+- Sink-failure warnings truncate the exception text to 500 characters.
+  Diagnostics bypass redaction by design, so a failing sink whose exception
+  embedded the record it was writing could dump the full unredacted record
+  into a warning.
+
 ## [1.4.0] - 2026-09-25
 
 ### Added
