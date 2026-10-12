@@ -630,10 +630,24 @@ class TestLoggerAddRemove:
     def test_remove_all_closes_handlers(self, tmp_path: Path) -> None:
         configure(service="test", level="DEBUG", stream=io.StringIO())
         log = Logger()
-        log.add(tmp_path / "a.log", level="DEBUG")
-        log.add(tmp_path / "b.log", level="DEBUG")
+        id_a = log.add(tmp_path / "a.log", level="DEBUG")
+        id_b = log.add(tmp_path / "b.log", level="DEBUG")
+        stream_a = log._handlers[id_a].stream  # type: ignore[attr-defined]
+        stream_b = log._handlers[id_b].stream  # type: ignore[attr-defined]
+        assert stream_a is not None and stream_b is not None
+        log.info("native file")
+        _runtime.flush_native()
         log.remove()
-        # handlers dict is cleared, no leaked file descriptors
+        assert log._handlers == {}
+        assert stream_a.closed and stream_b.closed
+        log.info("after remove")
+        _runtime.flush_native()
+        # A closed FileHandler reopens on emit; both files must keep only the
+        # record delivered before removal, proving no handler leaked.
+        for path in (tmp_path / "a.log", tmp_path / "b.log"):
+            assert [json.loads(line)["message"] for line in path.read_text().splitlines()] == [
+                "native file"
+            ]
 
     def test_sink_without_level_accepts_all_levels_on_both_paths(self) -> None:
         # `level=None` documents "all levels". Inheriting the root logger's level
