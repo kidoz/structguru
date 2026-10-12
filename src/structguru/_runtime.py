@@ -306,12 +306,6 @@ def is_native_enabled() -> bool:
     return current_runtime() is not None
 
 
-def is_below_level(method: str, runtime: _RuntimeState | None = None) -> bool:
-    """True when a call at *method* is below the native threshold (drop it)."""
-    state = runtime or current_runtime()
-    return state is None or METHOD_LEVELS.get(method, 20) < state.level_threshold
-
-
 def set_level(level: str | int) -> None:
     """Adjust the native level threshold at runtime (per-process)."""
     global _runtime, _lifecycle_generation
@@ -324,12 +318,6 @@ def set_level(level: str | int) -> None:
                 settings=replace(_runtime.settings, level=level),
             )
             _lifecycle_generation += 1
-
-
-def otel_enabled(runtime: _RuntimeState | None = None) -> bool:
-    """True when OTel trace-context injection is enabled for native mode."""
-    state = runtime or current_runtime()
-    return state is not None and state.otel
 
 
 def sensitive_keys() -> list[str] | None:
@@ -371,31 +359,6 @@ def remove_callable_sink(token: int, *, finalizer: Callable[[], None] | None = N
     )
     _note_abandoned(abandoned)
     return removed
-
-
-def sensitive_patterns() -> list[str] | None:
-    """Custom regex value-patterns for native mode, or None if unset."""
-    state = current_runtime()
-    patterns = state.settings.sensitive_patterns if state is not None else None
-    return list(patterns) if patterns else None
-
-
-def should_render(
-    method: str,
-    message: str,
-    runtime: _RuntimeState | None = None,
-) -> bool:
-    """True when the pre-render filter (sampling/rate-limit) keeps the record.
-
-    Returns ``True`` immediately when no filter is configured, so the default
-    native path pays no extra cost. Mirrors the shape of ``is_below_level``.
-    """
-    state = runtime or current_runtime()
-    if state is None:
-        return False
-    if state.record_filter is None:
-        return True
-    return bool(state.record_filter.allow(message, method))
 
 
 def notify_metrics(
