@@ -755,6 +755,18 @@ def test_forked_child_disables_logging_when_writer_cannot_restart(tmp_path: Path
     assert messages == ["parent", "parent after fork"]
 
 
+def test_fork_restart_diagnostic_omits_exception_text(capfd: pytest.CaptureFixture[str]) -> None:
+    class SensitiveError(OSError):
+        def __str__(self) -> str:
+            raise AssertionError("diagnostics must not stringify exceptions")
+
+    _runtime._report_fork_respawn_failure(SensitiveError("SYNTHETIC_TOKEN"))
+    diagnostic = capfd.readouterr().err
+    assert "logging is disabled in this forked process" in diagnostic
+    assert "SensitiveError" in diagnostic
+    assert "SYNTHETIC_TOKEN" not in diagnostic
+
+
 def test_shutdown_abandons_a_callable_sink_that_never_returns() -> None:
     """A sink stuck forever must not hold shutdown (and interpreter exit) open."""
     result = subprocess.run(

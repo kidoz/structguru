@@ -340,7 +340,8 @@ def test_callable_sink_errors_are_counted_and_reported() -> None:
     assert result.stdout.split() == ["6"]
     # Rate-limited like stream sink failures: the first failure is reported.
     assert result.stderr.count("callable sink raised") == 1, result.stderr
-    assert "ConnectionError: collector down" in result.stderr
+    assert "latest ConnectionError" in result.stderr
+    assert "collector down" not in result.stderr
 
 
 def test_callable_drop_count_survives_add_and_resets_on_configure() -> None:
@@ -437,8 +438,8 @@ def test_log_call_diagnostics_never_raise_under_warnings_as_errors() -> None:
     for diagnostic in (
         "native logging dropped 1 record(s): queue full",
         "callable sinks dropped 1 delivery record(s): queue full",
-        "stream sink write failed 1 time(s), latest OSError: stream down",
-        "callable sink raised 1 time(s), latest ConnectionError: collector down",
+        "stream sink write failed 1 time(s), latest OSError",
+        "callable sink raised 1 time(s), latest ConnectionError",
     ):
         assert diagnostic in result.stderr, result.stderr
 
@@ -573,6 +574,58 @@ def test_stream_sink_write_errors_never_reach_the_caller() -> None:
     # and the loss is visible instead of silent.
     assert [json.loads(line)["message"] for line in rendered] == ["line 0", "line 1", "line 2"]
     assert metrics is not None and metrics["stream_errors"] == 1
+
+
+@pytest.mark.parametrize("destination", ["stream", "callable"])
+def test_sink_error_diagnostics_never_stringify_exception(destination: str) -> None:
+    # Capture real stderr so worker warnings are observed on free-threaded builds.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+                import json, sys
+                import structguru as sg
+                from structguru import _runtime
+
+                destination = sys.argv[1]
+                canary = "REVIEW_SYNTHETIC_TOKEN"
+                stringified = []
+                class SensitiveError(ValueError):
+                    def __str__(self):
+                        stringified.append(True)
+                        return canary
+                def fail(line):
+                    raise SensitiveError(canary)
+                class BadStream:
+                    write = staticmethod(fail)
+
+                sg.configure(
+                    target="memory",
+                    sensitive_patterns=[canary],
+                    stream_sink=BadStream() if destination == "stream" else None,
+                    callable_sinks=[fail] if destination == "callable" else None,
+                )
+                sg.logger.info(canary)
+                sg.flush()
+                assert stringified == [], stringified
+                assert json.loads(_runtime.drain_messages()[0])["message"] == "[REDACTED]"
+                metrics = sg.writer_metrics()
+                counter = "stream_errors" if destination == "stream" else "callable_errors"
+                assert metrics[counter] == 1
+                sg.shutdown()
+            """),
+            destination,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "SensitiveError" in result.stderr
+    assert "1 time(s)" in result.stderr
+    assert "REVIEW_SYNTHETIC_TOKEN" not in result.stderr
+    assert result.stderr.count("UserWarning") == 1
 
 
 def test_callable_sink_stopped_on_disable() -> None:

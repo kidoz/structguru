@@ -955,16 +955,11 @@ impl DispatcherInner {
                 .get_type(py)
                 .name()
                 .map_or_else(|_| "BaseException".to_owned(), |name| name.to_string());
-            let detail = error
-                .value(py)
-                .str()
-                .map_or_else(|_| "<unprintable>".to_owned(), |text| text.to_string());
+            // Exception text can contain credentials and arbitrary __str__
+            // code. Diagnostics bypass record redaction: report only the type.
             warn(
                 py,
-                &format!(
-                    "structguru callable sink raised {errors} time(s), latest {kind}: {}",
-                    cap_diagnostic_detail(&detail)
-                ),
+                &format!("structguru callable sink raised {errors} time(s), latest {kind}"),
                 1,
             );
         }
@@ -979,29 +974,6 @@ impl Drop for DispatcherInner {
             drop(unsafe { Box::from_raw(snapshot) });
         }
     }
-}
-
-/// Longest exception text carried into a diagnostics warning. Diagnostics
-/// bypass redaction, and a sink's exception can embed the record it failed to
-/// deliver, so the text is capped instead of repeated whole — the same cap
-/// `_diagnostic_detail` in `_runtime.py` applies on the Python side.
-const MAX_DIAGNOSTIC_DETAIL: usize = 500;
-
-/// Cap `detail` at `MAX_DIAGNOSTIC_DETAIL` chars, marking how much was cut.
-fn cap_diagnostic_detail(detail: &str) -> String {
-    let total = detail.chars().count();
-    if total <= MAX_DIAGNOSTIC_DETAIL {
-        return detail.to_owned();
-    }
-    let cut = detail
-        .char_indices()
-        .nth(MAX_DIAGNOSTIC_DETAIL)
-        .map_or(detail.len(), |(index, _)| index);
-    format!(
-        "{}… [{} chars truncated]",
-        &detail[..cut],
-        total - MAX_DIAGNOSTIC_DETAIL
-    )
 }
 
 /// Own callable-sink registration, queueing, lifecycle, and metrics.

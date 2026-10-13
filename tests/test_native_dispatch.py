@@ -702,9 +702,8 @@ def test_stall_timeout_beyond_the_clock_range_means_no_limit(stall: float) -> No
     dispatcher.disable()
 
 
-def test_sink_error_diagnostic_caps_exception_detail() -> None:
-    # A sink exception can embed the record it failed to deliver; diagnostics
-    # bypass redaction, so the detail is capped (500 chars + truncation marker).
+def test_sink_error_diagnostic_omits_exception_detail() -> None:
+    # A sink exception can embed credentials; diagnostics never include its text.
     dispatcher = CallableSinkDispatcher()
     huge = "x" * 5000
 
@@ -724,9 +723,7 @@ def test_sink_error_diagnostic_caps_exception_detail() -> None:
         ]
         assert len(diagnostics) == 1, caught
         assert "ValueError" in diagnostics[0]
-        assert "x" * 500 in diagnostics[0]
-        assert "… [4500 chars truncated]" in diagnostics[0]
-        assert huge not in diagnostics[0]
+        assert diagnostics[0] == ("structguru callable sink raised 1 time(s), latest ValueError")
     finally:
         dispatcher.disable()
 

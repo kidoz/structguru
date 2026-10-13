@@ -107,7 +107,9 @@ Three rules keep sink code from turning against the logging system:
 - **Failures stay on the delivery thread.** An exception raised by a sink,
   including `SystemExit` and `KeyboardInterrupt`, is counted in
   `callable_errors`, with a warning for the first and every 1000th, and the
-  thread moves on to the next record.
+  thread moves on to the next record. Sink-failure warnings report the error
+  type and count without stringifying the exception: warning text bypasses
+  record redaction and must not include sensitive exception text.
 - **Lifecycle calls from inside a callback do not wait for it.** A callback
   cannot wait for the thread that is running it. A `shutdown()` requested from
   a callback therefore does not wait for that callback, and logs the callback
