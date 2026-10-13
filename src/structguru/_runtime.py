@@ -20,7 +20,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from types import TracebackType
-from typing import Any, Protocol, Unpack, cast
+from typing import Any, Protocol, TypedDict, Unpack, cast
 
 from structguru._levels import METHOD_LEVELS
 from structguru._native_dispatch import CallableDispatcherProtocol, new_dispatcher
@@ -32,26 +32,42 @@ from structguru.settings import Settings, SettingsChanges, _level_number
 _ACCEPTED, _FULL, _CLOSED = 0, 1, 2
 
 
+class _RuntimeConfig(Protocol):
+    @property
+    def service(self) -> str: ...
+
+    @property
+    def console(self) -> bool: ...
+
+    @property
+    def colors(self) -> bool: ...
+
+    @property
+    def pattern_count(self) -> int: ...
+
+    def redact_patterns(self, text: str) -> str: ...
+
+
+class _NativeFilter(Protocol):
+    def allow(self, key: str, level: int) -> bool: ...
+
+    def is_empty(self) -> bool: ...
+
+    def stats(self) -> dict[str, int]: ...
+
+
+class _ExceptionConfig(TypedDict):
+    include_locals: bool
+    max_frames: int
+    max_local_repr: int
+    sensitive_keys: frozenset[str] | None
+    redact: Callable[[str], str] | None
+
+
 class _NativeWriter(Protocol):
-    def enqueue_outcome(self, message: str, blocking: bool) -> str: ...
-
-    def render_enqueue_json_outcome(
-        self,
-        fields: dict[str, Any],
-        logger: str,
-        level: str,
-        service: str,
-        message: str,
-        blocking: bool,
-        config: Any = None,
-        sensitive_keys: list[str] | None = None,
-        stack: str | None = None,
-        timestamp: str | None = None,
-    ) -> str: ...
-
     def log(
         self,
-        config: Any,
+        config: _RuntimeConfig,
         logger: str,
         level: str,
         message: str,
@@ -65,7 +81,7 @@ class _NativeWriter(Protocol):
 
     def log_capture(
         self,
-        config: Any,
+        config: _RuntimeConfig,
         logger: str,
         level: str,
         message: str,
@@ -90,76 +106,7 @@ class _NativeWriter(Protocol):
 
 
 class _RustModule(Protocol):
-    def normalize_level(self, level: str) -> str: ...
-
-    def syslog_severity(self, canonical_level: str) -> int: ...
-
-    def render_line(
-        self,
-        fields: dict[str, Any],
-        logger: str,
-        level: str,
-        service: str,
-        message: str,
-        timestamp: str | None = None,
-        sensitive_keys: list[str] | None = None,
-        sensitive_patterns: list[str] | None = None,
-        stack: str | None = None,
-        pattern_replacement: str | None = None,
-    ) -> str: ...
-
-    def render_line_with_config(
-        self,
-        fields: dict[str, Any],
-        logger: str,
-        level: str,
-        service: str,
-        message: str,
-        config: Any,
-        timestamp: str | None = None,
-        sensitive_keys: list[str] | None = None,
-        stack: str | None = None,
-    ) -> str: ...
-
-    def render_line_console(
-        self,
-        fields: dict[str, Any],
-        logger: str,
-        level: str,
-        service: str,
-        message: str,
-        colors: bool,
-        timestamp: str | None = None,
-        sensitive_keys: list[str] | None = None,
-        sensitive_patterns: list[str] | None = None,
-        stack: str | None = None,
-        pattern_replacement: str | None = None,
-    ) -> str: ...
-
-    def render_console_with_config(
-        self,
-        fields: dict[str, Any],
-        logger: str,
-        level: str,
-        service: str,
-        message: str,
-        colors: bool,
-        config: Any,
-        timestamp: str | None = None,
-        sensitive_keys: list[str] | None = None,
-        stack: str | None = None,
-    ) -> str: ...
-
-    def validate_patterns(self, patterns: list[str], allow_backtracking: bool = False) -> int: ...
-
     def report_unraisable(self, error: BaseException) -> None: ...
-
-    def RedactionConfig(
-        self,
-        patterns: list[str],
-        replacement: str | None = None,
-        allow_backtracking: bool = False,
-    ) -> Any: ...
 
     def RuntimeConfig(
         self,
@@ -171,7 +118,7 @@ class _RustModule(Protocol):
         console: bool = False,
         colors: bool = False,
         blocking: bool = True,
-    ) -> Any: ...
+    ) -> _RuntimeConfig: ...
 
     def merge_fields(
         self, bound: dict[str, Any], kwargs: dict[str, Any], contextvars: dict[str, Any]
@@ -183,7 +130,7 @@ class _RustModule(Protocol):
         sample_max_level: str | None = ...,
         rate_limit_max: int | None = ...,
         rate_limit_period: float = ...,
-    ) -> Any: ...
+    ) -> _NativeFilter: ...
 
     def _NativeStringWriter(
         self,
@@ -231,25 +178,17 @@ class _RuntimeState:
     writer: _NativeWriter
     # Rust-owned per-record policy: service, redaction keys and compiled
     # patterns, output format and colors, and the queue overflow policy.
-    config: Any
+    config: _RuntimeConfig
     settings: Settings
-    maxsize: int
-    target: str
     overflow: str
-    file_path: str | None
-    file_max_bytes: int
-    file_backup_count: int
-    also_stdout: bool
     level_threshold: int
     otel: bool
-    record_filter: Any
-    exception_config: dict[str, Any] | None
+    record_filter: _NativeFilter | None
+    exception_config: _ExceptionConfig | None
     exception_carets: bool
     metric_processor: Any
     sentry_processor: Any
     stream_sink: Any
-    callable_sinks: tuple[Callable[[str], None], ...]
-    callable_queue_maxsize: int
     # True when a Python hook (OTel enrichment, metric or Sentry processor)
     # needs the merged field mapping before the record is rendered.
     enrich: bool
@@ -261,7 +200,7 @@ class _RuntimeState:
     @property
     def service(self) -> str:
         """Service name rendered into every record (owned by ``config``)."""
-        return cast(str, self.config.service)
+        return self.config.service
 
     @property
     def console(self) -> bool:
@@ -701,46 +640,32 @@ def update(**changes: Unpack[SettingsChanges]) -> None:
             return
 
 
+def _new_writer(settings: Settings) -> _NativeWriter:
+    """Construct a writer from the same settings in setup and fork recovery."""
+    assert _RUST is not None
+    return _RUST._NativeStringWriter(
+        settings.maxsize,
+        target=settings.target,
+        file_path=settings.file_path,
+        file_max_bytes=settings.file_max_bytes,
+        file_backup_count=settings.file_backup_count,
+        also_stdout=settings.also_stdout,
+    )
+
+
 def _apply_settings(settings: Settings, *, expected: _RuntimeState | None = None) -> bool:
     """Build resources before publishing a snapshot; retry stale incremental updates."""
-    service = settings.service
-    maxsize = settings.maxsize
-    target = settings.target
-    overflow = settings.overflow
-    level = settings.level
-    otel = settings.otel
-    sensitive_keys = settings.sensitive_keys
-    sensitive_patterns = settings.sensitive_patterns
-    pattern_replacement = settings.pattern_replacement
-    allow_backtracking_patterns = settings.allow_backtracking_patterns
-    sample_rate = settings.sample_rate
-    sample_max_level = settings.sample_max_level
-    rate_limit_max = settings.rate_limit_max
-    rate_limit_period = settings.rate_limit_period
-    metric_processor = settings.metric_processor
-    sentry_processor = settings.sentry_processor
-    structured_exceptions = settings.structured_exceptions
-    exception_include_locals = settings.exception_include_locals
-    exception_max_frames = settings.exception_max_frames
-    exception_max_local_repr = settings.exception_max_local_repr
-    exception_carets = settings.exception_carets
-    format = settings.format
-    colors = settings.colors
-    file_path = settings.file_path
-    file_max_bytes = settings.file_max_bytes
-    file_backup_count = settings.file_backup_count
-    also_stdout = settings.also_stdout
-    callable_sinks = settings.callable_sinks
-    callable_queue_maxsize = settings.callable_queue_maxsize
-    stream_sink = settings.stream_sink
-
     global _runtime, _lifecycle_generation
     if _RUST is None:
         msg = "native extension is not available"
         raise RuntimeError(msg)
     # Resolve console/colors from the chosen format.
-    new_console = format == "console"
-    new_colors = colors if colors is not None else (sys.stdout.isatty() if new_console else False)
+    new_console = settings.format == "console"
+    new_colors = (
+        settings.colors
+        if settings.colors is not None
+        else (sys.stdout.isatty() if new_console else False)
+    )
 
     # Compile the per-record policy once: service, redaction keys and patterns,
     # output format, overflow. Rust's `regex` guarantees linear-time matching
@@ -750,17 +675,21 @@ def _apply_settings(settings: Settings, *, expected: _RuntimeState | None = None
     # patterns to the bounded backtracking engine instead (validated the same way).
     try:
         new_config = _RUST.RuntimeConfig(
-            service,
-            sensitive_keys=list(sensitive_keys) if sensitive_keys is not None else None,
-            sensitive_patterns=list(sensitive_patterns) if sensitive_patterns else None,
-            pattern_replacement=pattern_replacement,
-            allow_backtracking=allow_backtracking_patterns,
+            settings.service,
+            sensitive_keys=list(settings.sensitive_keys)
+            if settings.sensitive_keys is not None
+            else None,
+            sensitive_patterns=list(settings.sensitive_patterns)
+            if settings.sensitive_patterns
+            else None,
+            pattern_replacement=settings.pattern_replacement,
+            allow_backtracking=settings.allow_backtracking_patterns,
             console=new_console,
             colors=new_colors,
-            blocking=overflow == "block",
+            blocking=settings.overflow == "block",
         )
     except ValueError as exc:
-        if allow_backtracking_patterns:
+        if settings.allow_backtracking_patterns:
             msg = f"invalid sensitive_patterns regex ({exc})."
         else:
             msg = (
@@ -775,67 +704,56 @@ def _apply_settings(settings: Settings, *, expected: _RuntimeState | None = None
             )
         raise ValueError(msg) from exc
 
-    new_exception_config: dict[str, Any] | None = None
-    if structured_exceptions:
+    new_exception_config: _ExceptionConfig | None = None
+    if settings.structured_exceptions:
         new_exception_config = {
-            "include_locals": exception_include_locals,
-            "max_frames": exception_max_frames,
-            "max_local_repr": exception_max_local_repr,
+            "include_locals": settings.exception_include_locals,
+            "max_frames": settings.exception_max_frames,
+            "max_local_repr": settings.exception_max_local_repr,
             # Reuse the record-redaction keys for locals redaction; the
             # processor compares lower-cased names against a frozenset.
             "sensitive_keys": (
-                frozenset(k.lower() for k in sensitive_keys)
-                if sensitive_keys is not None
+                frozenset(k.lower() for k in settings.sensitive_keys)
+                if settings.sensitive_keys is not None
                 else None
             ),
             # Patterns must see each local's whole rendering before truncation.
             "redact": new_config.redact_patterns if new_config.pattern_count else None,
         }
 
-    new_filter: Any = None
-    if sample_rate < 1.0 or rate_limit_max is not None:
+    new_filter: _NativeFilter | None = None
+    if settings.sample_rate < 1.0 or settings.rate_limit_max is not None:
         new_filter = _RUST.NativeFilter(
-            sample_rate=sample_rate,
-            sample_max_level=sample_max_level.lower() if sample_max_level else None,
-            rate_limit_max=rate_limit_max,
-            rate_limit_period=rate_limit_period,
+            sample_rate=settings.sample_rate,
+            sample_max_level=settings.sample_max_level.lower()
+            if settings.sample_max_level
+            else None,
+            rate_limit_max=settings.rate_limit_max,
+            rate_limit_period=settings.rate_limit_period,
         )
         if new_filter.is_empty():
             new_filter = None
 
     # Construct every fallible native resource before touching the active
     # configuration. A bad target/path/value must not close a working logger.
-    new_writer = _RUST._NativeStringWriter(
-        maxsize,
-        target=target,
-        file_path=file_path,
-        file_max_bytes=file_max_bytes,
-        file_backup_count=file_backup_count,
-        also_stdout=also_stdout,
-    )
+    new_writer = _new_writer(settings)
     new_runtime = _RuntimeState(
         writer=new_writer,
         config=new_config,
         settings=settings,
-        maxsize=maxsize,
-        target=target,
-        overflow=overflow,
-        file_path=file_path,
-        file_max_bytes=file_max_bytes,
-        file_backup_count=file_backup_count,
-        also_stdout=also_stdout,
-        level_threshold=_level_number(level),
-        otel=otel,
+        overflow=settings.overflow,
+        level_threshold=_level_number(settings.level),
+        otel=settings.otel,
         record_filter=new_filter,
         exception_config=new_exception_config,
-        exception_carets=exception_carets,
-        metric_processor=metric_processor,
-        sentry_processor=sentry_processor,
-        stream_sink=stream_sink,
-        callable_sinks=tuple(callable_sinks or ()),
-        callable_queue_maxsize=callable_queue_maxsize,
-        enrich=otel or metric_processor is not None or sentry_processor is not None,
-        fused=sentry_processor is None and stream_sink is None,
+        exception_carets=settings.exception_carets,
+        metric_processor=settings.metric_processor,
+        sentry_processor=settings.sentry_processor,
+        stream_sink=settings.stream_sink,
+        enrich=settings.otel
+        or settings.metric_processor is not None
+        or settings.sentry_processor is not None,
+        fused=settings.sentry_processor is None and settings.stream_sink is None,
     )
     with _state_lock:
         stale = expected is not None and _runtime is not expected
@@ -875,16 +793,16 @@ def _sync_callable_dispatcher(*, reconfigured: bool = True) -> None:
             state = _runtime
         if not replacing:
             _callable_dispatcher.sync(
-                None if state is None else state.callable_sinks,
-                maxsize=0 if state is None else state.callable_queue_maxsize,
+                None if state is None else state.settings.callable_sinks or (),
+                maxsize=0 if state is None else state.settings.callable_queue_maxsize,
             )
         elif state is None:
             _note_abandoned(_callable_dispatcher.disable(stall_timeout=_CALLABLE_STALL_TIMEOUT))
         else:
             _note_abandoned(
                 _callable_dispatcher.configure(
-                    state.callable_sinks,
-                    maxsize=state.callable_queue_maxsize,
+                    state.settings.callable_sinks or (),
+                    maxsize=state.settings.callable_queue_maxsize,
                     stall_timeout=_CALLABLE_STALL_TIMEOUT,
                 )
             )
@@ -943,14 +861,7 @@ def _after_in_child() -> None:
     respawned = False
     try:
         # Replay the full sink config so file paths and stdout mirroring survive fork.
-        writer = _RUST._NativeStringWriter(
-            state.maxsize,
-            target=state.target,
-            file_path=state.file_path,
-            file_max_bytes=state.file_max_bytes,
-            file_backup_count=state.file_backup_count,
-            also_stdout=state.also_stdout,
-        )
+        writer = _new_writer(state.settings)
     except Exception as exc:  # noqa: BLE001 - os.fork() ignores errors raised by fork hooks
         # The abandoned writer has no worker: keeping it would accept records
         # nobody writes and hang flush(). Disable logging as shutdown() does.
