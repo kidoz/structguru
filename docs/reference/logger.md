@@ -86,7 +86,7 @@ context variables for keys still absent. See
 |---|---|
 | `str` or `pathlib.Path` | Appends to the file with UTF-8 encoding; no rotation. On Unix, a file created by `add()` has mode `0600`; an existing file keeps its mode. |
 | object with `write()` | Wrapped in `logging.StreamHandler`. |
-| `logging.Handler` | Used as given: its own formatter and filters apply, the record's message is the rendered line, and its level is left unchanged. `remove()` closes it. |
+| `logging.Handler` | Used as given: its own formatter and filters apply, the record's message is the rendered line, and its level is left unchanged. `remove()` closes it. Adding the same handler while it is already registered raises `ValueError`. |
 | callable | Called with each rendered line, including its trailing newline. |
 
 Other values raise `TypeError`.

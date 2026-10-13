@@ -17,6 +17,8 @@ All notable changes to this project are documented here. The format is based on
 - Callable-sink removal and reconfiguration release retired Python callbacks
   after unlocking the dispatcher, so reentrant callback destructors cannot
   deadlock it.
+- Adding the same `logging.Handler` twice now raises `ValueError` before
+  registering it again, preserving the original sink's delivery and ownership.
 - `flush()`, `shutdown()`, and reconfiguration no longer block forever when
   the native writer's sink stops making progress — for example a full stdout
   pipe whose reader has stopped. A writer stuck for 10 seconds is abandoned

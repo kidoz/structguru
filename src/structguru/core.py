@@ -459,15 +459,15 @@ _stdlib_bridge_active = False
 def _attach_to_root(handler: logging.Handler, threshold: int) -> None:
     """Register *handler* for third-party records, unless the bridge supersedes it.
 
-    *threshold* is the ``add()`` level; the latest ``add()`` of a handler sets
-    it, and the handler's own level is left alone.
+    Each handler has one active registration, with *threshold* supplied by
+    ``add()``. The handler's own level is left alone.
     """
     with _root_attach_lock:
-        relay = _root_relays.get(handler)
-        if relay is None:
-            relay = _RootRelay(handler, threshold)
-            _root_relays[handler] = relay
-        relay._threshold = threshold
+        if handler in _root_relays:
+            msg = "logging handler is already registered; remove it before adding it again"
+            raise ValueError(msg)
+        relay = _RootRelay(handler, threshold)
+        _root_relays[handler] = relay
         if _stdlib_bridge_active:
             return
         logging.getLogger().addHandler(relay)
@@ -935,6 +935,8 @@ class Logger:
         its level and formatter are left unchanged for the loggers it already
         serves. Only ``level`` gates what this sink receives.
         ``remove`` closes it.
+        Registering the same handler again before removing it raises
+        ``ValueError``; handler ownership is process-wide.
 
         Third-party records arrive raw (unrendered) via the stdlib root logger.
         Install the bridge (``structguru.integrations.stdlib``) to receive them
@@ -960,17 +962,24 @@ class Logger:
             if callable(sink) and not isinstance(sink, logging.Handler)
             else functools.partial(_emit_rendered, handler)
         )
-        native_token = _runtime.add_callable_sink(
-            native_callback,
-            min_level=threshold,
-            level_callback=(
-                None
-                if callable(sink) and not isinstance(sink, logging.Handler)
-                else functools.partial(_emit_rendered, handler)
-            ),
-        )
-
+        # Reserve handler ownership before native registration, so duplicate
+        # registrations cannot partially succeed or change the original relay.
         _attach_to_root(handler, threshold)
+        try:
+            native_token = _runtime.add_callable_sink(
+                native_callback,
+                min_level=threshold,
+                level_callback=(
+                    None
+                    if callable(sink) and not isinstance(sink, logging.Handler)
+                    else functools.partial(_emit_rendered, handler)
+                ),
+            )
+        except BaseException:
+            _detach_from_root(handler)
+            if handler is not sink:
+                handler.close()
+            raise
 
         with _id_counter_lock:
             handler_id = next(_id_counter)

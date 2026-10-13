@@ -124,7 +124,8 @@ logger.remove()  # remove every sink added through this logger
   and the loggers derived from it with `bind()` or `opt()`.
 - A `logging.Handler` keeps its own level and formatter. Its formatter wraps the
   rendered line, only `level` decides what it receives, and `remove()` closes
-  it.
+  it. Each handler can have one active registration across all loggers;
+  registering it again raises `ValueError` until it has been removed.
 - A file added this way is created owner-only (`0600`) on Unix, like the
   rotating file.
 

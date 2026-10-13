@@ -1097,6 +1097,61 @@ def test_add_leaves_a_user_handler_unmodified() -> None:
     assert 'APP INFO: {"logger"' in output
 
 
+@pytest.mark.parametrize("bridge", [False, True])
+def test_duplicate_handler_is_rejected_without_disturbing_original_sink(bridge: bool) -> None:
+    from structguru.integrations.stdlib import install_stdlib_bridge
+
+    _runtime.configure(target="null")
+    if bridge:
+        install_stdlib_bridge()
+    buffer = io.StringIO()
+    handler = logging.StreamHandler(buffer)
+    owner, other = Logger(), Logger()
+    handler_id = owner.add(handler, level="INFO")
+    try:
+        with pytest.raises(ValueError, match="already registered"):
+            other.add(handler, level="ERROR")
+        assert other._handlers == {}
+        logging.getLogger("third.party").warning("raw remains")
+        owner.info("native remains")
+        _runtime.flush()
+    finally:
+        owner.remove()
+        other.remove()
+    assert "raw remains" in buffer.getvalue()
+    assert "native remains" in buffer.getvalue()
+    assert handler_id not in core._sinks
+    # A completed removal releases ownership, so this handler can be reused.
+    reused = other.add(handler)
+    other.remove(reused)
+
+
+@pytest.mark.parametrize("owned", [False, True])
+def test_failed_native_sink_registration_releases_root_ownership(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, owned: bool
+) -> None:
+    handler = _make_handler(tmp_path / "rollback.log" if owned else io.StringIO())
+    log = Logger()
+
+    def fail(*args: Any, **kwargs: Any) -> int:
+        raise RuntimeError("registration failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(core, "_make_handler", lambda sink: handler)
+        patch.setattr(_runtime, "add_callable_sink", fail)
+        with pytest.raises(RuntimeError, match="registration failed"):
+            log.add(tmp_path / "rollback.log" if owned else handler)
+    assert handler not in core._root_relays
+    assert log._handlers == {}
+    if owned:
+        assert handler.stream is None
+    else:
+        assert not handler._closed
+    # Failure must not leave an ownership reservation behind.
+    token = log.add(handler)
+    log.remove(token)
+
+
 class TestAddLevelValidation:
     @pytest.mark.parametrize("level, threshold", [(30, 30), ("warning", 30), (0, 0)])
     def test_levels_parse_like_configure(self, level: str | int, threshold: int) -> None:
