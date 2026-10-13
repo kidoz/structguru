@@ -17,6 +17,7 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ffi::CString;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::JoinHandle;
@@ -794,6 +795,39 @@ struct Snapshot {
     finalizers: Vec<Py<PyAny>>,
 }
 
+/// Keep retired Python references alive until the registry is unlocked.
+///
+/// Removing a sink or clearing its eligibility cache is safe while its fork
+/// snapshot still owns the callback. Replacing that snapshot must defer the
+/// final decref too: Python destructors may reenter any dispatcher method.
+struct RegistryGuard<'a> {
+    registry: Option<MutexGuard<'a, Registry>>,
+    retired: Vec<Snapshot>,
+}
+
+impl Deref for RegistryGuard<'_> {
+    type Target = Registry;
+
+    fn deref(&self) -> &Registry {
+        self.registry.as_deref().expect("registry guard is held")
+    }
+}
+
+impl DerefMut for RegistryGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Registry {
+        self.registry
+            .as_deref_mut()
+            .expect("registry guard is held")
+    }
+}
+
+impl Drop for RegistryGuard<'_> {
+    fn drop(&mut self) {
+        // Fields drop after this method returns, with no registry lock held.
+        drop(self.registry.take());
+    }
+}
+
 struct DispatcherInner {
     registry: Mutex<Registry>,
     /// Set while a generation is active; read lock-free on the hot path.
@@ -806,12 +840,15 @@ struct DispatcherInner {
 }
 
 impl DispatcherInner {
-    fn lock_registry(&self) -> MutexGuard<'_, Registry> {
-        self.registry.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock_registry(&self) -> RegistryGuard<'_> {
+        RegistryGuard {
+            registry: Some(self.registry.lock().unwrap_or_else(PoisonError::into_inner)),
+            retired: Vec::new(),
+        }
     }
 
     /// Replace the fork snapshot with the registry's current registrations.
-    fn publish(&self, py: Python<'_>, registry: &Registry) {
+    fn publish(&self, py: Python<'_>, registry: &mut RegistryGuard<'_>) {
         let snapshot = Box::new(Snapshot {
             configured: registry
                 .configured
@@ -833,7 +870,7 @@ impl DispatcherInner {
         if !previous.is_null() {
             // SAFETY: only `publish` stores into `snapshot`, always a pointer
             // from `Box::into_raw`, and the swap made this one unreachable.
-            drop(unsafe { Box::from_raw(previous) });
+            registry.retired.push(*unsafe { Box::from_raw(previous) });
         }
     }
 
@@ -921,7 +958,7 @@ impl DispatcherInner {
                 }
             }
             if !due.is_empty() {
-                self.publish(py, &registry);
+                self.publish(py, &mut registry);
             }
         }
         for finalizer in due {
@@ -1016,7 +1053,7 @@ impl CallableDispatcher {
             sequencer: Arc::default(),
             snapshot: AtomicPtr::new(std::ptr::null_mut()),
         });
-        inner.publish(py, &inner.lock_registry());
+        inner.publish(py, &mut inner.lock_registry());
         Self { inner }
     }
 }
@@ -1058,7 +1095,7 @@ impl CallableDispatcher {
         if enabled && registry.channel.is_none() && registry.halt == Halt::Running {
             self.inner.start_channel(py, &mut registry)?;
         }
-        self.inner.publish(py, &registry);
+        self.inner.publish(py, &mut registry);
         Ok(token)
     }
 
@@ -1090,7 +1127,7 @@ impl CallableDispatcher {
             if !registry.has_sinks() {
                 self.inner.retire_active(&mut registry);
             }
-            self.inner.publish(py, &registry);
+            self.inner.publish(py, &mut registry);
             (removed, registry.live_channels())
         };
         let abandoned = self
@@ -1102,7 +1139,7 @@ impl CallableDispatcher {
                 if registry.outstanding.get(&token).copied().unwrap_or(0) > 0 {
                     // `settle` runs it after the last delivery.
                     registry.finalizers.insert(token, finalizer);
-                    self.inner.publish(py, &registry);
+                    self.inner.publish(py, &mut registry);
                     None
                 } else {
                     Some(finalizer)
@@ -1141,7 +1178,7 @@ impl CallableDispatcher {
             if registry.has_sinks() {
                 self.inner.start_channel(py, &mut registry)?;
             }
-            self.inner.publish(py, &registry);
+            self.inner.publish(py, &mut registry);
             channels
         };
         Ok(self
@@ -1176,7 +1213,7 @@ impl CallableDispatcher {
                 registry.configured.clear();
                 registry.eligible.clear();
                 registry.halt(Halt::Lifecycle);
-                self.inner.publish(py, &registry);
+                self.inner.publish(py, &mut registry);
             }
             return Ok(());
         };
@@ -1184,7 +1221,7 @@ impl CallableDispatcher {
             self.inner.retire_active(&mut registry);
             registry.set_configured(callbacks);
             registry.maxsize = maxsize;
-            self.inner.publish(py, &registry);
+            self.inner.publish(py, &mut registry);
         }
         if registry.halt == Halt::Lifecycle {
             registry.halt = Halt::Running;
@@ -1207,7 +1244,7 @@ impl CallableDispatcher {
             registry.configured.clear();
             registry.eligible.clear();
             registry.halt(Halt::Lifecycle);
-            self.inner.publish(py, &registry);
+            self.inner.publish(py, &mut registry);
             registry.live_channels()
         };
         self.inner

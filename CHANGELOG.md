@@ -14,6 +14,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Callable-sink removal and reconfiguration release retired Python callbacks
+  after unlocking the dispatcher, so reentrant callback destructors cannot
+  deadlock it.
 - `flush()`, `shutdown()`, and reconfiguration no longer block forever when
   the native writer's sink stops making progress — for example a full stdout
   pipe whose reader has stopped. A writer stuck for 10 seconds is abandoned

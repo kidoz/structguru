@@ -17,6 +17,57 @@ from structguru import _runtime
 from structguru._native_dispatch import CallableSinkDispatcher
 
 
+@pytest.mark.parametrize("transition", ["remove", "configure", "sync", "disable"])
+@pytest.mark.parametrize("cached", [False, True])
+def test_callback_destructor_can_reenter_dispatcher(transition: str, cached: bool) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+                import sys
+                from structguru._native_dispatch import CallableSinkDispatcher
+
+                dispatcher = CallableSinkDispatcher()
+                finalized = []
+                class Sink:
+                    def __call__(self, line):
+                        pass
+                    def __del__(self):
+                        dispatcher.metrics()
+                        dispatcher.add(lambda line: None, enabled=False)
+                        finalized.append(True)
+
+                transition, cached = sys.argv[1:]
+                if transition == 'remove':
+                    token = dispatcher.add(Sink(), enabled=cached == 'True')
+                else:
+                    dispatcher.configure([Sink()], maxsize=4)
+                if cached == 'True':
+                    dispatcher.enqueue('populate eligibility cache', 20, overflow='block')
+                    dispatcher.flush(stall_timeout=1)
+
+                if transition == 'remove':
+                    dispatcher.remove(token, stall_timeout=1)
+                elif transition == 'configure':
+                    dispatcher.configure([], maxsize=4, stall_timeout=1)
+                elif transition == 'sync':
+                    dispatcher.sync([], maxsize=4)
+                else:
+                    dispatcher.disable(stall_timeout=1)
+                assert finalized == [True], finalized
+                dispatcher.disable(stall_timeout=1)
+            """),
+            transition,
+            str(cached),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize("registration", ["configure", "add"])
 def test_stdlib_backpressure_allows_callback_logging(registration: str) -> None:
     # Run in a subprocess so a lock inversion cannot hang pytest or its teardown.
