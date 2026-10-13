@@ -8,9 +8,11 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
-- CPython 3.15 support. The abi3 wheel already covers 3.15 unchanged; CI and
-  the release gates now test 3.11–3.15, and free-threaded 3.15t wheels join
-  the 3.14t ones for Linux x86_64, macOS arm64, and Windows x64.
+- CPython 3.15 support. The abi3 wheel already covers 3.15 unchanged, and
+  free-threaded 3.15t wheels join the 3.14t ones for Linux x86_64, macOS
+  arm64, and Windows x64. The 3.15 source-gate leg returns once PyYAML ships
+  cp315 wheels — it has none for 3.15 and its sdist build crashes the CI
+  runners today — while the free-threaded 3.15t gate already runs on 3.15.
 
 ### Changed
 
