@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.5.0] - 2026-10-13
 
 ### Added
 
@@ -12,13 +12,18 @@ All notable changes to this project are documented here. The format is based on
   the release gates now test 3.11–3.15, and free-threaded 3.15t wheels join
   the 3.14t ones for Linux x86_64, macOS arm64, and Windows x64.
 
+### Changed
+
+- Adding the same `logging.Handler` twice raises `ValueError` until it is
+  removed. A second `add()` used to register the handler again and deliver
+  every rendered record to it twice; the first registration's delivery and
+  ownership are preserved.
+
 ### Fixed
 
 - Callable-sink removal and reconfiguration release retired Python callbacks
   after unlocking the dispatcher, so reentrant callback destructors cannot
   deadlock it.
-- Adding the same `logging.Handler` twice now raises `ValueError` before
-  registering it again, preserving the original sink's delivery and ownership.
 - `flush()`, `shutdown()`, and reconfiguration no longer block forever when
   the native writer's sink stops making progress — for example a full stdout
   pipe whose reader has stopped. A writer stuck for 10 seconds is abandoned
