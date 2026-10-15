@@ -146,6 +146,13 @@ Abandonment has fixed consequences:
 - A producer waiting for space in the abandoned generation is released and its
   record counts as abandoned, not as a queue-full drop.
 
+The native writer has the same limit. When its sink makes no progress for 10
+seconds, `flush()`, `shutdown()`, and reconfiguration abandon it: records still
+queued are discarded, the write already in progress may finish, and the worker
+then stops. The warning does not wait on stderr, so a full pipe shared by
+stdout and stderr cannot hold the caller past the stall limit. The warning is
+dropped when stderr cannot accept a write.
+
 ## What flush() waits for
 
 `flush()` exists because a returning `logger.info()` does not mean the line

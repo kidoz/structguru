@@ -112,6 +112,12 @@ settings above, and levels are filtered by `level` and `set_level()`.
   `UserWarning`. When `flush()` or `logger.remove()` abandons the active
   dispatch queue, callable-sink delivery stops until the next `configure()`,
   or `update()` that changes an option other than `level`.
+- During `flush()`, `shutdown()`, and reconfiguration, a native writer that
+  makes no progress for 10 seconds is abandoned the same way. Records still
+  queued are discarded. The write already in progress may finish, and the
+  worker then stops. The warning does not wait on stderr: a full pipe shared
+  with stdout cannot keep the call blocked, and the warning is dropped when
+  stderr cannot accept a write.
 - Interpreter exit calls `shutdown()` from an `atexit` handler registered when
   `structguru` is imported. Handlers registered after the import run first and
   can still log.

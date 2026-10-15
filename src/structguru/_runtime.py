@@ -13,6 +13,7 @@ import importlib
 import io
 import json
 import os
+import select
 import sys
 import threading
 import traceback
@@ -1023,6 +1024,10 @@ def lifecycle_metrics() -> dict[str, int]:
         return {"rejected": _lifecycle_rejected}
 
 
+# Identity of the default display hook, captured before tests install catchers.
+_SHOWWARNMSG_IMPL = getattr(warnings, "_showwarnmsg_impl", None)
+
+
 def _warn(message: str, *, stacklevel: int) -> None:
     """Issue a diagnostic ``UserWarning`` that never interrupts the caller.
 
@@ -1036,6 +1041,118 @@ def _warn(message: str, *, stacklevel: int) -> None:
     except Exception as exc:  # noqa: BLE001 - diagnostics must never break logging
         assert _RUST is not None
         _RUST.report_unraisable(exc)
+
+
+def _warnings_are_recorded() -> bool:
+    """Return whether the active catcher stores warnings instead of displaying them."""
+    get_context = getattr(warnings, "_get_context", None)
+    if get_context is not None and getattr(get_context(), "log", None) is not None:
+        # Context-aware catch_warnings (free-threaded builds, and 3.14+ with
+        # -X context_aware_warnings) records into a context variable.
+        return True
+    impl = getattr(warnings, "_showwarnmsg_impl", None)
+    return _SHOWWARNMSG_IMPL is not None and impl is not _SHOWWARNMSG_IMPL
+
+
+# A full stderr must not add another stall on top of the sink timeout. A healthy
+# stderr accepts a short diagnostic well inside this bound; anything slower is
+# left to a daemon so the caller can return.
+_WARNING_WRITE_TIMEOUT = 0.05
+
+
+def _stderr_is_writable() -> bool | None:
+    """Return whether stderr can accept a write now.
+
+    ``None`` means the stream has no pollable descriptor, or this platform
+    cannot poll it. A duplicate is not used: ``dup`` shares the open-file
+    description, so changing its blocking flag would change stderr itself and
+    any stdout aliased onto the same pipe.
+    """
+    stream = sys.stderr
+    if stream is None:
+        return None
+    try:
+        fd = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        return None
+    try:
+        _readable, writable, _errors = select.select([], [fd], [], 0)
+    except (OSError, ValueError):
+        return None
+    return fd in writable
+
+
+def _write_stream_bounded(stream: Any, text: str) -> None:
+    """Write ``text`` without letting a stuck stream hold the caller.
+
+    The write runs on a daemon. The caller waits only
+    ``_WARNING_WRITE_TIMEOUT``. A stream that is still blocked after that keeps
+    the daemon; this call returns.
+    """
+    finished = threading.Event()
+
+    def write() -> None:
+        try:
+            stream.write(text)
+            flush = getattr(stream, "flush", None)
+            if flush is not None:
+                flush()
+        except Exception:  # noqa: BLE001 - a diagnostic write must not surface later
+            return
+        finally:
+            finished.set()
+
+    try:
+        threading.Thread(target=write, daemon=True).start()
+    except RuntimeError:
+        return
+    finished.wait(_WARNING_WRITE_TIMEOUT)
+
+
+def _write_warning_nonblocking(item: warnings.WarningMessage) -> None:
+    """Display one warning without waiting on a full stderr pipe."""
+    text = warnings.formatwarning(
+        item.message, item.category, item.filename, item.lineno, item.line
+    )
+    stream = sys.stderr
+    if stream is None:
+        return
+    # A pipe with no free space would block until a reader resumes. Drop the
+    # diagnostic instead. ``None`` (no pollable fd) still attempts a bounded write.
+    if _stderr_is_writable() is False:
+        return
+    _write_stream_bounded(stream, text)
+
+
+def _warn_without_blocking(message: str, *, stacklevel: int) -> None:
+    """Issue a diagnostic that cannot stall the caller on stderr.
+
+    A stall timeout is worthless if the warning that reports it writes to the
+    same full pipe (``2>&1``) and waits there. Filters still apply. A catcher
+    on this thread receives the warning as usual, because recording does not
+    touch stderr. Otherwise the text is written when stderr can accept it.
+    A full pipe drops the diagnostic, and a write that does not finish quickly
+    is left to a daemon.
+    """
+    original_show = getattr(warnings, "_showwarning_orig", None)
+    if _warnings_are_recorded() or (
+        original_show is not None and warnings.showwarning is not original_show
+    ):
+        # The extra frame is this function. A replaced showwarning is the
+        # caller's hook; it chooses its own I/O.
+        _warn(message, stacklevel=stacklevel + 1)
+        return
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.warn(message, stacklevel=stacklevel + 1)
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never break logging
+        assert _RUST is not None
+        _RUST.report_unraisable(exc)
+        return
+    if not caught:
+        return
+    for item in caught:
+        _write_warning_nonblocking(item)
 
 
 def _note_drop() -> None:
@@ -1071,7 +1188,7 @@ def _note_abandoned(count: int) -> None:
             if _callable_dispatcher.idle()
             else ""
         )
-        _warn(
+        _warn_without_blocking(
             f"structguru abandoned {count} callable sink delivery record(s): a sink "
             f"did not return within {_CALLABLE_STALL_TIMEOUT:g}s{halted}",
             stacklevel=3,
@@ -1081,7 +1198,7 @@ def _note_abandoned(count: int) -> None:
 def _note_writer_abandoned(count: int) -> None:
     """Warn when a stalled native sink forced the writer to abandon records."""
     if count:
-        _warn(
+        _warn_without_blocking(
             f"structguru abandoned {count} native record(s): the writer's sink made "
             f"no progress for {_CALLABLE_STALL_TIMEOUT:g}s; the writer is disabled",
             stacklevel=3,
@@ -1107,9 +1224,13 @@ def flush() -> None:
     losing buffered records would matter.
 
     A sink that makes no progress for ``_CALLABLE_STALL_TIMEOUT`` is abandoned
-    with a warning rather than blocking the caller forever. Not needed for
-    normal shutdown: ``shutdown``, reconfiguration, fork, and interpreter exit
-    all drain automatically.
+    with a warning rather than blocking the caller forever. That warning does
+    not wait on stderr, so a full pipe shared by stdout and stderr cannot keep
+    this call blocked after the stall limit. Records still queued in an
+    abandoned native writer are discarded; the write already in progress may
+    finish, and the worker then stops. Not needed for normal shutdown:
+    ``shutdown``, reconfiguration, fork, and interpreter exit all drain
+    automatically.
     """
     # Callbacks may log to the native writer or replace it by reconfiguring.
     # Drain them first, then flush the resulting runtime's writer.

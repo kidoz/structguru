@@ -10,6 +10,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 import warnings
 from dataclasses import replace
 from pathlib import Path
@@ -821,3 +822,180 @@ def test_shutdown_abandons_a_callable_sink_that_never_returns() -> None:
         timeout=60,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_abandonment_warning_reaches_stderr_without_a_catcher() -> None:
+    # A subprocess has no catch_warnings recorder, so this exercises the
+    # display path. That path must still reach stderr when the pipe has room.
+    env = os.environ.copy()
+    env["STRUCTGURU_AUTOCONFIGURE"] = "0"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+                from structguru import _runtime
+
+                _runtime._note_writer_abandoned(2)
+                _runtime._note_abandoned(0)
+            """),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "abandoned 2 native record(s)" in result.stderr
+    assert "callable sink delivery" not in result.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="non-blocking pipe flags are Unix-specific")
+def test_flush_returns_when_stdout_and_stderr_share_a_full_pipe(tmp_path: Path) -> None:
+    """A full shared pipe must not hold flush() after the stall limit.
+
+    The native write blocks, the drain times out, and the abandonment warning
+    would otherwise write to that same pipe. Records still queued are
+    discarded. Once a reader resumes, only the write already in progress finishes.
+    """
+    ready = tmp_path / "ready"
+    go = tmp_path / "go"
+    result_path = tmp_path / "result"
+    env = os.environ.copy()
+    env["STRUCTGURU_AUTOCONFIGURE"] = "0"
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent(
+                """
+                import os
+                import sys
+                import time
+
+                import structguru as sg
+                from structguru import _runtime
+
+                ready, go, result = sys.argv[1:]
+                _runtime._CALLABLE_STALL_TIMEOUT = 0.3
+                sg.configure(target="stdout")
+                # Fill fd 1, then put it back into blocking mode. A non-blocking
+                # duplicate would share the open-file description and make the
+                # worker's own writes fail instead of block. The bytes stay
+                # buffered either way.
+                was_blocking = os.get_blocking(1)
+                os.set_blocking(1, False)
+                try:
+                    chunk = b"x" * 65536
+                    while True:
+                        try:
+                            os.write(1, chunk)
+                        except BlockingIOError:
+                            break
+                finally:
+                    os.set_blocking(1, was_blocking)
+
+                for message in ("INFLIGHT", "QUEUED-B", "QUEUED-C"):
+                    sg.logger.info(message)
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    metrics = sg.writer_metrics()
+                    if metrics is not None and metrics["dequeued"] == 1:
+                        break
+                    time.sleep(0.01)
+                else:
+                    raise SystemExit(
+                        f"worker did not block in the first write: {sg.writer_metrics()}"
+                    )
+
+                started = time.monotonic()
+                sg.flush()
+                elapsed = time.monotonic() - started
+                metrics = sg.writer_metrics()
+                assert metrics is not None
+                with open(ready, "w") as status:
+                    status.write(
+                        f"elapsed={elapsed:.3f} dequeued={metrics['dequeued']} "
+                        f"depth={metrics['depth']} written={metrics['written']} "
+                        f"enqueued={metrics['enqueued']}\\n"
+                    )
+                deadline = time.monotonic() + 5
+                while not os.path.exists(go) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                if not os.path.exists(go):
+                    raise SystemExit("reader did not start")
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    metrics = sg.writer_metrics()
+                    assert metrics is not None
+                    if metrics["written"] >= 1:
+                        break
+                    time.sleep(0.01)
+                time.sleep(0.2)
+                metrics = sg.writer_metrics()
+                assert metrics is not None
+                with open(result, "w") as status:
+                    status.write(
+                        f"written={metrics['written']} dequeued={metrics['dequeued']} "
+                        f"depth={metrics['depth']}\\n"
+                    )
+                sg.shutdown()
+                """
+            ),
+            str(ready),
+            str(go),
+            str(result_path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+    )
+    assert proc.stdout is not None
+    try:
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            if ready.exists() and "enqueued=" in ready.read_text(encoding="utf-8"):
+                break
+            if proc.poll() is not None:
+                break
+            time.sleep(0.02)
+        if not ready.exists() or "enqueued=" not in ready.read_text(encoding="utf-8"):
+            proc.kill()
+            tail = proc.stdout.read()[-2000:]
+            proc.wait(timeout=5)
+            raise AssertionError(
+                "flush did not return before the deadline\n" + tail.decode("utf-8", "replace")
+            )
+
+        output: list[bytes] = []
+
+        def _read() -> None:
+            assert proc.stdout is not None
+            output.append(proc.stdout.read())
+
+        reader = threading.Thread(target=_read)
+        reader.start()
+        go.write_text("go", encoding="utf-8")
+        assert proc.wait(timeout=8) == 0
+        reader.join(timeout=5)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    ready_text = ready.read_text(encoding="utf-8")
+    elapsed = float(ready_text.split("elapsed=", 1)[1].split()[0])
+    assert elapsed < 3, ready_text
+    assert "dequeued=1" in ready_text
+    assert "depth=0" in ready_text
+    assert "written=0" in ready_text
+    assert "enqueued=3" in ready_text
+
+    result_text = result_path.read_text(encoding="utf-8")
+    assert "written=1" in result_text, result_text
+    assert "dequeued=1" in result_text, result_text
+    assert "depth=0" in result_text, result_text
+    assert output, "the pipe was not read after the stall"
+    rendered = b"".join(output).decode("utf-8", "replace")
+    assert "QUEUED-B" not in rendered
+    assert "QUEUED-C" not in rendered

@@ -93,8 +93,14 @@ exception is passed to `sys.unraisablehook`.
 | Callable sink raised | `structguru callable sink raised N time(s)` | first error and every 1000th |
 | `stream_sink.write()` raised | `structguru stream sink write failed N time(s)` | first error and every 1000th |
 | Callable sink made no progress for 10 seconds | `structguru abandoned N callable sink delivery record(s)` | each time deliveries are abandoned |
+| Native writer made no progress for 10 seconds | `structguru abandoned N native record(s)` | each time the writer is abandoned |
 | Message template failed to format | `structguru: failed to format log message` | once per template and error type |
 | Message object's `str()` raised | `structguru: failed to convert log message to str` | once per message type and error type |
+
+An abandonment warning does not wait on stderr. When stdout and stderr are one
+full pipe, the call still returns at the stall limit and the warning is dropped.
+Records still queued in the abandoned writer are discarded rather than written
+after the sink recovers.
 
 ## Metric hook
 

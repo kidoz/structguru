@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- `flush()`, `shutdown()`, and reconfiguration no longer block on the abandonment
+  warning when stdout and stderr share a full pipe. The stall limit still ends
+  the wait. The warning is dropped when stderr cannot accept a write.
+- An abandoned native writer discards records still in its queue and stops after
+  the write already in progress returns. Those queued records are not written
+  if the sink later recovers.
+
 ## [1.5.0] - 2026-10-13
 
 ### Added

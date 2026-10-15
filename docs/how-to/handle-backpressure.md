@@ -93,7 +93,9 @@ A callable or `logger.add()` sink that makes no progress for 10 seconds while
 `flush()`, `shutdown()`, `configure()`, `update()`, or `logger.remove()` waits
 for it is abandoned with a warning, so the process does not hang. After an
 abandonment, callable delivery stays off until the next `configure()`. A slow
-sink that keeps completing deliveries is not abandoned.
+sink that keeps completing deliveries is not abandoned. A native writer that
+stalls the same way is abandoned too: records still queued are discarded, and
+the warning itself does not wait on a full stderr.
 
 ## Wait for buffered records
 

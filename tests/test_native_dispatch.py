@@ -755,28 +755,39 @@ def test_stall_timeout_beyond_the_clock_range_means_no_limit(stall: float) -> No
 
 def test_sink_error_diagnostic_omits_exception_detail() -> None:
     # A sink exception can embed credentials; diagnostics never include its text.
-    dispatcher = CallableSinkDispatcher()
-    huge = "x" * 5000
+    # The worker emits the warning on its own thread. catch_warnings in the test
+    # thread stays empty when warnings are context-aware (free-threaded builds,
+    # and 3.14+ with -X context_aware_warnings). The subprocess stderr is the
+    # same on every build.
+    command = [sys.executable]
+    if sys.version_info >= (3, 14):
+        command.extend(["-X", "context_aware_warnings=1"])
+    command.extend(
+        [
+            "-c",
+            textwrap.dedent("""
+                from structguru._native_dispatch import CallableSinkDispatcher
 
-    def failing(line: str) -> None:
-        raise ValueError(huge)
+                secret = "x" * 80
 
-    dispatcher.configure([failing], maxsize=8)
-    try:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            dispatcher.enqueue("record", 20, overflow="drop")
-            assert dispatcher.flush() == 0
-        diagnostics = [
-            str(warning.message)
-            for warning in caught
-            if "callable sink raised" in str(warning.message)
+                def failing(line):
+                    raise ValueError(secret)
+
+                dispatcher = CallableSinkDispatcher()
+                dispatcher.configure([failing], maxsize=8)
+                try:
+                    dispatcher.enqueue("record", 20, overflow="drop")
+                    assert dispatcher.flush() == 0
+                finally:
+                    dispatcher.disable()
+            """),
         ]
-        assert len(diagnostics) == 1, caught
-        assert "ValueError" in diagnostics[0]
-        assert diagnostics[0] == ("structguru callable sink raised 1 time(s), latest ValueError")
-    finally:
-        dispatcher.disable()
+    )
+    result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.count("callable sink raised") == 1, result.stderr
+    assert "structguru callable sink raised 1 time(s), latest ValueError" in result.stderr
+    assert "x" * 80 not in result.stderr
 
 
 def test_abandoned_dispatch_stays_disabled_until_the_next_configure() -> None:

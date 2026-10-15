@@ -792,6 +792,8 @@ impl StringWriter {
     /// With `stall`, a worker that makes no progress for that long (a sink
     /// whose write never returns) is abandoned and the number of undrained
     /// records returned; `None` waits without limit. See [`Self::close`].
+    /// Abandonment discards records still queued. The write in progress may
+    /// finish; the worker then stops without flushing or taking more work.
     pub fn flush(&self, stall: Option<Duration>) -> u64 {
         let mut state = self.lock_state();
         let target = state.counters.enqueued;
@@ -892,12 +894,16 @@ impl StringWriter {
 
     /// Give up on a worker that stopped making progress. The writer stops
     /// accepting records and every waiter is woken; the stuck thread's handle
-    /// is leaked so no later close can join it. Returns the undrained count.
+    /// is leaked so no later close can join it. Records still queued are
+    /// discarded: the count returned here already includes them, and the
+    /// worker must not write them when the sink recovers. The write in
+    /// progress, if any, is left to finish. Returns the undrained count.
     fn abandon_stalled(&self, state: &mut WorkerState) -> u64 {
         state.closed = true;
         state.worker_done = true;
         state.flush_target = None;
         let undrained = state.counters.enqueued - state.counters.completed;
+        state.queue.clear();
         self.shared.available.notify_all();
         self.shared.drained.notify_all();
         self.shared.space.notify_all();
@@ -1020,11 +1026,20 @@ fn worker_loop(shared: Arc<WorkerShared>, mut sink: Box<dyn StringSink>) {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             loop {
+                // Set by `abandon_stalled` while this thread is between records
+                // or blocked in the sink. The queue has been discarded. Stop
+                // without flushing: the sink is what stalled.
+                if state.worker_done {
+                    return;
+                }
                 while state.paused && !state.closed {
                     state = shared
                         .available
                         .wait(state)
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+                if state.worker_done {
+                    return;
                 }
                 if let Some(message) = state.queue.pop_front() {
                     state.counters.dequeued += 1;
@@ -1065,6 +1080,14 @@ fn worker_loop(shared: Arc<WorkerShared>, mut sink: Box<dyn StringSink>) {
             state.counters.written += 1;
         }
         state.counters.completed += 1;
+        if state.worker_done {
+            // Abandoned during this write. Its outcome is counted above. Do not
+            // flush or take another record; both can block on the stalled sink.
+            state.in_flight -= 1;
+            state.flush_target = None;
+            shared.drained.notify_all();
+            return;
+        }
         // Flush the sink when the queue is empty or a flusher's target record
         // has just completed; `in_flight` stays raised until the sink flushed.
         let should_flush = state.queue.is_empty()
@@ -1298,6 +1321,103 @@ mod tests {
         );
         // Dropping the writer must not join the leaked thread either.
         drop(writer);
+    }
+
+    /// Records still queued at abandonment are not written when the sink
+    /// recovers. The worker finishes the write it is inside, then stops
+    /// without flushing.
+    #[test]
+    fn abandoned_worker_discards_queued_records_and_stops() {
+        use std::sync::mpsc;
+
+        struct RecoverableSink {
+            entered: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+            continued: mpsc::Sender<&'static str>,
+            written: Arc<Mutex<Vec<String>>>,
+            blocked: bool,
+        }
+        impl StringSink for RecoverableSink {
+            fn write(&mut self, message: String) -> Result<(), SinkError> {
+                if !self.blocked {
+                    self.blocked = true;
+                    self.written
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push(message);
+                    let _ = self.entered.send(());
+                    self.release
+                        .recv_timeout(Duration::from_secs(3))
+                        .expect("the test releases the stalled write");
+                    return Ok(());
+                }
+                self.written
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(message);
+                let _ = self.continued.send("write");
+                Ok(())
+            }
+
+            fn flush(&mut self) -> Result<(), SinkError> {
+                let _ = self.continued.send("flush");
+                Ok(())
+            }
+        }
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (continued_tx, continued_rx) = mpsc::channel();
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let writer = StringWriter::with_boxed_sink(
+            8,
+            Box::new(RecoverableSink {
+                entered: entered_tx,
+                release: release_rx,
+                continued: continued_tx,
+                written: Arc::clone(&written),
+                blocked: false,
+            }),
+        );
+        writer.try_enqueue("first".into()).unwrap();
+        writer.try_enqueue("second".into()).unwrap();
+        writer.try_enqueue("third".into()).unwrap();
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the worker never entered the stalled write");
+
+        let abandoned = writer.flush(Some(Duration::from_millis(100)));
+        assert_eq!(abandoned, 3, "in-flight and queued records are undrained");
+        let mid = writer.metrics();
+        assert_eq!(mid.depth, 0, "the queue is discarded at abandonment");
+        assert_eq!(mid.dequeued, 1);
+        assert_eq!(mid.written, 0, "the stalled write has not returned");
+
+        release_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while writer.metrics().written < 1 {
+            assert!(
+                Instant::now() < deadline,
+                "the in-flight write never finished"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        let continued = continued_rx.recv_timeout(Duration::from_millis(150));
+        let metrics = writer.metrics();
+        let messages = written
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert!(
+            continued.is_err(),
+            "the worker kept going after abandonment: {continued:?}"
+        );
+        assert_eq!(messages, vec!["first".to_owned()]);
+        assert_eq!(metrics.written, 1);
+        assert_eq!(metrics.dequeued, 1);
+        assert_eq!(metrics.depth, 0);
+        assert!(metrics.worker_done);
+        assert_eq!(writer.close(Some(Duration::from_millis(100))), 0);
     }
 
     /// `close` itself is bounded: with a stalled sink it abandons the worker,

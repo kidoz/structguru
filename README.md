@@ -456,6 +456,9 @@ Behavior notes:
 - **Scope**: the native renderer covers JSON and console rendering, file/stdout/callable sinks, redaction, sampling/rate limiting, metrics, exceptions, and stack information. `logger.add()` sinks receive native and stdlib records.
 
 Shutdown and reconfiguration drain records already accepted by the native queue.
+A native or callable sink that makes no progress for 10 seconds is abandoned
+with a warning instead of blocking the caller. Queued native records are
+discarded, and the warning does not wait on a full stderr.
 Calls still formatting or waiting for space may be rejected when their writer closes,
 even in block mode. `lifecycle_metrics()["rejected"]` counts these native deliveries
 without queue-full warnings and survives shutdown and configuration changes; forked
