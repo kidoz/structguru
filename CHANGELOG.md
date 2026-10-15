@@ -14,6 +14,8 @@ All notable changes to this project are documented here. The format is based on
 - An abandoned native writer discards records still in its queue and stops after
   the write already in progress returns. Those queued records are not written
   if the sink later recovers.
+- The GitHub Release that attaches SBOMs is created only after PyPI publication
+  succeeds. A failed test, wheel build, or publish job no longer creates it.
 
 ## [1.5.0] - 2026-10-13
 

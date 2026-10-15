@@ -320,8 +320,11 @@ jobs:
 
   github-release:
     name: Attach SBOMs to the GitHub Release
-    needs: supply-chain
-    if: startsWith(github.ref, 'refs/tags/v')
+    # `publish` already waits for the release gates and the wheel builds.
+    # An `if` replaces the implicit success() check, so a failed or skipped
+    # publish must be excluded explicitly or this job still creates the release.
+    needs: [publish, supply-chain]
+    if: startsWith(github.ref, 'refs/tags/v') && needs.publish.result == 'success' && needs.supply-chain.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release and upload its assets

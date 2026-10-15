@@ -26,6 +26,20 @@ def test_rust_sbom_contains_workspace_and_dependency_graph(tmp_path: Path) -> No
     assert sbom["dependencies"]
 
 
+def test_github_release_requires_successful_publication() -> None:
+    # The release job used to need only the SBOM upload, so a failed test,
+    # wheel build, or PyPI publish still created the GitHub Release. `if`
+    # replaces the implicit success() check, so the result has to be named.
+    workflow = Path(".github/workflows/wheels.yml").read_text(encoding="utf-8")
+    start = workflow.index("  github-release:\n")
+    header = workflow[start:].split("\n    steps:", 1)[0]
+
+    assert "needs: [publish, supply-chain]" in header
+    assert "needs.publish.result == 'success'" in header
+    assert "needs.supply-chain.result == 'success'" in header
+    assert "startsWith(github.ref, 'refs/tags/v')" in header
+
+
 def test_publish_job_depends_on_release_and_supply_chain_gates() -> None:
     workflow = Path(".github/workflows/wheels.yml").read_text(encoding="utf-8")
 
