@@ -92,7 +92,15 @@ jobs:
       - name: Install locked dependencies
         run: make install
       - name: Run required source quality gates
+        if: matrix.python-version != '3.15'
         run: make python-check
+
+      # mypy 2.4.0's compiled build segfaults under CPython 3.15 on the Linux
+      # runners (exit 139 before analysis starts). Type checking is
+      # interpreter-independent here; the other release legs run it.
+      - name: Run lint and tests without typechecking
+        if: matrix.python-version == '3.15'
+        run: make lint test
 
   release-lowest:
     name: release gate lowest direct dependencies
@@ -120,20 +128,57 @@ jobs:
           import re
           import tomllib
 
+          from packaging.requirements import Requirement
+          from packaging.utils import canonicalize_name
+          from packaging.version import Version
+
           project = tomllib.load(open("pyproject.toml", "rb"))
           requirements = list(project["project"]["dependencies"])
           for group in project["project"]["optional-dependencies"].values():
               requirements.extend(group)
           for group in ("test", "lint", "bench"):
               requirements.extend(project["dependency-groups"][group])
+          direct: dict[str, str] = {}
           for requirement in requirements:
               if not isinstance(requirement, str):
                   continue
               match = re.match(r"^([A-Za-z0-9_.-]+)(?:\[[^]]+\])?\s*>=\s*([^,;\s]+)", requirement)
               if match:
-                  name, minimum = match.groups()
-                  installed = importlib.metadata.version(name)
-                  assert installed == minimum, f"{name}: expected {minimum}, installed {installed}"
+                  direct[canonicalize_name(match.group(1))] = match.group(2)
+
+          def forces_higher(name: str, floor: Version) -> bool:
+              """Report whether an installed package requires *name* above *floor*."""
+              for dist in importlib.metadata.distributions():
+                  if canonicalize_name(dist.metadata["Name"] or "") == name:
+                      continue
+                  for raw in dist.requires or ():
+                      requirement = Requirement(raw)
+                      if canonicalize_name(requirement.name) != name:
+                          continue
+                      if requirement.marker is not None and not requirement.marker.evaluate(
+                          {"extra": ""}
+                      ):
+                          continue
+                      for spec in requirement.specifier:
+                          if spec.operator in (">=", "==", "~="):
+                              try:
+                                  if Version(spec.version) > floor:
+                                      return True
+                              except Exception:  # noqa: BLE001 - unusual test versions
+                                  pass
+              return False
+
+          for name, minimum in direct.items():
+              installed = importlib.metadata.version(name)
+              floor = Version(minimum)
+              assert Version(installed) >= floor, (
+                  f"{name}: expected at least {minimum}, installed {installed}"
+              )
+              # A shared dependency may force a higher floor than the declared
+              # minimum; otherwise lowest-direct must install the minimum.
+              assert Version(installed) == floor or forces_higher(name, floor), (
+                  f"{name}: expected the lowest compatible version {minimum}, installed {installed}"
+              )
           PY
       - name: Run required source quality gates
         run: make python-check
