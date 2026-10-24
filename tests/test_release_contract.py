@@ -3,10 +3,24 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
+
+
+def _workflow_job(workflow: str, name: str) -> str:
+    match = re.search(rf"(?m)^  {re.escape(name)}:\n", workflow)
+    assert match is not None, f"missing workflow job {name}"
+    remainder = workflow[match.end() :]
+    next_job = re.search(r"(?m)^  [a-z][a-z0-9-]*:\n", remainder)
+    end = match.end() + next_job.start() if next_job else len(workflow)
+    return workflow[match.start() : end]
+
+
+def _job_header(workflow: str, name: str) -> str:
+    return _workflow_job(workflow, name).split("\n    steps:", 1)[0]
 
 
 def test_rust_sbom_contains_workspace_and_dependency_graph(tmp_path: Path) -> None:
@@ -31,8 +45,7 @@ def test_github_release_requires_successful_publication() -> None:
     # wheel build, or PyPI publish still created the GitHub Release. `if`
     # replaces the implicit success() check, so the result has to be named.
     workflow = Path(".github/workflows/wheels.yml").read_text(encoding="utf-8")
-    start = workflow.index("  github-release:\n")
-    header = workflow[start:].split("\n    steps:", 1)[0]
+    header = _job_header(workflow, "github-release")
 
     assert "needs: [publish, supply-chain]" in header
     assert "needs.publish.result == 'success'" in header
@@ -42,15 +55,22 @@ def test_github_release_requires_successful_publication() -> None:
 
 def test_publish_job_depends_on_release_and_supply_chain_gates() -> None:
     workflow = Path(".github/workflows/wheels.yml").read_text(encoding="utf-8")
+    header = _job_header(workflow, "publish")
 
-    assert "release-python" in workflow
-    assert "release-free-threaded" in workflow
-    assert "release-rust" in workflow
-    assert "supply-chain" in workflow
-    assert (
-        "needs: [release-python, release-free-threaded, release-rust, build, "
-        "build-free-threaded, sdist, supply-chain]" in workflow
-    )
+    for gate in (
+        "release-python",
+        "release-lowest",
+        "release-free-threaded",
+        "release-rust",
+        "release-msrv",
+        "build",
+        "audit-wheels",
+        "runtime-smoke",
+        "build-free-threaded",
+        "sdist",
+        "supply-chain",
+    ):
+        assert gate in header
 
 
 def test_free_threaded_wheels_are_built_and_smoke_tested() -> None:
@@ -85,6 +105,69 @@ def test_ci_audits_dependencies_on_every_change() -> None:
     assert "uv audit --locked" in workflow
     assert "cargo deny --locked check advisories" in workflow
     assert Path("deny.toml").is_file()
+
+
+def test_wheel_audit_is_locked_and_isolated_from_builds() -> None:
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    workflow = Path(".github/workflows/wheels.yml").read_text(encoding="utf-8")
+    job = _workflow_job(workflow, "audit-wheels")
+
+    assert pyproject["dependency-groups"]["wheel-audit"] == ["abi3audit==0.0.26"]
+    assert "needs: build" in _job_header(workflow, "audit-wheels")
+    assert "uv sync --locked --no-default-groups --group wheel-audit --no-install-project" in job
+    assert "uv run --no-sync abi3audit --strict --report dist/*.whl" in job
+    assert "pip install abi3audit" not in workflow
+    assert "abi3audit" not in _workflow_job(workflow, "build")
+
+
+def test_runtime_smoke_covers_native_and_pinned_musl_platforms() -> None:
+    workflow = Path(".github/workflows/wheels.yml").read_text(encoding="utf-8")
+    job = _workflow_job(workflow, "runtime-smoke")
+
+    assert "needs: build" in _job_header(workflow, "runtime-smoke")
+    assert "ubuntu-24.04-arm" in job
+    assert "macos-15-intel" in job
+    assert "docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1" in job
+    assert re.search(r"alpine:3\.22@sha256:[0-9a-f]{64}", job)
+    assert 'cd "$RUNNER_TEMP"' in job
+    assert "apk add --no-cache python3 py3-pip" in job
+    assert "pip install --no-index /dist/*.whl" in job
+
+
+def test_sdist_is_installed_and_imported_outside_the_checkout() -> None:
+    workflow = Path(".github/workflows/wheels.yml").read_text(encoding="utf-8")
+    job = _workflow_job(workflow, "sdist")
+
+    assert 'python -m venv "$RUNNER_TEMP/sdist-smoke"' in job
+    assert "-m pip install dist/*.tar.gz" in job
+    assert 'cd "$RUNNER_TEMP"' in job
+    assert "assert structguru.is_available()" in job
+
+
+def test_lowest_direct_dependency_lanes_do_not_restore_locked_versions() -> None:
+    for path, job_name in (
+        (".github/workflows/ci.yml", "lowest"),
+        (".github/workflows/wheels.yml", "release-lowest"),
+    ):
+        workflow = Path(path).read_text(encoding="utf-8")
+        job = _workflow_job(workflow, job_name)
+
+        assert 'UV_NO_SYNC: "1"' in job
+        assert "uv sync --resolution lowest-direct --all-extras" in job
+        assert "uv run --no-sync python - <<'PY'" in job
+        assert "importlib.metadata.version(name)" in job
+        assert "installed == minimum" in job
+        assert "run: make python-check" in job
+    assert "needs: metadata" in _job_header(workflow, "release-lowest")
+
+
+def test_release_enforces_the_rust_msrv() -> None:
+    workflow = Path(".github/workflows/wheels.yml").read_text(encoding="utf-8")
+    job = _workflow_job(workflow, "release-msrv")
+
+    assert "needs: metadata" in _job_header(workflow, "release-msrv")
+    assert 'toolchain: "1.89.0"' in job
+    assert "run: cargo check --workspace" in job
 
 
 def test_license_is_included_in_the_sdist_only() -> None:

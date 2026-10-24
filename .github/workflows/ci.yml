@@ -45,6 +45,49 @@ jobs:
       - name: Run quality gates
         run: make python-check
 
+  lowest:
+    name: lowest direct dependencies
+    runs-on: ubuntu-latest
+    env:
+      UV_NO_SYNC: "1"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: true
+          version: "0.11.28"
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Install lowest direct dependencies
+        run: uv sync --resolution lowest-direct --all-extras
+      - name: Verify installed direct dependency versions
+        run: |
+          uv run --no-sync python - <<'PY'
+          import importlib.metadata
+          import re
+          import tomllib
+
+          project = tomllib.load(open("pyproject.toml", "rb"))
+          requirements = list(project["project"]["dependencies"])
+          for group in project["project"]["optional-dependencies"].values():
+              requirements.extend(group)
+          for group in ("test", "lint", "bench"):
+              requirements.extend(project["dependency-groups"][group])
+          for requirement in requirements:
+              if not isinstance(requirement, str):
+                  continue
+              match = re.match(r"^([A-Za-z0-9_.-]+)(?:\[[^]]+\])?\s*>=\s*([^,;\s]+)", requirement)
+              if match:
+                  name, minimum = match.groups()
+                  installed = importlib.metadata.version(name)
+                  assert installed == minimum, f"{name}: expected {minimum}, installed {installed}"
+          PY
+      - name: Run quality gates
+        run: make python-check
+
   docs:
     runs-on: ubuntu-latest
     steps:

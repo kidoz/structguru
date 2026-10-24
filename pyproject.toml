@@ -83,6 +83,9 @@ free-threaded = [
     "pytest>=9.1.1",
     "pytest-benchmark>=5.3.0",
 ]
+wheel-audit = [
+    "abi3audit==0.0.26",
+]
 
 [tool.maturin]
 bindings = "pyo3"
