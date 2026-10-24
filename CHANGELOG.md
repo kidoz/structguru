@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Security
 
+- Celery context headers redact bytes and Enum sensitive keys and apply active
+  patterns to exported text before truncation or broker publication.
 - Key redaction now recognizes bounded UTF-8 bytes keys and Enum member names
   or string values before mapping-key normalization loses their identity.
 - Native conversion no longer invokes datetime, UUID, or Enum conversion

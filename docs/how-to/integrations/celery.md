@@ -61,8 +61,9 @@ The worker logs:
   is omitted.
 - Keys that structguru redacts (`sensitive_keys`, or the defaults such as
   `password` and `token`) are sent as `[REDACTED]`, so secrets do not reach the
-  broker. `sensitive_patterns` are not applied to the header; they still apply
-  when the worker renders its records.
+  broker. This also recognizes bounded UTF-8 bytes keys and Enum member names
+  or string values. The producer's `sensitive_patterns` apply to exported keys,
+  strings, and decimal integers before string truncation.
 - The producer's `task_id` and `task_name` never replace the worker task's own.
 
 To bind only `task_id` and `task_name`, turn propagation off:

@@ -57,8 +57,8 @@ selected context keys:
 | Value | Exported as |
 |---|---|
 | `None`, `bool` | unchanged |
-| `str` | unchanged, or cut to 1024 characters and suffixed with `...[truncated]` |
-| `int` | unchanged inside the signed 64-bit range; otherwise its decimal string |
+| `str` | pattern-redacted, then cut to 1024 characters and suffixed with `...[truncated]` if needed |
+| `int` | pattern-redacted decimal string if changed; otherwise unchanged inside the signed 64-bit range, or its decimal string outside it |
 | `float` | unchanged; NaN and infinities become `None` |
 | `Enum` member | its exported `value` |
 | `datetime`, `date`, `time` | `isoformat()` string |
@@ -71,14 +71,18 @@ selected context keys:
 
 Mapping keys:
 
-- `str` keys are kept; `None`, `bool`, `int`, and `float` keys become `str(key)`
-  (`"None"`, `"True"`, `"1.5"`); keys of other types are dropped.
+- `str` keys are kept; UTF-8 `bytes` keys of at most 128 bytes are decoded;
+  `Enum` keys use their exported value. `None`, `bool`, `int`, and `float`
+  keys become text (`"None"`, `"True"`, `"1.5"`); other types are dropped.
 - Keys longer than 255 bytes in UTF-8 are dropped.
 - A value whose key matches an active sensitive key, ignoring case, is exported
   as `[REDACTED]` at every nesting level. Active sensitive keys are the
-  configured `sensitive_keys`, or `DEFAULT_SENSITIVE_KEYS`.
-  `sensitive_patterns` are not applied to the header; they apply when the
-  worker renders its records.
+  configured `sensitive_keys`, or `DEFAULT_SENSITIVE_KEYS`. Enum member names
+  and string values are checked before key conversion.
+- The producer's active `sensitive_patterns` apply to keys and string values,
+  including converted text and decimal integers, before string truncation.
+  Pattern evaluation errors redact the entire text. Floating-point numbers,
+  booleans, and `None` remain scalar values and are not pattern targets.
 
 If the context cannot be exported, the header is omitted. Publishing never
 fails because of the context.

@@ -21,13 +21,16 @@ import os
 import threading
 import uuid
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
+from itertools import islice
 from pathlib import PurePath
-from typing import Any
+from typing import Any, cast
 
+from structguru import _runtime
 from structguru._contextvars import bind_contextvars, clear_contextvars
-from structguru.integrations._util import REDACTED, TRUNCATED_SUFFIX, active_sensitive_keys
+from structguru.integrations._util import REDACTED, TRUNCATED_SUFFIX
+from structguru.redaction import DEFAULT_SENSITIVE_KEYS
 
 _HEADER_KEY = "structguru_context"
 _setup_done = False
@@ -55,18 +58,54 @@ _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
 
 
-def _export_key(key: object) -> str | None:
+def _export_key(key: object, depth: int = 0) -> str | None:
     """Return a header-safe mapping key, or ``None`` to drop the entry."""
-    if isinstance(key, str):
-        text = str.__str__(key)
-    elif key is None or isinstance(key, (bool, int, float)):
-        text = str(key)  # JSON stringifies scalar keys the same way
+    if issubclass(type(key), enum.Enum):
+        return _export_key(cast(enum.Enum, key).value, depth + 1) if depth < _MAX_DEPTH else None
+    if issubclass(type(key), bytes):
+        key = cast(bytes, key)
+        if bytes.__len__(key) > 128:
+            return None
+        try:
+            text = bytes.__bytes__(key).decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    elif issubclass(type(key), str):
+        text = str.__str__(cast(str, key))
+    elif key is None or type(key) is bool:
+        text = str(key)
+    elif issubclass(type(key), int):
+        text = int.__repr__(cast(int, key))
+    elif issubclass(type(key), float):
+        text = float.__repr__(cast(float, key))
     else:
         return None
     return text if len(text.encode("utf-8", "surrogatepass")) <= _MAX_KEY_BYTES else None
 
 
-def _export_value(value: Any, sensitive: frozenset[str], depth: int) -> Any:
+def _sensitive_export_key(key: object, sensitive: frozenset[str]) -> bool:
+    if issubclass(type(key), enum.Enum):
+        member = cast(enum.Enum, key)
+        return any(
+            issubclass(type(name), str) and str.lower(name) in sensitive
+            for name in (member._name_, member._value_)
+        )
+    text = _export_key(key)
+    return text is not None and text.lower() in sensitive
+
+
+def _pattern_text(text: str, redact: Callable[[str], str] | None) -> str:
+    if redact is None:
+        return text
+    try:
+        return redact(text)
+    except Exception:  # noqa: BLE001 - header patterns must fail closed
+        return REDACTED
+
+
+def _export_value(
+    value: Any, sensitive: frozenset[str], depth: int, redact: Callable[[str], str] | None = None
+) -> Any:
     """Coerce *value* into JSON- and AMQP-safe scalars and containers.
 
     Mirrors what the renderer would log: supported value types keep their
@@ -74,52 +113,78 @@ def _export_value(value: Any, sensitive: frozenset[str], depth: int) -> Any:
     marker rather than its ``str()``/``repr()`` (which could expose internals).
     Strings, containers, integers, and nesting depth are bounded.
     """
-    if value is None or isinstance(value, bool):
+    cls = type(value)
+    if value is None or cls is bool:
         return value
-    if isinstance(value, str):
-        text = str.__str__(value)
+    if issubclass(cls, str):
+        text = _pattern_text(str.__str__(value), redact)
         return text if len(text) <= _MAX_STR else text[:_MAX_STR] + TRUNCATED_SUFFIX
-    if isinstance(value, int) and not isinstance(value, enum.Enum):
+    if issubclass(cls, int) and not issubclass(cls, enum.Enum):
         number = int.__int__(value)
-        return number if _INT64_MIN <= number <= _INT64_MAX else str(number)
-    if isinstance(value, float):
+        text = str(number)
+        redacted = _pattern_text(text, redact)
+        if redacted != text or not _INT64_MIN <= number <= _INT64_MAX:
+            return (
+                redacted if len(redacted) <= _MAX_STR else redacted[:_MAX_STR] + TRUNCATED_SUFFIX
+            )
+        return number
+    if issubclass(cls, float) and not issubclass(cls, enum.Enum):
         real = float.__float__(value)
         return real if math.isfinite(real) else None
-    if isinstance(value, enum.Enum):
-        return _export_value(value.value, sensitive, depth)
-    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
-        return value.isoformat()
-    if isinstance(value, (uuid.UUID, decimal.Decimal, PurePath)):
-        return _export_value(str(value), sensitive, depth)
+    if issubclass(cls, enum.Enum):
+        return (
+            _export_value(value.value, sensitive, depth + 1, redact)
+            if depth < _MAX_DEPTH
+            else "<max depth exceeded>"
+        )
+    if issubclass(cls, (datetime.datetime, datetime.date, datetime.time)):
+        return (
+            _export_value(value.isoformat(), sensitive, depth + 1, redact)
+            if depth < _MAX_DEPTH
+            else "<max depth exceeded>"
+        )
+    if issubclass(cls, (uuid.UUID, decimal.Decimal, PurePath)):
+        return _export_value(str(value), sensitive, depth, redact)
     if depth >= _MAX_DEPTH:
-        return "<max depth exceeded>"
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return _pattern_text("<max depth exceeded>", redact)
+    if dataclasses.is_dataclass(cls) and not issubclass(cls, type):
         value = {field.name: getattr(value, field.name) for field in dataclasses.fields(value)}
-    if isinstance(value, Mapping):
+    if issubclass(type(value), Mapping):
         exported: dict[str, Any] = {}
-        for raw_key, item in value.items():
+        for raw_key, item in list(islice(value.items(), _MAX_ITEMS)):
             if len(exported) >= _MAX_ITEMS:
                 break
             key = _export_key(raw_key)
             if key is None:
                 continue
+            sensitive_key = _sensitive_export_key(raw_key, sensitive) or key.lower() in sensitive
+            key = _pattern_text(key, redact)
+            if len(key.encode("utf-8", "surrogatepass")) > _MAX_KEY_BYTES:
+                continue
             exported[key] = (
-                REDACTED if key.lower() in sensitive else _export_value(item, sensitive, depth + 1)
+                REDACTED if sensitive_key else _export_value(item, sensitive, depth + 1, redact)
             )
         return exported
-    if isinstance(value, (list, tuple, set, frozenset)):
+    if issubclass(type(value), (list, tuple, set, frozenset)):
         items: list[Any] = []
-        for item in value:
+        for item in list(islice(value, _MAX_ITEMS)):
             if len(items) >= _MAX_ITEMS:
                 break
-            items.append(_export_value(item, sensitive, depth + 1))
+            items.append(_export_value(item, sensitive, depth + 1, redact))
         return items
-    return f"<unsupported: {type(value).__name__}>"
+    return _export_value(f"<unsupported: {type(value).__name__}>", sensitive, depth, redact)
 
 
 def _export_context(context: Mapping[str, Any]) -> dict[str, Any]:
     """Return *context* redacted and coerced for a message header."""
-    exported = _export_value(context, active_sensitive_keys(), 0)
+    _runtime._ensure_process()
+    state = _runtime.current_runtime()
+    keys = state.settings.sensitive_keys if state is not None else None
+    sensitive = DEFAULT_SENSITIVE_KEYS if keys is None else frozenset(key.lower() for key in keys)
+    redact = (
+        state.config.redact_patterns if state is not None and state.config.pattern_count else None
+    )
+    exported = _export_value(context, sensitive, 0, redact)
     return exported if isinstance(exported, dict) else {}
 
 
@@ -159,8 +224,10 @@ def setup_celery_logging(
     are coerced to JSON-safe scalars, lists, and string-keyed mappings (other
     objects become ``<unsupported: Type>`` markers), strings and containers are
     bounded, and keys the active runtime treats as sensitive are replaced by
-    ``[REDACTED]`` before the header reaches the broker. If the context cannot
-    be exported, the header is omitted; publishing never fails because of it.
+    ``[REDACTED]`` before the header reaches the broker. Active sensitive patterns
+    apply to exported keys, strings, and decimal integers before truncation.
+    If the context cannot be exported, the header is omitted; publishing never
+    fails because of it.
 
     Eager tasks inherit the selected caller context when propagation is enabled
     and restore the caller context on exit. Worker tasks start with clean context;

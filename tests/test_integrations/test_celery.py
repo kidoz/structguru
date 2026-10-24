@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 import subprocess
 import sys
 import textwrap
@@ -413,6 +414,89 @@ def test_propagated_context_honours_the_allow_list() -> None:
     headers: dict[str, Any] = {}
     signals.before_task_publish.send(sender=None, headers=headers)
     assert headers["structguru_context"] == {"request_id": "r", "password": "[REDACTED]"}
+
+
+def test_export_matches_bytes_and_enum_keys_before_normalization() -> None:
+    from structguru import _runtime
+    from structguru.integrations import celery as integration
+
+    class Key(enum.IntEnum):
+        password = 1
+
+    class StringKey(enum.StrEnum):
+        password = "public"
+
+    _runtime.configure(target="memory")
+    assert integration._export_context(
+        {
+            "nested": {
+                Key.password: "CANARY",
+                b"authorization": "CANARY",
+                StringKey.password: "CANARY",
+                b"safe": 42,
+            }
+        }
+    ) == {
+        "nested": {
+            "1": "[REDACTED]",
+            "authorization": "[REDACTED]",
+            "public": "[REDACTED]",
+            "safe": 42,
+        }
+    }
+
+
+def test_header_patterns_apply_to_keys_strings_integers_and_precede_truncation() -> None:
+    from structguru import _runtime
+    from structguru.integrations import celery as integration
+
+    _runtime.configure(target="memory", sensitive_patterns=[r"CANARY.*END", r"123456789"])
+    result = integration._export_context(
+        {
+            "nested": {"CANARY-key-END": "CANARY-value-END", "number": 123456789},
+            "long": "CANARY" + "x" * 2000 + "END",
+            "safe": 42,
+        }
+    )
+    assert result == {
+        "nested": {"[REDACTED]": "[REDACTED]", "number": "[REDACTED]"},
+        "long": "[REDACTED]",
+        "safe": 42,
+    }
+
+
+def test_header_patterns_reach_the_publish_signal() -> None:
+    from structguru import _runtime
+
+    _runtime.configure(target="memory", sensitive_patterns=["CANARY"])
+    signals = _dispatch_signals()
+    bind_contextvars(note="CANARY", nested={b"authorization": "CANARY", "safe": 42})
+    headers: dict[str, Any] = {}
+    signals.before_task_publish.send(sender=None, headers=headers)
+    assert headers["structguru_context"] == {
+        "note": "[REDACTED]",
+        "nested": {"authorization": "[REDACTED]", "safe": 42},
+    }
+
+
+def test_header_redaction_failures_are_closed_and_key_override_is_respected() -> None:
+    from structguru import _runtime
+    from structguru.integrations import celery as integration
+
+    class Key(enum.Enum):
+        private = 1
+
+    _runtime.configure(target="memory", sensitive_keys=["private"])
+    assert integration._export_context(
+        {"nested": {Key.private: "hidden", b"private": "hidden", "password": "retained"}}
+    ) == {"nested": {"1": "[REDACTED]", "private": "[REDACTED]", "password": "retained"}}
+
+    def broken(_text: str) -> str:
+        raise RuntimeError("injected pattern failure")
+
+    assert integration._export_value({"safe": "CANARY"}, frozenset(), 0, broken) == {
+        "[REDACTED]": "[REDACTED]"
+    }
 
 
 def test_context_export_failure_drops_the_header_without_raising(
