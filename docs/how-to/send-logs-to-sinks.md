@@ -34,7 +34,8 @@ configure(service="api", file_path="/var/log/api/app.log", also_stdout=True)
 - A relative `file_path` is resolved to an absolute path when you call
   `configure()`.
 - On Unix, a new log file is created owner-only (`0600`); an existing file
-  keeps its permissions.
+  keeps its permissions. Log and lock paths follow symlinks. On Windows, files
+  inherit filesystem permissions; structguru does not install an owner-only ACL.
 - Processes that write the same path (for example, prefork workers) coordinate
   through an owner-only `app.log.lock` sidecar next to the log. Keep it on the
   same local filesystem as the log.

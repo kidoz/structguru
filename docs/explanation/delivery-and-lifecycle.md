@@ -298,6 +298,10 @@ permissions. A relative `file_path` is resolved to an absolute one at
 `configure()`, so a later `os.chdir()` cannot split the log or move its lock
 and backups.
 
+Opening a log or lock path follows symlinks. On Windows, creation uses inherited
+filesystem permissions and does not install an owner-only ACL. Applications
+must provision their log directory and existing files accordingly.
+
 The coordination has limits. The sidecar sits next to the log, and both should
 be on a local filesystem. File locking does not extend across hosts: for
 containers and distributed deployments, writing to stdout and letting an
