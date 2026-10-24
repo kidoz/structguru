@@ -229,7 +229,7 @@ def _restore_existing_logger_states(bridge: StructguruHandler) -> None:
 
 
 def _release_bridge(bridge: StructguruHandler) -> None:
-    """Release bridge-owned state; caller must hold ``_bridge_lock``."""
+    """Release bridge-owned state; caller holds ``_bridge_lock``, then ``logging._lock``."""
     global _active_bridge
     logging.getLogger().removeHandler(bridge)
     bridge.close()
@@ -255,7 +255,9 @@ def _install_stdlib_bridge_resolved(
     suppression_threshold = _to_logging_level(suppress_level)
     suppressed_names = tuple(suppress_loggers)
 
-    with _bridge_lock:
+    # The bridge lock serializes replacement before the module lock protects
+    # root handlers and existing logger states; every path uses this order.
+    with _bridge_lock, logging._lock:  # type: ignore[attr-defined]
         if _active_bridge is not None:
             if not replace and _active_bridge in root.handlers:
                 msg = "the structguru stdlib bridge is already installed"
@@ -384,5 +386,5 @@ def uninstall_stdlib_bridge(bridge: StructguruHandler) -> None:
     earlier, or superseded by ``install_stdlib_bridge(replace=True)`` — is a
     no-op that never disturbs the currently active bridge.
     """
-    with _bridge_lock:
+    with _bridge_lock, logging._lock:  # type: ignore[attr-defined]
         _release_bridge(bridge)

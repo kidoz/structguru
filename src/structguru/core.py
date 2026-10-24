@@ -469,6 +469,8 @@ class _HandlerOwnership:
 # while the bridge is installed therefore delivers every third-party record
 # twice: once raw, once rendered. Track what we attached so the bridge can
 # suspend it and restore it on uninstall.
+# Root handler changes take logging._lock before _root_attach_condition,
+# matching bridge installation and removal.
 _root_relays: dict[logging.Handler, _RootRelay] = {}
 _handler_owners: dict[logging.Handler, _HandlerOwnership] = {}
 _root_attach_lock = threading.Lock()
@@ -480,7 +482,7 @@ _stdlib_bridge_active = False
 def _attach_to_root(handler: logging.Handler, threshold: int) -> _RootRelay:
     """Register one handler generation, unless the bridge supersedes attachment."""
     _ensure_handler_process()
-    with _root_attach_condition:
+    with logging._lock, _root_attach_condition:  # type: ignore[attr-defined]
         if handler in _root_relays:
             msg = "logging handler is already registered; remove it before adding it again"
             raise ValueError(msg)
@@ -503,7 +505,7 @@ def _attach_to_root(handler: logging.Handler, threshold: int) -> _RootRelay:
 def _detach_from_root(relay: _RootRelay) -> None:
     """Detach one registration generation and retire its raw delivery side."""
     _ensure_handler_process()
-    with _root_attach_condition:
+    with logging._lock, _root_attach_condition:  # type: ignore[attr-defined]
         if _root_relays.get(relay._sink) is not relay:
             return
         del _root_relays[relay._sink]
@@ -558,7 +560,7 @@ def _set_stdlib_bridge_active(active: bool) -> None:
     global _stdlib_bridge_active
     _ensure_handler_process()
     root = logging.getLogger()
-    with _root_attach_condition:
+    with logging._lock, _root_attach_condition:  # type: ignore[attr-defined]
         _stdlib_bridge_active = active
         affected = list(_root_relays.values())
         for relay in affected:

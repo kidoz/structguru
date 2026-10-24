@@ -8,6 +8,7 @@ import os
 import sys
 import threading
 from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pytest
 
@@ -1011,3 +1012,97 @@ def test_bridge_leaves_record_and_extras_untouched(native_memory: None, clean_ro
     assert seen[0].ctx is ctx  # type: ignore[attr-defined]
     assert ctx["obj"] is request
     assert ctx["items"] == [request]
+
+
+def test_logger_policy_snapshots_take_bridge_lock_before_logging_lock(
+    clean_root: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from structguru.integrations import stdlib as integration
+
+    acquisitions: list[str] = []
+
+    class RecordingLock:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.lock = threading.RLock()
+            self.depth = 0
+
+        @property
+        def held(self) -> bool:
+            return self.depth > 0
+
+        def acquire(self) -> bool:
+            self.lock.acquire()
+            self.depth += 1
+            acquisitions.append(self.name)
+            return True
+
+        def release(self) -> None:
+            self.depth -= 1
+            self.lock.release()
+
+        def __enter__(self) -> RecordingLock:
+            self.acquire()
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.release()
+
+    logging_lock = RecordingLock("logging")
+    bridge_lock = RecordingLock("bridge")
+    monkeypatch.setattr(logging, "_lock", logging_lock)
+    monkeypatch.setattr(integration, "_bridge_lock", bridge_lock)
+    original_policy = integration._apply_existing_logger_policy
+
+    def checked_policy(
+        disable_existing_loggers: bool | None,
+    ) -> list[tuple[logging.Logger, bool, bool]]:
+        assert logging_lock.held
+        assert bridge_lock.held
+        return original_policy(disable_existing_loggers)
+
+    monkeypatch.setattr(integration, "_apply_existing_logger_policy", checked_policy)
+
+    bridge = install_stdlib_bridge(disable_existing_loggers=False)
+    assert acquisitions[:2] == ["bridge", "logging"]
+    acquisitions.clear()
+    bridge = install_stdlib_bridge(disable_existing_loggers=False, replace=True)
+    assert acquisitions[:2] == ["bridge", "logging"]
+    acquisitions.clear()
+    uninstall_stdlib_bridge(bridge)
+    assert acquisitions[:2] == ["bridge", "logging"]
+
+
+def test_root_attachment_takes_logging_lock_before_its_condition(
+    clean_root: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    condition = core._root_attach_condition
+
+    @contextmanager
+    def checked_condition() -> Iterator[None]:
+        assert logging._lock._is_owned()  # type: ignore[attr-defined]
+        with condition:
+            yield
+
+    handler = logging.NullHandler()
+    relay = None
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(core, "_root_attach_condition", checked_condition())
+            relay = core._attach_to_root(handler, logging.INFO)
+        for active in (True, False):
+            with monkeypatch.context() as patch:
+                patch.setattr(core, "_root_attach_condition", checked_condition())
+                core._set_stdlib_bridge_active(active)
+        # Retirement also uses the condition, after releasing logging._lock.
+        # Keep that separate from the attachment lock-order assertion.
+        with monkeypatch.context() as patch:
+            patch.setattr(core, "_root_attach_condition", checked_condition())
+            patch.setattr(core, "_retire_handler_generation", lambda *args, **kwargs: None)
+            core._detach_from_root(relay)
+    finally:
+        if relay is not None:
+            core._detach_from_root(relay)
+            core._retire_handler_generation(relay, raw=True)
+            core._retire_handler_generation(relay, raw=False)
+        core._set_stdlib_bridge_active(False)

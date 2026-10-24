@@ -22,6 +22,8 @@ All notable changes to this project are documented here. The format is based on
   and Sentry submission, tracks exact pre-call leases, excludes later producers,
   and remains bounded and reentrant. After fork, leases from vanished threads
   reset while the surviving thread's in-flight submissions remain tracked.
+- Stdlib bridge installation and removal use the same lock order as sink root
+  attachment, preventing concurrent `logger.add()` or `remove()` deadlocks.
 - Tuple-subclass pairs are redacted in messages and exception locals, list
   conversion snapshots elements before Python callbacks, and unsupported
   dataclass mapping keys no longer traverse their fields.
