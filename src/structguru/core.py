@@ -14,6 +14,7 @@ A global ``logger`` instance is exported for convenience::
 from __future__ import annotations
 
 import functools
+import importlib
 import inspect
 import itertools
 import logging
@@ -150,7 +151,7 @@ _OBJECT_FORMAT: object = object.__format__
 _Template: TypeAlias = tuple[frozenset[str], frozenset[str], bool, bool]
 
 
-def _field_path(field_name: str) -> tuple[str, list[str]]:
+def _python_field_path(field_name: str) -> tuple[str, list[str]]:
     """Split a replacement field name into its root and attribute/index names."""
     end = len(field_name)
     for separator in ".[":
@@ -161,33 +162,22 @@ def _field_path(field_name: str) -> tuple[str, list[str]]:
     return field_name[:end], parts
 
 
-def _parse_template(msg: str) -> _Template | Exception:
-    """Collect a template's placeholder names, or return the parse error.
-
-    Replacement fields nested in a format spec (``{x:{width}}``) count too.
-    """
-    consumed: set[str] = set()
-    names: set[str] = set()
-    has_path = False
-    pending = [msg]
-    try:
-        while pending:
-            for _, field_name, format_spec, _ in _FORMATTER.parse(pending.pop()):
-                if field_name is None:
-                    continue
-                root, path = _field_path(field_name)
-                if root and not root.isdigit():
-                    consumed.add(root)
-                    names.add(root.lower())
-                if path:
-                    has_path = True
-                    names.update(part.lower() for part in path)
-                if format_spec and "{" in format_spec:
-                    pending.append(format_spec)
-    except Exception as exc:  # noqa: BLE001 - malformed template, reported by the caller
-        return exc
-    default_key = not DEFAULT_SENSITIVE_KEYS.isdisjoint(names)
-    return frozenset(consumed), frozenset(names), default_key, has_path
+_template_native = importlib.import_module("structguru._rust")
+_field_path = cast(
+    "Callable[[str], tuple[str, list[str]]]",
+    functools.partial(_template_native._template_field_path, _python_field_path),
+)
+# Preserve CPython brace grammar and Unicode behavior while collecting names
+# natively. The existing bounded LRU remains the only template cache.
+_parse_template = cast(
+    "Callable[[str], _Template | Exception]",
+    functools.partial(
+        _template_native._analyze_template,
+        _FORMATTER.parse,
+        _python_field_path,
+        DEFAULT_SENSITIVE_KEYS,
+    ),
+)
 
 
 _extract_format_keys = functools.lru_cache(maxsize=1024)(_parse_template)

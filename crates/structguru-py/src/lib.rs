@@ -7,6 +7,7 @@ mod dispatch;
 mod filter;
 mod local_repr;
 mod rendering;
+mod template;
 mod writer;
 
 #[pyfunction]
@@ -83,6 +84,8 @@ fn rust_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<rendering::RuntimeConfig>()?;
     module.add_function(wrap_pyfunction!(conversion::merge_fields, module)?)?;
     module.add_function(wrap_pyfunction!(local_repr::_render_local_repr, module)?)?;
+    module.add_function(wrap_pyfunction!(template::_template_field_path, module)?)?;
+    module.add_function(wrap_pyfunction!(template::_analyze_template, module)?)?;
     module.add_class::<dispatch::CallableDispatcher>()?;
     module.add_class::<dispatch::DispatchChannel>()?;
     module.add_function(wrap_pyfunction!(dispatch::in_callback, module)?)?;

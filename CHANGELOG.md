@@ -13,6 +13,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- Template metadata and field-path analysis now run in Rust, retaining CPython
+  brace parsing, formatting, Unicode behavior, and the bounded template cache.
 - Exception-local and redacted message-container traversal now runs in Rust,
   preserving Python representations, bounds, and redaction before truncation.
 - Ordinary records without Python hooks or exception/stack capture now resolve

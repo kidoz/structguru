@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -98,3 +99,46 @@ def test_concurrent_local_repr_keeps_redaction_and_traversal_state_isolated() ->
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         assert sum(executor.map(render, range(4))) == 400
+
+
+def test_concurrent_template_analysis_preserves_redaction_and_consumed_fields() -> None:
+    from structguru import core
+
+    workers, records_per_worker = 4, 300
+    core._extract_format_keys.cache_clear()
+    _runtime.configure(target="memory", maxsize=32)
+    try:
+
+        def emit(worker: int) -> None:
+            for sequence in range(records_per_worker):
+                template = f"worker-{worker}-{sequence} {{value:0{{width}}d}} {{token}}"
+                structguru.logger.info(
+                    template,
+                    value=sequence,
+                    width=4,
+                    token="CANARY",
+                    worker_id=worker,
+                    sequence=sequence,
+                )
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            list(executor.map(emit, range(workers)))
+        _runtime.flush()
+        lines = _runtime.drain_messages()
+        records = [json.loads(line) for line in lines]
+        expected = workers * records_per_worker
+        metrics = _runtime.writer_metrics()
+        assert metrics is not None
+        assert metrics["enqueued"] == metrics["written"] == len(records) == expected
+        assert metrics["dropped"] == 0
+        assert all("CANARY" not in line for line in lines)
+        assert all(not {"value", "width", "token"}.intersection(record) for record in records)
+        assert {record["message"] for record in records} == {
+            f"worker-{worker}-{sequence} {sequence:04d} [REDACTED]"
+            for worker in range(workers)
+            for sequence in range(records_per_worker)
+        }
+        assert core._extract_format_keys.cache_info().currsize == 1024
+        assert not _gil_enabled()
+    finally:
+        _runtime.shutdown()
