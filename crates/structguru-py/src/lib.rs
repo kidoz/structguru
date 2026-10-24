@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 
 mod conversion;
 mod dispatch;
+mod exception;
 mod filter;
 mod local_repr;
 mod rendering;
@@ -84,6 +85,7 @@ fn rust_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<rendering::RuntimeConfig>()?;
     module.add_function(wrap_pyfunction!(conversion::merge_fields, module)?)?;
     module.add_function(wrap_pyfunction!(local_repr::_render_local_repr, module)?)?;
+    module.add_function(wrap_pyfunction!(exception::_traceback_line, module)?)?;
     module.add_function(wrap_pyfunction!(template::_template_field_path, module)?)?;
     module.add_function(wrap_pyfunction!(template::_analyze_template, module)?)?;
     module.add_class::<dispatch::CallableDispatcher>()?;

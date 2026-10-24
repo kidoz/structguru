@@ -5,9 +5,13 @@ from __future__ import annotations
 import argparse
 import enum
 import json
+import linecache
 import sys
+import traceback
+import types
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from importlib.machinery import ModuleSpec
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, NamedTuple
 
@@ -314,8 +318,6 @@ class TestBuildExceptionDict:
 
     def test_only_kept_frames_are_extracted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A deep traceback must not pay for source lookup on frames it discards."""
-        import traceback
-
         from structguru import exceptions
 
         def recurse(n: int) -> int:
@@ -329,22 +331,18 @@ class TestBuildExceptionDict:
             exc_info = sys.exc_info()
 
         extracted_depths: list[int] = []
-        original = traceback.extract_tb
+        original = exceptions._walk_traceback
 
-        def counting_extract_tb(tb: object, limit: int | None = None) -> object:
-            depth = 0
-            node = tb
-            while node is not None:
-                depth += 1
-                node = node.tb_next  # type: ignore[attr-defined]
-            extracted_depths.append(depth)
-            return original(tb, limit)  # type: ignore[arg-type]
+        def counting_walk(tb: types.TracebackType) -> Any:
+            frames = list(original(tb))
+            extracted_depths.append(len(frames))
+            return iter(frames)
 
-        monkeypatch.setattr(exceptions.traceback, "extract_tb", counting_extract_tb)
+        monkeypatch.setattr(exceptions, "_walk_traceback", counting_walk)
         result = build_exception_dict(exc_info, max_frames=5)
         assert result is not None
         assert len(result["frames"]) == 5
-        assert extracted_depths == [5], "extract_tb saw frames that were then discarded"
+        assert extracted_depths == [5], "source extraction saw discarded frames"
         assert all(frame["name"] == "recurse" for frame in result["frames"])
 
     def test_locals_and_source_line_are_both_captured(self) -> None:
@@ -367,6 +365,111 @@ class TestBuildExceptionDict:
         assert frame["locals"]["answer"] == "41"
         stripped = [{k: v for k, v in f.items() if k != "locals"} for f in with_locals["frames"]]
         assert stripped == without["frames"]
+
+    @pytest.mark.parametrize("traceback_limit", [None, -1, 0, 1, 20])
+    def test_structured_frames_match_cpython_with_traceback_limit(
+        self, monkeypatch: pytest.MonkeyPatch, traceback_limit: int | None
+    ) -> None:
+        info = _make_exc_info()
+        if traceback_limit is None:
+            monkeypatch.delattr(sys, "tracebacklimit", raising=False)
+        else:
+            monkeypatch.setattr(sys, "tracebacklimit", traceback_limit, raising=False)
+        expected = traceback.extract_tb(info[2])
+        result = build_exception_dict(info)
+        assert result is not None
+        assert result["frames"] == [
+            {
+                "filename": frame.filename,
+                "lineno": frame.lineno,
+                "name": frame.name,
+                "line": frame.line,
+            }
+            for frame in expected
+        ]
+
+    def test_synthetic_traceback_instruction_lines_match_cpython(self) -> None:
+        def fail() -> None:
+            try:
+                raise ValueError(
+                    # Exercise an instruction spanning multiple source lines.
+                    "multiline failure"
+                )
+            finally:
+                # The unwinding bytecode also contains positions without lines.
+                pass
+
+        try:
+            fail()
+        except ValueError as exc:
+            value = exc
+            tb = exc.__traceback__.tb_next
+        assert tb is not None
+        code = tb.tb_frame.f_code
+        for instruction in [-1, *range(len(code.co_code))]:
+            synthetic = types.TracebackType(None, tb.tb_frame, instruction, 999)
+            expected = traceback.extract_tb(synthetic)
+            result = build_exception_dict((ValueError, value, synthetic))
+            assert result is not None
+            assert result["frames"] == [
+                {
+                    "filename": frame.filename,
+                    "lineno": frame.lineno,
+                    "name": frame.name,
+                    "line": frame.line,
+                }
+                for frame in expected
+            ], instruction
+        invalid = types.TracebackType(None, tb.tb_frame, len(code.co_code), 999)
+        with pytest.raises(RuntimeError, match="generator raised StopIteration"):
+            traceback.extract_tb(invalid)
+        with pytest.raises(RuntimeError, match="generator raised StopIteration"):
+            build_exception_dict((ValueError, value, invalid))
+
+    def test_source_loader_and_traceback_proxy_match_cpython(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        source = "def fail():\n    raise ValueError('loaded source')\n"
+        filename = "structguru_loader_fixture.py"
+        calls: list[str] = []
+
+        class Loader:
+            def get_source(self, name: str) -> str:
+                calls.append(name)
+                return source
+
+        loader = Loader()
+        namespace: dict[str, Any] = {
+            "__name__": "loader_fixture",
+            "__loader__": loader,
+            "__spec__": ModuleSpec("loader_fixture", loader),
+        }
+        exec(compile(source, filename, "exec"), namespace)
+        try:
+            namespace["fail"]()
+        except ValueError as exc:
+            value = exc
+            tb = exc.__traceback__.tb_next
+        assert tb is not None
+        monkeypatch.setattr(linecache, "cache", {})
+        [expected] = traceback.extract_tb(tb)
+        linecache.cache.clear()
+        result = build_exception_dict((ValueError, value, tb))
+        assert result is not None
+        assert result["frames"] == [
+            {
+                "filename": expected.filename,
+                "lineno": expected.lineno,
+                "name": expected.name,
+                "line": expected.line,
+            }
+        ]
+        assert expected.line == "raise ValueError('loaded source')"
+        assert calls == ["loader_fixture", "loader_fixture"]
+        proxy = SimpleNamespace(
+            tb_frame=tb.tb_frame, tb_lasti=tb.tb_lasti, tb_lineno=999, tb_next=None
+        )
+        assert build_exception_dict((ValueError, value, proxy)) == result
 
 
 @dataclass

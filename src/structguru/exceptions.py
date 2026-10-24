@@ -14,7 +14,7 @@ import sys
 import traceback
 import types
 from collections import deque
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any, cast
 
 from structguru.redaction import DEFAULT_SENSITIVE_KEYS
@@ -22,6 +22,10 @@ from structguru.redaction import DEFAULT_SENSITIVE_KEYS
 _render_local_repr = cast(
     "Callable[..., tuple[str, bool, bool, bool]]",
     importlib.import_module("structguru._rust")._render_local_repr,
+)
+_traceback_line = cast(
+    "Callable[[types.CodeType, int], int | None]",
+    importlib.import_module("structguru._rust")._traceback_line,
 )
 
 _MAX_GROUP_DEPTH = 10
@@ -152,6 +156,16 @@ def build_exception_dict(
     return result
 
 
+def _walk_traceback(tb: types.TracebackType) -> Iterator[tuple[types.FrameType, int]]:
+    """Yield frames with CPython's instruction line, omitting unused columns."""
+    node: types.TracebackType | None = tb
+    while node is not None:
+        frame = node.tb_frame
+        line = _traceback_line(frame.f_code, node.tb_lasti)
+        yield frame, node.tb_lineno if line is None else line
+        node = node.tb_next
+
+
 def _build_frames(
     exc_tb: Any,
     include_locals: bool,
@@ -163,8 +177,8 @@ def _build_frames(
     """Collect the last ``max_frames`` traceback frames with the same fields either way.
 
     The traceback is walked to the first frame that will be kept *before*
-    ``traceback.extract_tb()`` runs: it reads and dedents source for every frame
-    it visits, so extracting the whole traceback and slicing afterwards paid for
+    source extraction runs: it reads source for every frame it visits, so
+    extracting the whole traceback and slicing afterwards paid for
     frames that were then discarded, which made a ``RecursionError`` cost
     hundreds of frames of source lookup for the twenty it reported. Locals, when
     requested, come from the same selected frames, so the ``line`` field is
@@ -181,7 +195,14 @@ def _build_frames(
     for _ in range(max(depth - max_frames, 0)):
         node = node.tb_next
 
-    summaries = traceback.extract_tb(node)
+    # Structured fields expose no column or end-line positions. co_lines()
+    # supplies the same instruction's start line, even for synthetic tb_lineno
+    # overrides; StackSummary retains CPython's source-loader/cache behavior.
+    summaries = (
+        traceback.StackSummary.extract(_walk_traceback(node))
+        if type(node) is types.TracebackType
+        else traceback.extract_tb(node)
+    )
     raw_frames: list[Any] = []
     if include_locals:
         # ``FrameSummary`` never carries ``f_locals``; pair each summary with

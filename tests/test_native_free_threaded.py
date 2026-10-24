@@ -95,6 +95,53 @@ def test_concurrent_stdlib_forwarding_isolates_record_fields() -> None:
         _runtime.shutdown()
 
 
+def test_concurrent_structured_exceptions_preserve_lines_and_redacted_locals() -> None:
+    workers, records_per_worker = 4, 50
+    _runtime.configure(
+        target="memory", maxsize=32, structured_exceptions=True, exception_include_locals=True
+    )
+    try:
+
+        def emit(worker: int) -> None:
+            password = "CANARY"
+            try:
+                raise ValueError(f"worker {worker}")
+            except ValueError:
+                for sequence in range(records_per_worker):
+                    structguru.logger.exception(
+                        "concurrent failure", worker=worker, sequence=sequence
+                    )
+            assert password == "CANARY"
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            list(executor.map(emit, range(workers)))
+        _runtime.flush_native()
+        lines = _runtime.drain_messages()
+        records = [json.loads(line) for line in lines]
+        expected = workers * records_per_worker
+        metrics = _runtime.writer_metrics()
+        assert metrics is not None
+        assert metrics["enqueued"] == metrics["written"] == len(records) == expected
+        assert metrics["dropped"] == 0
+        assert all("CANARY" not in line for line in lines)
+        assert {(record["worker"], record["sequence"]) for record in records} == {
+            (worker, sequence)
+            for worker in range(workers)
+            for sequence in range(records_per_worker)
+        }
+        for record in records:
+            exception = record["exception"]
+            assert exception["message"] == f"worker {record['worker']}"
+            [frame] = exception["frames"]
+            assert frame["line"] == 'raise ValueError(f"worker {worker}")'
+            assert frame["locals"]["worker"] == str(record["worker"])
+            assert frame["locals"]["sequence"] == str(record["sequence"])
+            assert frame["locals"]["password"] == "[REDACTED]"
+        assert not _gil_enabled()
+    finally:
+        _runtime.shutdown()
+
+
 def test_list_snapshot_survives_concurrent_mutation_during_conversion() -> None:
     class MutatingClock:
         def __init__(self, values: list[object]) -> None:

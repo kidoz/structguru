@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import linecache
 import sys
 from typing import Any
 
@@ -31,8 +32,7 @@ def _capture_exc_info(depth: int) -> Any:
     raise AssertionError(msg)
 
 
-def _bench_exception(benchmark: Any, depth: int, **config: Any) -> None:
-    exc_info = _capture_exc_info(depth)
+def _bench_exception_info(benchmark: Any, exc_info: Any, **config: Any) -> None:
     _runtime.configure(service="bench", target="null", level="INFO", **config)
     try:
         failing = logger.opt(exception=exc_info)
@@ -48,6 +48,10 @@ def _bench_exception(benchmark: Any, depth: int, **config: Any) -> None:
         assert metrics["dropped"] == 0
     finally:
         _runtime.shutdown()
+
+
+def _bench_exception(benchmark: Any, depth: int, **config: Any) -> None:
+    _bench_exception_info(benchmark, _capture_exc_info(depth), **config)
 
 
 @pytest.mark.parametrize("carets", [True, False], ids=["carets", "no-carets"])
@@ -77,6 +81,29 @@ def test_bench_native_exception_structured_with_locals(benchmark: Any, depth: in
         structured_exceptions=True,
         exception_include_locals=True,
     )
+
+
+@pytest.mark.parametrize("statements", [100, 1000])
+def test_bench_native_exception_structured_large_function(
+    benchmark: Any, monkeypatch: pytest.MonkeyPatch, statements: int
+) -> None:
+    """Cover instruction lookup late in a function, independently of stack depth."""
+    source = (
+        "def fail():\n    value = 0\n"
+        + "    value += 1\n" * statements
+        + "    raise RuntimeError('synthetic failure')\n"
+    )
+    filename = f"<bench-large-function-{statements}>"
+    monkeypatch.setitem(
+        linecache.cache, filename, (len(source), None, source.splitlines(keepends=True), filename)
+    )
+    namespace: dict[str, Any] = {}
+    exec(compile(source, filename, "exec"), namespace)
+    try:
+        namespace["fail"]()
+    except RuntimeError:
+        exc_info = sys.exc_info()
+    _bench_exception_info(benchmark, exc_info, structured_exceptions=True)
 
 
 def test_bench_native_logger_exception_in_except_block(benchmark: Any) -> None:

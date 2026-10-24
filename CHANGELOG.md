@@ -13,6 +13,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- Structured exceptions resolve instruction lines in Rust without computing
+  unused column positions, retaining CPython source lookup and traceback fields.
 - Stdlib forwarding passes per-record fields directly to the native pipeline
   without creating `bind()` or `opt()` logger clones.
 - Template metadata and field-path analysis now run in Rust, retaining CPython
