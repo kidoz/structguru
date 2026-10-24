@@ -35,6 +35,10 @@ All notable changes to this project are documented here. The format is based on
 - Handler remove/re-add generations close exactly once after every delivery
   retires; stale finalizers cannot close new registrations, and immediate and
   deferred close errors are contained.
+- gRPC context cleanup covers all `BaseException` exits, Celery first setup is
+  serialized, Requests logs the final prepared URL/request ID, stdlib logger
+  iteration is synchronized, and Celery/Requests edge cases restore context and
+  header overrides correctly.
 - `flush()`, `shutdown()`, and reconfiguration no longer block on the abandonment
   warning when stdout and stderr share a full pipe. The stall limit still ends
   the wait. The warning is dropped when stderr cannot accept a write.

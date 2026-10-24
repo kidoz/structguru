@@ -65,20 +65,13 @@ class StructguruInterceptor:
 
         try:
             handler = continuation(handler_call_details)
-        except Exception:
+            if handler is None:
+                return None
+            return _wrap_rpc_handler(handler, method, request_id)
+        finally:
+            # The wrapped handler re-binds this context when invoked. Clearing
+            # here also covers cancellation and other BaseException exits.
             clear_contextvars()
-            raise
-
-        if handler is None:
-            clear_contextvars()
-            return None
-
-        wrapped = _wrap_rpc_handler(handler, method, request_id)
-        # Clear context now; the wrapped handler re-binds it when invoked.
-        # This prevents grpc_method/request_id from leaking into unrelated
-        # logs between intercept_service() returning and the handler executing.
-        clear_contextvars()
-        return wrapped
 
 
 def _wrap_rpc_handler(handler: Any, method: str, request_id: str) -> Any:
@@ -131,20 +124,15 @@ def _replace_behavior(
         bind_contextvars(grpc_method=method, request_id=request_id)
         try:
             result = original_fn(*args, **kwargs)
-        except Exception:
+            if streaming_response:
+                # The response iterator is lazy: gRPC may not begin consuming it
+                # for a while, or ever (the client cancels first). Snapshot the
+                # context the handler produced and restore it when iteration starts.
+                snapshot = get_contextvars()
+                return _wrap_iterator(result, snapshot)
+            return result
+        finally:
             clear_contextvars()
-            raise
-        if streaming_response:
-            # The response iterator is lazy: gRPC may not begin consuming it
-            # for a while, or ever (the client cancels first).  Snapshot the
-            # context the handler produced, wipe it here so it cannot leak into
-            # unrelated logs on this thread in the meantime, and restore it
-            # when iteration actually starts.
-            snapshot = get_contextvars()
-            clear_contextvars()
-            return _wrap_iterator(result, snapshot)
-        clear_contextvars()
-        return result
 
     # gRPC handlers are namedtuple-like; replace the behavior via _replace if
     # available, otherwise set the attribute directly.

@@ -377,6 +377,34 @@ class TestStructguruInterceptor:
         assert "grpc_method" not in get_contextvars()
 
 
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
+def test_continuation_base_exception_clears_context(error_type: type[BaseException]) -> None:
+    interceptor = StructguruInterceptor()
+    continuation = MagicMock(side_effect=error_type())
+
+    with pytest.raises(error_type):
+        interceptor.intercept_service(continuation, _make_handler_details())
+
+    assert get_contextvars() == {}
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
+def test_handler_base_exception_clears_context(error_type: type[BaseException]) -> None:
+    def interrupted(request: object, context: object) -> None:
+        raise error_type()
+
+    interceptor = StructguruInterceptor()
+    handler = _make_handler(unary_unary=interrupted)
+    wrapped = interceptor.intercept_service(
+        MagicMock(return_value=handler), _make_handler_details()
+    )
+
+    with pytest.raises(error_type):
+        wrapped.unary_unary("req", "ctx")
+
+    assert get_contextvars() == {}
+
+
 @pytest.mark.parametrize(
     "key, metadata, expected",
     [
