@@ -1189,7 +1189,8 @@ impl CallableDispatcher {
                 }
             };
             if let Some(finalizer) = due {
-                finalizer.bind(py).call0()?;
+                // Immediate and deferred finalization have the same containment.
+                let _ = finalizer.bind(py).call0();
             }
         }
         Ok((removed, abandoned))

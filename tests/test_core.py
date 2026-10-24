@@ -615,6 +615,209 @@ class TestLoggerAddRemove:
         lines = (tmp_path / "test.log").read_text().splitlines()
         assert [json.loads(line)["message"] for line in lines] == ["trigger", "queued"]
 
+    def test_native_callback_can_remove_and_readd_same_handler(self) -> None:
+        _runtime.configure(target="null")
+        log = Logger()
+
+        class ReaddingHandler(logging.Handler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.messages: list[str] = []
+                self.close_calls = 0
+                self.first_id = 0
+                self.second_id: int | None = None
+
+            def emit(self, record: logging.LogRecord) -> None:
+                message = json.loads(record.getMessage())["message"]
+                self.messages.append(message)
+                if message == "first":
+                    log.remove(self.first_id)
+                    self.second_id = log.add(self)
+
+            def close(self) -> None:
+                self.close_calls += 1
+                super().close()
+
+        handler = ReaddingHandler()
+        handler.first_id = log.add(handler)
+        try:
+            log.info("first")
+            _runtime.flush()
+            assert handler.second_id is not None
+            assert handler.close_calls == 0
+            log.info("second")
+            _runtime.flush()
+            assert handler.messages == ["first", "second"]
+            assert handler.close_calls == 0
+        finally:
+            if handler.second_id is not None and handler.second_id in core._sinks:
+                log.remove(handler.second_id)
+            elif handler.first_id in core._sinks:
+                log.remove(handler.first_id)
+        assert handler.close_calls == 1
+
+    def test_raw_callback_can_remove_and_readd_same_handler(self) -> None:
+        _runtime.configure(target="null")
+        log = Logger()
+
+        class ReaddingHandler(logging.Handler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.messages: list[str] = []
+                self.close_calls = 0
+                self.first_id = 0
+                self.second_id: int | None = None
+
+            def emit(self, record: logging.LogRecord) -> None:
+                message = record.getMessage()
+                self.messages.append(message)
+                if message == "first":
+                    log.remove(self.first_id)
+                    self.second_id = log.add(self)
+
+            def close(self) -> None:
+                self.close_calls += 1
+                super().close()
+
+        handler = ReaddingHandler()
+        handler.first_id = log.add(handler)
+        try:
+            logging.getLogger("third_party").warning("first")
+            assert handler.second_id is not None
+            assert handler.close_calls == 0
+            logging.getLogger("third_party").warning("second")
+            assert handler.messages == ["first", "second"]
+            assert handler.close_calls == 0
+        finally:
+            if handler.second_id is not None and handler.second_id in core._sinks:
+                log.remove(handler.second_id)
+            elif handler.first_id in core._sinks:
+                log.remove(handler.first_id)
+        assert handler.close_calls == 1
+
+    def test_repeated_deferred_generations_close_exactly_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _runtime.configure(target="null")
+        log = Logger()
+        finalizers: list[Any] = []
+
+        def defer(token: int, *, finalizer: Any = None) -> bool:
+            assert finalizer is not None
+            finalizers.append(finalizer)
+            return True
+
+        class TrackingHandler(logging.Handler):
+            close_calls = 0
+
+            def emit(self, record: logging.LogRecord) -> None:
+                pass
+
+            def close(self) -> None:
+                self.close_calls += 1
+                super().close()
+
+        monkeypatch.setattr(_runtime, "remove_callable_sink", defer)
+        handler = TrackingHandler()
+        for _ in range(3):
+            handler_id = log.add(handler)
+            log.remove(handler_id)
+        assert handler.close_calls == 0
+
+        finalizers[0]()
+        finalizers[2]()
+        assert handler.close_calls == 0
+        finalizers[1]()
+        assert handler.close_calls == 1
+        finalizers[0]()
+        assert handler.close_calls == 1
+        assert handler not in core._handler_owners
+
+    def test_close_error_rejects_reentrant_add_and_releases_ownership(self) -> None:
+        _runtime.configure(target="null")
+        log = Logger()
+
+        class FailingCloseHandler(logging.Handler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.close_calls = 0
+                self.readd_errors: list[str] = []
+
+            def emit(self, record: logging.LogRecord) -> None:
+                pass
+
+            def close(self) -> None:
+                self.close_calls += 1
+                try:
+                    log.add(self)
+                except ValueError as exc:
+                    self.readd_errors.append(str(exc))
+                raise RuntimeError("close failed")
+
+        handler = FailingCloseHandler()
+        handler_id = log.add(handler)
+        remover = threading.Thread(target=log.remove, args=(handler_id,), daemon=True)
+        remover.start()
+        remover.join(3)
+        assert not remover.is_alive()
+        assert handler.close_calls == 1
+        assert handler.readd_errors == [
+            "logging handler is being closed; add it again after close completes"
+        ]
+        assert handler not in core._handler_owners
+
+        second_id = log.add(handler)
+        log.remove(second_id)
+        assert handler.close_calls == 2
+        assert len(handler.readd_errors) == 2
+        assert handler not in core._handler_owners
+
+    def test_after_fork_reconciles_retired_generations_and_locks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _runtime.configure(target="null")
+        log = Logger()
+        finalizers: list[Any] = []
+
+        def defer(token: int, *, finalizer: Any = None) -> bool:
+            assert finalizer is not None
+            finalizers.append(finalizer)
+            return True
+
+        class TrackingHandler(logging.Handler):
+            close_calls = 0
+
+            def emit(self, record: logging.LogRecord) -> None:
+                pass
+
+            def close(self) -> None:
+                self.close_calls += 1
+                super().close()
+
+        monkeypatch.setattr(_runtime, "remove_callable_sink", defer)
+        handler = TrackingHandler()
+        first_id = log.add(handler)
+        first_relay = core._root_relays[handler]
+        log.remove(first_id)
+        first_relay._raw_retired = False
+        first_relay._active = 1
+        second_id = log.add(handler)
+        stale_lock = core._root_attach_lock
+        stale_lock.acquire()
+
+        core._after_fork()
+
+        assert core._root_attach_lock is not stale_lock
+        assert not core._root_attach_lock.locked()
+        assert first_relay._active == 0
+        assert first_relay._raw_retired
+        finalizers[0]()
+        assert handler.close_calls == 0
+        log.remove(second_id)
+        finalizers[1]()
+        assert handler.close_calls == 1
+        assert handler not in core._handler_owners
+
     @pytest.mark.skipif(os.name != "posix", reason="Unix permission bits only")
     def test_path_sink_is_created_owner_only(self, tmp_path: Path) -> None:
         configure(service="test", level="DEBUG", stream=io.StringIO())

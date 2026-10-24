@@ -960,6 +960,17 @@ def test_flush_ignores_later_lease_settlement() -> None:
     assert returned.is_set() and not flusher.is_alive()
 
 
+def test_remove_contains_immediate_finalizer_errors() -> None:
+    dispatcher = CallableSinkDispatcher()
+    token = dispatcher.add(lambda line: None, enabled=True)
+
+    def fail() -> None:
+        raise RuntimeError("close failed")
+
+    assert dispatcher.remove(token, finalizer=fail, stall_timeout=1) == (True, 0)
+    dispatcher.disable()
+
+
 @pytest.mark.parametrize("destination", ["stream", "callable", "sentry"])
 def test_flush_covers_native_acceptance_before_secondary_submission(
     destination: str, monkeypatch: pytest.MonkeyPatch
@@ -1118,6 +1129,22 @@ def test_flush_bounds_a_stalled_runtime_submission(monkeypatch: pytest.MonkeyPat
         structguru.logger.remove(token)
         _runtime.shutdown()
     assert not producer.is_alive()
+
+
+def test_remove_contains_deferred_finalizer_errors() -> None:
+    dispatcher = CallableSinkDispatcher()
+    token = 0
+
+    def fail() -> None:
+        raise RuntimeError("close failed")
+
+    def sink(line: str) -> None:
+        assert dispatcher.remove(token, finalizer=fail, stall_timeout=1) == (True, 0)
+
+    token = dispatcher.add(sink, enabled=True)
+    dispatcher.enqueue("record", 20, overflow="block")
+    assert dispatcher.flush(stall_timeout=1) == 0
+    dispatcher.disable()
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")

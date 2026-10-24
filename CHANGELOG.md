@@ -25,6 +25,9 @@ All notable changes to this project are documented here. The format is based on
 - Tuple-subclass pairs are redacted in messages and exception locals, list
   conversion snapshots elements before Python callbacks, and unsupported
   dataclass mapping keys no longer traverse their fields.
+- Handler remove/re-add generations close exactly once after every delivery
+  retires; stale finalizers cannot close new registrations, and immediate and
+  deferred close errors are contained.
 - `flush()`, `shutdown()`, and reconfiguration no longer block on the abandonment
   warning when stdout and stderr share a full pipe. The stall limit still ends
   the wait. The warning is dropped when stderr cannot accept a write.

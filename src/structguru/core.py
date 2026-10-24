@@ -386,25 +386,30 @@ _id_counter_lock = threading.Lock()
 
 
 class _RootRelay(logging.Handler):
-    """Root-logger attachment that delivers raw stdlib records to one sink.
+    """One registration generation of a handler attached to the root logger."""
 
-    Third-party records reach an ``add()`` sink through this relay rather than
-    through the sink's handler directly, so raw delivery keeps the guarantees
-    of native delivery: a record emitted inside any sink callback is not
-    delivered back into ``add()`` sinks, and ``Logger.remove`` waits for
-    raw deliveries already in progress.
-    """
-
-    def __init__(self, sink: logging.Handler, threshold: int) -> None:
+    def __init__(
+        self,
+        sink: logging.Handler,
+        threshold: int,
+        ownership: _HandlerOwnership,
+        generation: int,
+    ) -> None:
         super().__init__()
         self._sink = sink
         self._threshold = threshold
+        self._ownership = ownership
+        self._generation = generation
         self._condition = threading.Condition()
         self._active = 0
         self._detached = False
+        self._raw_retired = False
+        self._native_retired = False
+        self._released = False
+        self._close_on_release = True
 
     def __repr__(self) -> str:
-        return f"<{type(self).__name__} {self._sink!r}>"
+        return f"<{type(self).__name__} {self._sink!r} generation={self._generation}>"
 
     def handle(self, record: logging.LogRecord) -> bool:
         # The relay stays at NOTSET so the root logger offers every record;
@@ -422,25 +427,38 @@ class _RootRelay(logging.Handler):
         finally:
             with self._condition:
                 self._active -= 1
+                retired = self._detached and self._active == 0
                 if self._active == 0:
                     self._condition.notify_all()
+            if retired:
+                try:
+                    _retire_handler_generation(self, raw=True)
+                except BaseException:
+                    # Native dispatch contains finalizer failures too.
+                    pass
 
-    def detach(self) -> None:
-        """Reject further records, then wait for deliveries already in progress.
-
-        A callback cannot wait for a delivery that may in turn be waiting for
-        it, so a detach issued inside a sink callback returns at once; the
-        in-progress delivery finishes on its own.
-        """
+    def detach(self) -> bool:
+        """Reject records and report whether raw delivery has already retired."""
         with self._condition:
             self._detached = True
-            if in_callback():
-                return
+            if in_callback() and self._active > 0:
+                return False
             self._condition.wait_for(lambda: self._active == 0)
+        return True
 
     def _reset_after_fork(self) -> None:
         self._condition = threading.Condition()
         self._active = 0
+
+
+class _HandlerOwnership:
+    """Shared close state for every registration generation of one handler."""
+
+    def __init__(self, handler: logging.Handler) -> None:
+        self.handler = handler
+        self.generations: set[_RootRelay] = set()
+        self.next_generation = 1
+        self.closing = False
 
 
 # Sinks registered through `Logger.add()` are attached to the stdlib root logger
@@ -452,37 +470,81 @@ class _RootRelay(logging.Handler):
 # twice: once raw, once rendered. Track what we attached so the bridge can
 # suspend it and restore it on uninstall.
 _root_relays: dict[logging.Handler, _RootRelay] = {}
+_handler_owners: dict[logging.Handler, _HandlerOwnership] = {}
 _root_attach_lock = threading.Lock()
+_root_attach_condition = threading.Condition(_root_attach_lock)
+_handler_process_pid = os.getpid()
 _stdlib_bridge_active = False
 
 
-def _attach_to_root(handler: logging.Handler, threshold: int) -> None:
-    """Register *handler* for third-party records, unless the bridge supersedes it.
-
-    Each handler has one active registration, with *threshold* supplied by
-    ``add()``. The handler's own level is left alone.
-    """
-    with _root_attach_lock:
+def _attach_to_root(handler: logging.Handler, threshold: int) -> _RootRelay:
+    """Register one handler generation, unless the bridge supersedes attachment."""
+    _ensure_handler_process()
+    with _root_attach_condition:
         if handler in _root_relays:
             msg = "logging handler is already registered; remove it before adding it again"
             raise ValueError(msg)
-        relay = _RootRelay(handler, threshold)
+        owner = _handler_owners.get(handler)
+        if owner is not None and owner.closing:
+            msg = "logging handler is being closed; add it again after close completes"
+            raise ValueError(msg)
+        if owner is None:
+            owner = _HandlerOwnership(handler)
+            _handler_owners[handler] = owner
+        relay = _RootRelay(handler, threshold, owner, owner.next_generation)
+        owner.next_generation += 1
+        owner.generations.add(relay)
         _root_relays[handler] = relay
-        if _stdlib_bridge_active:
-            return
-        logging.getLogger().addHandler(relay)
+        if not _stdlib_bridge_active:
+            logging.getLogger().addHandler(relay)
+        return relay
 
 
-def _detach_from_root(handler: logging.Handler) -> None:
-    """Undo ``_attach_to_root``, waiting for raw deliveries in progress."""
-    with _root_attach_lock:
-        relay = _root_relays.pop(handler, None)
-        if relay is None:
+def _detach_from_root(relay: _RootRelay) -> None:
+    """Detach one registration generation and retire its raw delivery side."""
+    _ensure_handler_process()
+    with _root_attach_condition:
+        if _root_relays.get(relay._sink) is not relay:
             return
+        del _root_relays[relay._sink]
         logging.getLogger().removeHandler(relay)
     # Wait outside the attach lock: the delivery in progress may itself be
     # adding or removing sinks.
-    relay.detach()
+    if relay.detach():
+        _retire_handler_generation(relay, raw=True)
+
+
+def _retire_handler_generation(relay: _RootRelay, *, raw: bool, close: bool | None = None) -> None:
+    """Retire one delivery side and close after every handler generation retires."""
+    _ensure_handler_process()
+    with _root_attach_condition:
+        if raw:
+            relay._raw_retired = True
+        else:
+            relay._native_retired = True
+            if close is not None:
+                relay._close_on_release = close
+        if relay._released or not relay._raw_retired or not relay._native_retired:
+            return
+        relay._released = True
+        owner = relay._ownership
+        owner.generations.discard(relay)
+        should_close = relay._close_on_release and not owner.generations
+        if should_close:
+            owner.closing = True
+        elif not owner.generations and _handler_owners.get(owner.handler) is owner:
+            del _handler_owners[owner.handler]
+        _root_attach_condition.notify_all()
+    if not should_close:
+        return
+    try:
+        owner.handler.close()
+    finally:
+        with _root_attach_condition:
+            owner.closing = False
+            if not owner.generations and _handler_owners.get(owner.handler) is owner:
+                del _handler_owners[owner.handler]
+            _root_attach_condition.notify_all()
 
 
 def _set_stdlib_bridge_active(active: bool) -> None:
@@ -494,8 +556,9 @@ def _set_stdlib_bridge_active(active: bool) -> None:
     it for every sink still registered.
     """
     global _stdlib_bridge_active
+    _ensure_handler_process()
     root = logging.getLogger()
-    with _root_attach_lock:
+    with _root_attach_condition:
         _stdlib_bridge_active = active
         affected = list(_root_relays.values())
         for relay in affected:
@@ -511,8 +574,9 @@ class _SinkLock:
     _instances: weakref.WeakSet[_SinkLock] = weakref.WeakSet()
 
     def __init__(self) -> None:
+        _ensure_handler_process()
         self.lock = threading.Lock()
-        with _root_attach_lock:
+        with _root_attach_condition:
             self._instances.add(self)
 
     def __enter__(self) -> None:
@@ -528,6 +592,7 @@ class _SinkRegistration:
 
     handler: logging.Handler
     token: int
+    relay: _RootRelay
     # The adding logger's registry (shared with its clones), which
     # ``remove()`` without an id empties.
     owner: dict[HandlerId, logging.Handler]
@@ -540,14 +605,36 @@ _sinks: dict[HandlerId, _SinkRegistration] = {}
 
 
 def _after_fork() -> None:
-    """Replace locks owned by vanished threads, preserving clone sharing."""
-    global _root_attach_lock, _id_counter_lock
+    """Replace locks and reconcile deliveries owned by vanished threads."""
+    global _root_attach_lock, _root_attach_condition, _id_counter_lock
+    global _handler_process_pid
     _root_attach_lock = threading.Lock()
+    _root_attach_condition = threading.Condition(_root_attach_lock)
     _id_counter_lock = threading.Lock()
-    for owner in list(_SinkLock._instances):
-        owner.lock = threading.Lock()
-    for relay in list(_root_relays.values()):
+    _handler_process_pid = os.getpid()
+    for sink_lock in list(_SinkLock._instances):
+        sink_lock.lock = threading.Lock()
+    owners = list(_handler_owners.values())
+    relays = [relay for owner in owners for relay in owner.generations]
+    for relay in relays:
         relay._reset_after_fork()
+    for owner in owners:
+        owner.closing = False
+        if not owner.generations and _handler_owners.get(owner.handler) is owner:
+            del _handler_owners[owner.handler]
+    for relay in relays:
+        if relay._detached:
+            try:
+                _retire_handler_generation(relay, raw=True)
+            except BaseException:
+                # Fork hooks and native dispatch both contain close failures.
+                pass
+
+
+def _ensure_handler_process() -> None:
+    """Reset inherited state before a child runs a deferred native finalizer."""
+    if _handler_process_pid != os.getpid():
+        _after_fork()
 
 
 if hasattr(os, "register_at_fork"):
@@ -958,7 +1045,7 @@ class Logger:
         )
         # Reserve handler ownership before native registration, so duplicate
         # registrations cannot partially succeed or change the original relay.
-        _attach_to_root(handler, threshold)
+        relay = _attach_to_root(handler, threshold)
         try:
             native_token = _runtime.add_callable_sink(
                 native_callback,
@@ -970,15 +1057,14 @@ class Logger:
                 ),
             )
         except BaseException:
-            _detach_from_root(handler)
-            if handler is not sink:
-                handler.close()
+            _detach_from_root(relay)
+            _retire_handler_generation(relay, raw=False, close=handler is not sink)
             raise
 
         with _id_counter_lock:
             handler_id = next(_id_counter)
             _sinks[handler_id] = _SinkRegistration(
-                handler, native_token, self._handlers, self._lock
+                handler, native_token, relay, self._handlers, self._lock
             )
         with self._lock:
             self._handlers[handler_id] = handler
@@ -1021,13 +1107,15 @@ class Logger:
                 registration.owner.pop(handler_id, None)
             registrations = [registration]
         for registration in registrations:
-            _detach_from_root(registration.handler)
-            # Close only once every native delivery that captured the handler
-            # has run. Inside a sink callback the dispatcher cannot drain, so
-            # the close is deferred to the worker that finishes those
-            # deliveries; closing at once left them writing to a closed handler
-            # (a FileHandler silently reopens its file).
-            _runtime.remove_callable_sink(registration.token, finalizer=registration.handler.close)
+            _detach_from_root(registration.relay)
+            # Close only after this generation's native deliveries and every
+            # other generation of the same handler have retired.
+            _runtime.remove_callable_sink(
+                registration.token,
+                finalizer=functools.partial(
+                    _retire_handler_generation, registration.relay, raw=False
+                ),
+            )
 
 
 logger = Logger()
