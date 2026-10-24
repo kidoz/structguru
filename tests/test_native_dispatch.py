@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import textwrap
 import threading
 import time
 import warnings
+from dataclasses import replace
 
 import pytest
 
@@ -937,3 +939,297 @@ def test_concurrent_flushes_report_an_abandoned_generation_once() -> None:
     finally:
         release.set()
         dispatcher.disable()
+
+
+def test_flush_ignores_later_lease_settlement() -> None:
+    dispatcher = CallableSinkDispatcher()
+    dispatcher.configure([lambda line: None], maxsize=1)
+    channel = dispatcher._channel
+    first = channel.reserve_for_test()
+    second = channel.reserve_for_test()
+    returned = threading.Event()
+    flusher = threading.Thread(target=lambda: (channel.flush(), returned.set()), daemon=True)
+    flusher.start()
+    try:
+        channel.release_lease_for_test(second)
+        assert not returned.wait(0.1), "a later lease satisfied an earlier flush"
+    finally:
+        channel.release_lease_for_test(first)
+        flusher.join(3)
+        dispatcher.disable()
+    assert returned.is_set() and not flusher.is_alive()
+
+
+@pytest.mark.parametrize("destination", ["stream", "callable", "sentry"])
+def test_flush_covers_native_acceptance_before_secondary_submission(
+    destination: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered, release, returned = threading.Event(), threading.Event(), threading.Event()
+    received: list[str] = []
+
+    class Stream:
+        def write(self, line: str) -> None:
+            received.append(line)
+
+    def sentry(_logger: object, _method: str, event: dict) -> dict:
+        received.append(event["event"])
+        return event
+
+    _runtime.configure(
+        target="memory",
+        stream_sink=Stream() if destination == "stream" else None,
+        sentry_processor=sentry if destination == "sentry" else None,
+    )
+    token = structguru.logger.add(received.append) if destination == "callable" else None
+    state = _runtime.current_runtime()
+    assert state is not None
+
+    class PausedWriter:
+        def __getattr__(self, name: str):
+            return getattr(state.writer, name)
+
+        def log_capture(self, *args):
+            result = state.writer.log_capture(*args)
+            entered.set()
+            assert release.wait(3)
+            return result
+
+    monkeypatch.setattr(_runtime, "_runtime", replace(state, writer=PausedWriter()))
+    producer = threading.Thread(target=lambda: structguru.logger.info("accepted"), daemon=True)
+    flusher = threading.Thread(target=lambda: (_runtime.flush(), returned.set()), daemon=True)
+    producer.start()
+    try:
+        assert entered.wait(3)
+        flusher.start()
+        assert not returned.wait(0.1)
+        assert received == []
+    finally:
+        release.set()
+        producer.join(3)
+        flusher.join(3)
+        if token is not None:
+            structguru.logger.remove(token)
+        _runtime.shutdown()
+    assert returned.is_set() and not producer.is_alive() and not flusher.is_alive()
+    assert len(received) == 1
+
+
+def test_flush_excludes_later_runtime_submissions(monkeypatch: pytest.MonkeyPatch) -> None:
+    received: list[str] = []
+    entered = {"first": threading.Event(), "second": threading.Event()}
+    release = {"first": threading.Event(), "second": threading.Event()}
+    returned = threading.Event()
+    _runtime.configure(target="null")
+    token = structguru.logger.add(received.append)
+    state = _runtime.current_runtime()
+    assert state is not None
+
+    class PausedWriter:
+        def __getattr__(self, name: str):
+            return getattr(state.writer, name)
+
+        def log_capture(self, *args):
+            result = state.writer.log_capture(*args)
+            message = args[3]
+            entered[message].set()
+            assert release[message].wait(3)
+            return result
+
+    monkeypatch.setattr(_runtime, "_runtime", replace(state, writer=PausedWriter()))
+    first = threading.Thread(target=lambda: structguru.logger.info("first"), daemon=True)
+    second = threading.Thread(target=lambda: structguru.logger.info("second"), daemon=True)
+    flusher = threading.Thread(target=lambda: (_runtime.flush(), returned.set()), daemon=True)
+    first.start()
+    try:
+        assert entered["first"].wait(3)
+        flusher.start()
+        second.start()
+        assert entered["second"].wait(3)
+        release["first"].set()
+        assert returned.wait(3)
+        assert len(received) == 1 and json.loads(received[0])["message"] == "first"
+    finally:
+        release["first"].set()
+        release["second"].set()
+        first.join(3)
+        second.join(3)
+        flusher.join(3)
+        structguru.logger.remove(token)
+        _runtime.shutdown()
+    assert not second.is_alive()
+
+
+@pytest.mark.parametrize("destination", ["stream", "sentry"])
+def test_reentrant_flush_does_not_wait_for_own_submission(destination: str) -> None:
+    class Stream:
+        def write(self, line: str) -> None:
+            _runtime.flush()
+
+    def sentry(_logger: object, _method: str, event: dict) -> dict:
+        _runtime.flush()
+        return event
+
+    _runtime.configure(
+        target="memory",
+        stream_sink=Stream() if destination == "stream" else None,
+        sentry_processor=sentry if destination == "sentry" else None,
+    )
+    producer = threading.Thread(target=lambda: structguru.logger.info("reentrant"), daemon=True)
+    producer.start()
+    producer.join(3)
+    _runtime.shutdown()
+    assert not producer.is_alive()
+
+
+def test_flush_bounds_a_stalled_runtime_submission(monkeypatch: pytest.MonkeyPatch) -> None:
+    entered, release = threading.Event(), threading.Event()
+    returned = threading.Event()
+    _runtime.configure(target="null")
+    token = structguru.logger.add(lambda line: None)
+    state = _runtime.current_runtime()
+    assert state is not None
+
+    class PausedWriter:
+        def __getattr__(self, name: str):
+            return getattr(state.writer, name)
+
+        def log_capture(self, *args):
+            result = state.writer.log_capture(*args)
+            entered.set()
+            assert release.wait(3)
+            return result
+
+    monkeypatch.setattr(_runtime, "_runtime", replace(state, writer=PausedWriter()))
+    monkeypatch.setattr(_runtime, "_CALLABLE_STALL_TIMEOUT", 0.05)
+    producer = threading.Thread(target=lambda: structguru.logger.info("stalled"), daemon=True)
+    flusher = threading.Thread(target=lambda: (_runtime.flush(), returned.set()), daemon=True)
+    producer.start()
+    try:
+        assert entered.wait(3)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            flusher.start()
+            assert returned.wait(3)
+        assert any("stopped waiting for 1 log submission" in str(item.message) for item in caught)
+    finally:
+        release.set()
+        producer.join(3)
+        flusher.join(3)
+        structguru.logger.remove(token)
+        _runtime.shutdown()
+    assert not producer.is_alive()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_fork_resets_inherited_runtime_submission_leases() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+                import os
+                import signal
+                import threading
+                import structguru as sg
+                from structguru import _runtime
+
+                sg.configure(target='memory')
+                _runtime._CALLABLE_STALL_TIMEOUT = 0.1
+                entered, release = threading.Event(), threading.Event()
+                def submit():
+                    lease = _runtime._begin_submission()
+                    entered.set()
+                    release.wait()
+                    _runtime._end_submission(lease)
+                producer = threading.Thread(target=submit, daemon=True)
+                producer.start()
+                assert entered.wait(1)
+                signal.alarm(3)
+                pid = os.fork()
+                if pid == 0:
+                    assert not _runtime._submission_active
+                    sg.logger.info('child')
+                    sg.flush()
+                    lines = _runtime.drain_messages()
+                    os._exit(0 if len(lines) == 1 and 'child' in lines[0] else 4)
+                release.set()
+                producer.join(1)
+                _, status = os.waitpid(pid, 0)
+                raise SystemExit(os.waitstatus_to_exitcode(status))
+            """),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_ending_submission_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    lease = _runtime._begin_submission()
+    _runtime._end_submission(lease)
+    _runtime._end_submission(lease)
+    monkeypatch.setattr(_runtime, "_submission_local", threading.local())
+    _runtime._end_submission(lease)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_fork_inside_stream_preserves_surviving_submission_leases() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+                import os
+                import signal
+                import threading
+                import structguru as sg
+                from structguru import _runtime
+
+                pid = None
+                depth = 0
+                class Stream:
+                    def write(self, line):
+                        global pid, depth
+                        depth += 1
+                        if depth == 1:
+                            sg.logger.info('nested')
+                        elif depth == 2:
+                            pid = os.fork()
+                            if pid == 0:
+                                own = set(_runtime._submission_local.active)
+                                assert len(own) == 2
+                                assert _runtime._submission_active == own
+                                lease = _runtime._begin_submission()
+                                assert lease not in own
+                                _runtime._end_submission(lease)
+                                pending = []
+                                waiter = threading.Thread(
+                                    target=lambda: pending.append(
+                                        _runtime._wait_for_submissions(0.01)
+                                    )
+                                )
+                                waiter.start()
+                                waiter.join(1)
+                                assert pending == [2], pending
+                                sg.flush()  # Does not wait on this thread's leases.
+
+                signal.alarm(4)
+                sg.configure(target='memory', stream_sink=Stream())
+                sg.logger.info('outer')
+                assert not _runtime._submission_active
+                if pid == 0:
+                    sg.logger.info('child after fork')
+                    sg.flush()
+                    assert len(_runtime.drain_messages()) == 1
+                    os._exit(0)
+                _, status = os.waitpid(pid, 0)
+                raise SystemExit(os.waitstatus_to_exitcode(status))
+            """),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=6,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "stream sink write failed" not in result.stderr

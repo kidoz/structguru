@@ -18,6 +18,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- `flush()` now covers records between native acceptance and stream, callable,
+  and Sentry submission, tracks exact pre-call leases, excludes later producers,
+  and remains bounded and reentrant. After fork, leases from vanished threads
+  reset while the surviving thread's in-flight submissions remain tracked.
 - Tuple-subclass pairs are redacted in messages and exception locals, list
   conversion snapshots elements before Python callbacks, and unsupported
   dataclass mapping keys no longer traverse their fields.

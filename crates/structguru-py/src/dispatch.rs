@@ -97,6 +97,7 @@ struct Record {
     line: String,
     sinks: Arc<[Sink]>,
     level: i64,
+    accepted_id: u64,
 }
 
 #[derive(Default)]
@@ -108,12 +109,14 @@ struct ChannelState {
     producers: usize,
     /// Producers waiting for a free slot in block mode (observability only).
     blocked_producers: usize,
-    /// Leases handed out by `reserve` and leases released, in total.
-    leases_issued: u64,
-    leases_settled: u64,
+    /// Exact producer leases still between reservation and queue insertion.
+    next_lease: u64,
+    open_leases: BTreeSet<u64>,
     /// Records appended and records whose delivery finished, in total.
     accepted: u64,
     finished: u64,
+    /// Undelivered record IDs and the producer leases that inserted them.
+    accepted_leases: BTreeMap<u64, u64>,
     /// Flushers currently waiting; they need a wake-up on every step.
     flush_waiters: usize,
     /// Set when a flush gave up on a worker that stopped making progress.
@@ -275,16 +278,19 @@ impl Channel {
         self.maxsize > 0 && state.queue.len() >= self.maxsize
     }
 
-    fn append(&self, state: &mut ChannelState, record: Record) {
+    fn append(&self, state: &mut ChannelState, lease_id: u64, mut record: Record) {
+        record.accepted_id = state.accepted;
+        state.accepted_leases.insert(record.accepted_id, lease_id);
         state.queue.push_back(record);
         state.unfinished_tasks += 1;
         state.accepted += 1;
         self.not_empty.notify_one();
     }
 
-    fn release_lease(&self, state: &mut ChannelState) {
+    fn release_lease(&self, state: &mut ChannelState, lease_id: u64) {
         state.producers -= 1;
-        state.leases_settled += 1;
+        let removed = state.open_leases.remove(&lease_id);
+        debug_assert!(removed);
         if state.producers == 0 || state.flush_waiters > 0 {
             self.condition.notify_all();
         }
@@ -340,41 +346,43 @@ impl Channel {
     }
 
     /// Reserve one producer before a lifecycle transition can close the queue.
-    fn reserve(&self) -> bool {
+    fn reserve(&self) -> Option<u64> {
         let mut state = self.lock();
         if !state.accepting {
-            return false;
+            return None;
         }
+        let lease_id = state.next_lease;
+        state.next_lease += 1;
         state.producers += 1;
-        state.leases_issued += 1;
-        true
+        state.open_leases.insert(lease_id);
+        Some(lease_id)
     }
 
     /// Insert a reserved record if there is room, releasing the lease unless
     /// the caller must go on to wait (`Offer::WouldBlock`).
-    fn offer(&self, record: Record, blocking: bool) -> Offer {
+    fn offer(&self, lease_id: u64, record: Record, blocking: bool) -> Offer {
         let mut state = self.lock();
         if state.abandoned {
             // No worker will take it; the abandoning flush counted this lease.
-            self.release_lease(&mut state);
+            self.release_lease(&mut state, lease_id);
             return Offer::Abandoned;
         }
         if self.is_full(&state) {
             if !blocking {
-                self.release_lease(&mut state);
+                self.release_lease(&mut state, lease_id);
                 return Offer::Full;
             }
             return Offer::WouldBlock(record);
         }
-        self.append(&mut state, record);
-        self.release_lease(&mut state);
+        self.append(&mut state, lease_id, record);
+        self.release_lease(&mut state, lease_id);
         Offer::Accepted
     }
 
     /// Wait for a slot, insert, and release the lease. Callers detach from the
     /// interpreter first: the worker needs it to free a slot. Returns
     /// `Offer::Abandoned` when the generation was abandoned while waiting.
-    fn put_blocking(&self, record: Record) -> Offer {
+    fn put_blocking(&self, lease_id: u64, record: Record) -> Offer {
         let mut state = self.lock();
         state.blocked_producers += 1;
         while self.is_full(&state) && !state.abandoned {
@@ -385,11 +393,11 @@ impl Channel {
         }
         state.blocked_producers -= 1;
         if state.abandoned {
-            self.release_lease(&mut state);
+            self.release_lease(&mut state, lease_id);
             return Offer::Abandoned;
         }
-        self.append(&mut state, record);
-        self.release_lease(&mut state);
+        self.append(&mut state, lease_id, record);
+        self.release_lease(&mut state, lease_id);
         Offer::Accepted
     }
 
@@ -415,19 +423,39 @@ impl Channel {
                 return 0;
             }
             state.flush_waiters += 1;
-            let lease_target = state.leases_issued;
+            let lease_target = state.next_lease;
+            let accepted_target = state.accepted;
             // A finished delivery is progress too: a producer blocked on a full
             // queue settles its lease only once the worker's batch is done.
+            // Later leases neither satisfy this flush nor extend its deadline.
             // Another flusher abandoning the generation ends the wait as well.
             let (next, mut drained) = self.wait_until(
                 state,
                 stall,
-                |state| state.abandoned || state.leases_settled >= lease_target,
-                |state| state.leases_settled + state.finished,
+                |state| {
+                    state.abandoned
+                        || state
+                            .open_leases
+                            .iter()
+                            .all(|lease_id| *lease_id >= lease_target)
+                },
+                |state| {
+                    state
+                        .open_leases
+                        .iter()
+                        .take_while(|lease_id| **lease_id < lease_target)
+                        .count() as u64
+                        + state.finished
+                },
             );
             state = next;
             if drained && !state.abandoned {
-                let accepted_target = state.accepted;
+                let accepted_target = state
+                    .accepted_leases
+                    .iter()
+                    .filter(|(_, lease_id)| **lease_id < lease_target)
+                    .map(|(accepted_id, _)| *accepted_id + 1)
+                    .fold(accepted_target, u64::max);
                 let (next, finished) = self.wait_until(
                     state,
                     stall,
@@ -586,8 +614,10 @@ impl Channel {
                     let mut records = batch.drain(..);
                     while let Some(record) = records.next() {
                         self.deliver(py, &dispatcher, &record);
+                        let accepted_id = record.accepted_id;
                         drop(record);
                         let mut state = self.lock();
+                        state.accepted_leases.remove(&accepted_id);
                         state.unfinished_tasks -= 1;
                         state.finished += 1;
                         if state.unfinished_tasks == 0 || state.flush_waiters > 0 {
@@ -687,6 +717,19 @@ impl DispatchChannel {
     /// Reject new producers without waiting.
     fn retire(&self) {
         self.inner.retire();
+    }
+
+    /// Hold a producer lease for deterministic lifecycle regression tests.
+    fn reserve_for_test(&self) -> PyResult<u64> {
+        self.inner
+            .reserve()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("channel is retired"))
+    }
+
+    /// Release a lease returned by `reserve_for_test` without queueing a record.
+    fn release_lease_for_test(&self, lease_id: u64) {
+        let mut state = self.inner.lock();
+        self.inner.release_lease(&mut state, lease_id);
     }
 
     /// Wait for producers and queued work; no-op inside a sink callback.
@@ -1302,7 +1345,7 @@ impl CallableDispatcher {
             return Ok(true);
         }
         let blocking = overflow == "block";
-        let (channel, sinks) = {
+        let (channel, lease_id, sinks) = {
             let mut registry = self.inner.lock_registry();
             let Some(channel) = registry.channel.as_ref() else {
                 return Ok(true);
@@ -1328,15 +1371,15 @@ impl CallableDispatcher {
             if sinks.is_empty() {
                 return Ok(true);
             }
-            if !channel.reserve() {
+            let Some(lease_id) = channel.reserve() else {
                 return Ok(false);
-            }
+            };
             for sink in sinks.iter() {
                 if sink.token > 0 {
                     *registry.outstanding.entry(sink.token).or_insert(0) += 1;
                 }
             }
-            (channel, sinks)
+            (channel, lease_id, sinks)
         };
         // The lease covers the gap between selecting sinks and queue insertion.
         // Removal sees this producer even before its record enters the queue.
@@ -1344,11 +1387,12 @@ impl CallableDispatcher {
             line,
             sinks: Arc::clone(&sinks),
             level,
+            accepted_id: 0,
         };
-        let offered = match channel.offer(record, blocking) {
+        let offered = match channel.offer(lease_id, record, blocking) {
             // Only a full queue pays for detaching: the worker needs the
             // interpreter to free a slot.
-            Offer::WouldBlock(record) => py.detach(|| channel.put_blocking(record)),
+            Offer::WouldBlock(record) => py.detach(|| channel.put_blocking(lease_id, record)),
             offered => offered,
         };
         match offered {

@@ -16,6 +16,7 @@ import os
 import select
 import sys
 import threading
+import time
 import traceback
 import warnings
 from collections.abc import Callable
@@ -235,6 +236,58 @@ _CALLABLE_STALL_TIMEOUT = 10.0
 _MAX_LEVELNO = 2**63 - 1
 _drop_lock = threading.Lock()
 _lifecycle_rejected = 0
+
+_submission_lock = threading.Lock()
+_submission_condition = threading.Condition(_submission_lock)
+_submission_next = 0
+_submission_active: set[int] = set()
+_submission_local = threading.local()
+
+
+def _begin_submission() -> int:
+    global _submission_next
+    with _submission_condition:
+        lease_id = _submission_next
+        _submission_next += 1
+        _submission_active.add(lease_id)
+    active = getattr(_submission_local, "active", None)
+    if active is None:
+        active = _submission_local.active = set()
+    active.add(lease_id)
+    return lease_id
+
+
+def _end_submission(lease_id: int) -> None:
+    active = getattr(_submission_local, "active", None)
+    if active is not None:
+        active.discard(lease_id)
+    with _submission_condition:
+        if lease_id in _submission_active:
+            _submission_active.discard(lease_id)
+            _submission_condition.notify_all()
+
+
+def _wait_for_submissions(timeout: float) -> int:
+    with _submission_condition:
+        target = _submission_next
+        own: set[int] = getattr(_submission_local, "active", set())
+
+        def pending() -> list[int]:
+            return [item for item in _submission_active if item < target and item not in own]
+
+        remaining = pending()
+        previous = len(remaining)
+        deadline = time.monotonic() + timeout
+        while remaining:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return len(remaining)
+            _submission_condition.wait(left)
+            remaining = pending()
+            if len(remaining) < previous:
+                previous = len(remaining)
+                deadline = time.monotonic() + timeout
+        return 0
 
 
 def current_runtime() -> _RuntimeState | None:
@@ -848,12 +901,22 @@ def _before_fork() -> None:
 def _after_in_child() -> None:
     """Respawn the writer in the child: its worker thread did not survive fork."""
     global _runtime, _state_lock, _drop_lock, _lifecycle_rejected, _callable_dispatcher
-    global _lifecycle_generation
+    global _lifecycle_generation, _submission_lock, _submission_condition
+    global _submission_next, _submission_active, _submission_local
     state = _runtime
+    # The forking thread resumes inside any submission it already owns.
+    # Other threads' leases disappear, but these must still block child flushers.
+    surviving_leases = set(getattr(_submission_local, "active", ()))
     # No other Python thread survives fork. Replace inherited synchronization
     # objects before touching state that may have been locked by a vanished thread.
     _state_lock = threading.Lock()
     _drop_lock = threading.Lock()
+    _submission_lock = threading.Lock()
+    _submission_condition = threading.Condition(_submission_lock)
+    _submission_next = max(surviving_leases, default=-1) + 1
+    _submission_active = surviving_leases.copy()
+    _submission_local = threading.local()
+    _submission_local.active = surviving_leases
     _lifecycle_rejected = 0
     if state is None or _RUST is None:
         _callable_dispatcher = _callable_dispatcher.fork_child(enabled=False)
@@ -925,8 +988,10 @@ def render_and_enqueue(
     stack: str | None,
     created: float | None = None,
     levelno: int | None = None,
-) -> str | None:
-    """Merge, render, and enqueue one record; return redacted JSON for Sentry when enabled.
+    field_names: tuple[str, ...] = (),
+    exc_info: Any = None,
+) -> None:
+    """Merge, render, and submit one record to every configured destination.
 
     The writer merges ``bound``, ``kwargs`` (minus ``exc_info``/``stack_info``),
     and ``contextvars`` with the facade's semantics, adds ``exception`` as a
@@ -957,45 +1022,56 @@ def render_and_enqueue(
         if outcome:
             _note_enqueue_outcome(outcome)
         return None
-    outcome, line, sentry_line = writer.log_capture(
-        runtime.config,
-        logger,
-        level,
-        message,
-        bound,
-        kwargs,
-        contextvars,
-        exception,
-        stack,
-        runtime.sentry_processor is not None,
-        created,
-    )
-    if outcome:
-        _note_enqueue_outcome(outcome)
-        # A writer retired by configure/update/shutdown rejected the record: a
-        # lifecycle boundary, counted by lifecycle_metrics(), not queue
-        # overflow. No other destination receives it either.
-        if outcome == _CLOSED:
-            return None
-    # Every destination follows the native writer's outcome. A record the
-    # writer accepted just before a reconfiguration swapped the runtime still
-    # reaches the stream, the callable sinks (through the replacement queue
-    # generation, which delivers after its predecessors), and Sentry.
-    if runtime.stream_sink is not None:
-        try:
-            runtime.stream_sink.write(line)
-        except Exception as exc:  # noqa: BLE001 - stream errors must never break logging
-            _note_stream_error(exc)
-    # A stopped dispatcher ignores the line, so callable sinks receive nothing
-    # once shutdown() has begun.
-    _callable_dispatcher.enqueue(
-        line,
-        # A stdlib level may be any int; the dispatcher takes a 64-bit one.
-        METHOD_LEVELS.get(level, 20) if levelno is None else min(levelno, _MAX_LEVELNO),
-        overflow=runtime.overflow,
-    )
-    # Nor does Sentry, once shutdown() has disabled logging.
-    return sentry_line if current_runtime() is not None else None
+    lease_id = _begin_submission()
+    try:
+        outcome, line, sentry_line = writer.log_capture(
+            runtime.config,
+            logger,
+            level,
+            message,
+            bound,
+            kwargs,
+            contextvars,
+            exception,
+            stack,
+            runtime.sentry_processor is not None,
+            created,
+        )
+        if outcome:
+            _note_enqueue_outcome(outcome)
+            # A writer retired by configure/update/shutdown rejected the record: a
+            # lifecycle boundary, counted by lifecycle_metrics(), not queue
+            # overflow. No other destination receives it either.
+            if outcome == _CLOSED:
+                return
+        # Every destination follows the native writer's outcome. A record the
+        # writer accepted just before a reconfiguration swapped the runtime still
+        # reaches the stream, the callable sinks (through the replacement queue
+        # generation, which delivers after its predecessors), and Sentry.
+        if runtime.stream_sink is not None:
+            try:
+                runtime.stream_sink.write(line)
+            except Exception as exc:  # noqa: BLE001 - stream errors must never break logging
+                _note_stream_error(exc)
+        # A stopped dispatcher ignores the line, so callable sinks receive nothing
+        # once shutdown() has begun.
+        _callable_dispatcher.enqueue(
+            line,
+            # A stdlib level may be any int; the dispatcher takes a 64-bit one.
+            METHOD_LEVELS.get(level, 20) if levelno is None else min(levelno, _MAX_LEVELNO),
+            overflow=runtime.overflow,
+        )
+        # Nor does Sentry, once shutdown() has disabled logging.
+        if sentry_line is not None and current_runtime() is not None:
+            notify_sentry(
+                level,
+                sentry_line,
+                field_names,
+                exc_info=exc_info,
+                runtime=runtime,
+            )
+    finally:
+        _end_submission(lease_id)
 
 
 def _note_enqueue_outcome(outcome: int) -> None:
@@ -1232,6 +1308,15 @@ def flush() -> None:
     ``shutdown``, reconfiguration, fork, and interpreter exit all drain
     automatically.
     """
+    # First close the gap between native acceptance and secondary-destination
+    # submission. Reentrant stream/Sentry calls exclude their own active lease.
+    stalled = _wait_for_submissions(_CALLABLE_STALL_TIMEOUT)
+    if stalled:
+        _warn_without_blocking(
+            f"structguru flush stopped waiting for {stalled} log submission(s) after "
+            f"{_CALLABLE_STALL_TIMEOUT:g}s without progress",
+            stacklevel=3,
+        )
     # Callbacks may log to the native writer or replace it by reconfiguring.
     # Drain them first, then flush the resulting runtime's writer.
     _note_abandoned(_callable_dispatcher.flush(stall_timeout=_CALLABLE_STALL_TIMEOUT))

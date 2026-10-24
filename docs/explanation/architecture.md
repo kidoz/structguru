@@ -103,7 +103,10 @@ In the common production shape (no stream sink, no Sentry processor, and no
 callable sink registered) the rendered line goes from the renderer straight
 into the queue and never becomes a Python string. When one of those
 destinations exists, the same call also returns the line, and for Sentry the
-redacted JSON record, to Python.
+redacted JSON record, to Python. A runtime submission lease spans that native
+capture and all three secondary handoffs, closing the interval in which the
+writer has accepted a record but `flush()` cannot yet see its other
+destinations.
 
 The [record format reference](../reference/record-format.md) lists the fields
 and value conversions exactly.

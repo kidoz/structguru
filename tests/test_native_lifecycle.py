@@ -256,6 +256,11 @@ def test_full_queue_is_not_reclassified_when_writer_closes(
             structguru.shutdown()
             return outcome
 
+        def log_capture(self, *args):
+            outcome = writer.log_capture(*args)
+            structguru.shutdown()
+            return outcome
+
     monkeypatch.setattr(_runtime, "_runtime", replace(state, writer=ClosingWriter()))
     _runtime._reset_drop_count()
     with pytest.warns(UserWarning, match="queue full"):

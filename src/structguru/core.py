@@ -875,7 +875,7 @@ class Logger:
             _runtime.notify_metrics(method, formatted_msg, fields, runtime)
             field_names = tuple(fields)
             bound, kwargs, contextvars, exception = fields, _NO_FIELDS, _NO_FIELDS, None
-        sentry_line = _runtime.render_and_enqueue(
+        _runtime.render_and_enqueue(
             runtime,
             name,
             method,
@@ -887,15 +887,9 @@ class Logger:
             stack,
             created,
             level_number,
+            field_names,
+            exc_info,
         )
-        if sentry_line is not None:
-            _runtime.notify_sentry(
-                method,
-                sentry_line,
-                field_names,
-                exc_info=exc_info,
-                runtime=runtime,
-            )
 
     # -- sink (handler) management ------------------------------------------
 

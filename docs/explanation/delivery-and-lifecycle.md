@@ -156,15 +156,21 @@ dropped when stderr cannot accept a write.
 ## What flush() waits for
 
 `flush()` exists because a returning `logger.info()` does not mean the line
-has reached its destination. It first drains callable deliveries, since a
-callback may itself log to the writer, and then waits for the writer to write
-and flush every record that was enqueued before the call.
+has reached its destination. It first waits for submissions that started before
+the call to finish their native capture and hand the resulting line to the
+synchronous stream, callable queue, and Sentry. It then drains callable
+deliveries, since a callback may itself log to the writer, and waits for the
+writer to write and flush every covered record.
 
-"Before the call" matters. Until 1.3.0, a flush waited for the queue to become
-empty, a moment that never arrives while other threads refill the queue faster
-than the sink drains it. A pre-fork flush in a server with four logging
-threads could take tens of seconds. A flush now waits for a fixed target, so
-its cost is bounded by the queue depth at the moment it was called.
+"Before the call" matters. Submission leases and callable producer leases have
+monotonically increasing identities, so work that starts later neither satisfies
+nor prolongs an earlier flush. A reentrant `flush()` from a stream or Sentry hook
+excludes the submission currently running on that thread instead of waiting for
+itself. A submission that makes no progress for 10 seconds produces a bounded
+warning and stops blocking the flush. Inherited leases are reset in a forked
+child. Until 1.3.0, a flush waited for the queue to become empty, a moment that
+never arrives while other threads refill the queue faster than the sink drains
+it; targets are fixed instead of waiting for a quiet moment.
 
 ## Reconfiguration
 
