@@ -15,6 +15,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Rate limiting and filter statistics recover poisoned mutex state.
 - Document the bounded exception-local pattern scan, including its 4096-character
   look-ahead margin and limits on patterns requiring later context.
 

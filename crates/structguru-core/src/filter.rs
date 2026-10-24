@@ -127,7 +127,10 @@ impl RateLimiter {
     }
 
     fn allow_key(&self, key: &str, now: Instant) -> Decision {
-        let mut state = self.buckets.lock().expect("rate limiter state poisoned");
+        let mut state = self
+            .buckets
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cutoff = now.checked_sub(self.period);
 
         // Prune the candidate bucket up to the window edge.
@@ -170,7 +173,7 @@ impl RateLimiter {
     fn tracked_keys(&self) -> usize {
         self.buckets
             .lock()
-            .expect("rate limiter state poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .timestamps
             .len()
     }
@@ -272,7 +275,10 @@ impl Pipeline {
                 }
             };
             if decision == Decision::Drop {
-                let mut stats = self.stats.lock().expect("filter stats poisoned");
+                let mut stats = self
+                    .stats
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if sampled {
                     stats.sampled += 1;
                 }
@@ -292,13 +298,42 @@ impl Pipeline {
 
     /// Snapshot of drop counters.
     pub fn stats(&self) -> FilterStats {
-        *self.stats.lock().expect("filter stats poisoned")
+        *self
+            .stats
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poisoned_rate_state_keeps_enforcing_the_existing_window() {
+        let limiter = RateLimiter::new(1, Duration::from_secs(60));
+        assert_eq!(limiter.allow("same", 20), Decision::Keep);
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = limiter.buckets.lock().unwrap();
+            panic!("injected rate state poison");
+        }));
+        assert!(poisoned.is_err());
+        assert_eq!(limiter.allow("same", 20), Decision::Drop);
+        assert_eq!(limiter.allow("other", 20), Decision::Keep);
+        assert_eq!(limiter.tracked_keys(), 2);
+    }
+
+    #[test]
+    fn poisoned_filter_stats_remain_readable_and_incrementable() {
+        let pipeline = Pipeline::new(0.0, None, None, Duration::from_secs(1));
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = pipeline.stats.lock().unwrap();
+            panic!("injected filter statistics poison");
+        }));
+        assert!(poisoned.is_err());
+        assert!(!pipeline.allow("record", 20));
+        assert_eq!(pipeline.stats().sampled, 1);
+    }
 
     #[test]
     fn sampler_rate_zero_drops_all() {
