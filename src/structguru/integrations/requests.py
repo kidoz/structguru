@@ -13,6 +13,7 @@ imports it for you — so the dependency is never pulled in implicitly.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from typing import Any
 
 import requests
@@ -41,23 +42,36 @@ class StructguruRequestsSession(requests.Session):
         params = kwargs["params"] if "params" in kwargs else (args[0] if args else None)
         logged_url = self._effective_url(url, params)
 
-        # Extract an x-request-id from the per-call headers, falling back to
-        # the session-level headers, for end-to-end correlation.
-        headers = kwargs.get("headers") or {}
-        request_id = None
-        if isinstance(headers, dict):
-            request_id = {k.lower(): v for k, v in headers.items()}.get("x-request-id")
-
-        if not request_id and self.headers:
-            request_id = {k.lower(): v for k, v in self.headers.items()}.get("x-request-id")
+        # Mirror requests' case-insensitive merge for failures that happen
+        # before a prepared response exists. Positional headers follow params
+        # and data in Session.request's signature.
+        headers = (
+            kwargs["headers"] if "headers" in kwargs else (args[2] if len(args) > 2 else None)
+        )
+        merged_headers = requests.sessions.merge_setting(
+            headers,
+            self.headers,
+            dict_class=requests.structures.CaseInsensitiveDict,
+        )
+        request_id = (
+            merged_headers.get("x-request-id") if isinstance(merged_headers, Mapping) else None
+        )
 
         failed = False
         status_code = None
         try:
             response = super().request(method_str, url, *args, **kwargs)
             status_code = response.status_code
+            prepared_request = response.request
+            if prepared_request is not None:
+                logged_url = prepared_request.url or logged_url
+                request_id = prepared_request.headers.get("x-request-id")
             return response
-        except BaseException:
+        except BaseException as exc:
+            # Redirect failures carry the last prepared request on the exception.
+            if isinstance(exc, requests.RequestException) and exc.request is not None:
+                logged_url = exc.request.url or logged_url
+                request_id = exc.request.headers.get("x-request-id")
             # KeyboardInterrupt/SystemExit interrupt the request too: a failure.
             failed = True
             raise

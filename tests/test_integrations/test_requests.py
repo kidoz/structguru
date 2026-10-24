@@ -167,3 +167,101 @@ def test_requests_base_exception_is_logged_as_failure(
     [record] = _records(buf)
     assert record["message"] == "Outbound HTTP Request Failed"
     assert record["level"] == "ERROR"
+
+
+def test_requests_logs_final_response_url_and_prepared_request_id(httpserver: HTTPServer) -> None:
+    buf = io.StringIO()
+    configure(stream=buf)
+    final_url = httpserver.url_for("/final") + "?token=SECRET"
+    httpserver.expect_request("/start").respond_with_data(
+        status=302, headers={"Location": final_url}
+    )
+    httpserver.expect_request("/final").respond_with_json({})
+
+    def add_request_id(request: object) -> object:
+        request.headers["X-Request-ID"] = "prepared-id"  # type: ignore[attr-defined]
+        return request
+
+    response = get_logging_session().get(httpserver.url_for("/start"), auth=add_request_id)
+
+    assert response.url == final_url
+    [record] = _records(buf)
+    assert record["http_url"] == f"{httpserver.url_for('/final')}?"
+    assert record["request_id"] == "prepared-id"
+    assert "SECRET" not in buf.getvalue()
+
+
+@pytest.mark.parametrize("override", [None, ""])
+def test_requests_positional_header_removes_or_empties_session_id_case_insensitively(
+    httpserver: HTTPServer, override: str | None
+) -> None:
+    from types import MappingProxyType
+
+    buf = io.StringIO()
+    configure(stream=buf)
+    httpserver.expect_request("/api").respond_with_json({})
+    session = get_logging_session()
+    session.headers["X-Request-ID"] = "session-id"
+
+    session.request(
+        "GET",
+        httpserver.url_for("/api"),
+        None,
+        None,
+        MappingProxyType({"x-ReQuEsT-Id": override}),
+    )
+
+    [record] = _records(buf)
+    assert "request_id" not in record
+
+
+def test_requests_transport_failure_reads_request_id_from_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import MappingProxyType
+
+    import requests
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise requests.ConnectionError("offline")
+
+    monkeypatch.setattr(requests.Session, "request", fail)
+    buf = io.StringIO()
+    configure(stream=buf)
+
+    with pytest.raises(requests.ConnectionError):
+        get_logging_session().get(
+            "https://host/path",
+            headers=MappingProxyType({"X-Request-ID": "mapping-id"}),
+        )
+
+    [record] = _records(buf)
+    assert record["request_id"] == "mapping-id"
+
+
+def test_requests_redirect_failure_uses_exception_prepared_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import requests
+
+    prepared = requests.PreparedRequest()
+    prepared.prepare_url("https://final.example/after?token=SECRET", None)
+    prepared.headers = requests.structures.CaseInsensitiveDict({"X-Request-ID": "redirect-id"})
+    error = requests.TooManyRedirects("redirect failed")
+    error.request = prepared
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise error
+
+    monkeypatch.setattr(requests.Session, "request", fail)
+    buf = io.StringIO()
+    configure(stream=buf)
+
+    with pytest.raises(requests.TooManyRedirects) as caught:
+        get_logging_session().get("https://initial.example/start")
+
+    assert caught.value is error
+    [record] = _records(buf)
+    assert record["http_url"] == "https://final.example/after?"
+    assert record["request_id"] == "redirect-id"
+    assert "SECRET" not in buf.getvalue()

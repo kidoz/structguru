@@ -31,8 +31,9 @@ would any session, or subclass `StructguruRequestsSession` directly.
   `KeyboardInterrupt` and `SystemExit`), are logged as
   `Outbound HTTP Request Failed` at `ERROR`. The exception then propagates to
   your code unchanged.
-- An `X-Request-ID` header, from the call's `headers=` or the session's
-  headers, is logged as `request_id`.
+- The final prepared request's `X-Request-ID` header is logged as `request_id`.
+  Call headers merge case-insensitively with session headers; setting the header
+  to `None` removes the session value for that call.
 
 ## Forward the current request ID
 
