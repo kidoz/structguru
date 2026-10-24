@@ -935,13 +935,14 @@ class Logger:
             return
 
         # No Python enrichment or capture: Rust owns the remaining preparation
-        # and submission. Active callable sinks defer to the leased capture
-        # path below before touching the record.
+        # and submission. Active callable sinks go directly to leased capture;
+        # Rust rechecks for sinks registered after this probe.
         if (
             runtime.fused
             and not runtime.enrich
             and not exc_info
             and not stack_info
+            and _runtime._callable_dispatcher.idle()
             and type(runtime.writer) is _runtime._NATIVE_WRITER_TYPE
         ):
             outcome = runtime.writer.log_plain(

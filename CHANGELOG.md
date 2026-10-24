@@ -36,6 +36,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Callable-sink logging skips an extra native submission attempt while retaining
+  the submission tracking used by `flush()`.
 - `flush()` now covers records between native acceptance and stream, callable,
   and Sentry submission, tracks exact pre-call leases, excludes later producers,
   and remains bounded and reentrant. After fork, leases from vanished threads

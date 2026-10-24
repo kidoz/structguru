@@ -19,6 +19,36 @@ from structguru import _runtime
 from structguru._native_dispatch import CallableSinkDispatcher
 
 
+@pytest.mark.parametrize("registration", ["configure", "add"])
+@pytest.mark.parametrize("name", [None, "application"])
+def test_callable_delivery_skips_speculative_plain_submission(
+    registration: str, name: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    received: list[str] = []
+    _runtime.configure(
+        target="memory",
+        callable_sinks=[received.append] if registration == "configure" else None,
+    )
+    log = structguru.Logger(name=name)
+    token = log.add(received.append) if registration == "add" else None
+    state = _runtime.current_runtime()
+    assert state is not None
+
+    def fail_plain(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("active callable sinks must go directly to tracked capture")
+
+    monkeypatch.setattr(type(state.writer), "log_plain", fail_plain)
+    try:
+        log.info("callable record", status_code=200)
+        _runtime.flush()
+        [line] = _runtime.drain_messages()
+        assert received == [line]
+        assert json.loads(line)["status_code"] == 200
+    finally:
+        if token is not None:
+            log.remove(token)
+
+
 @pytest.mark.parametrize("transition", ["remove", "configure", "sync", "disable"])
 @pytest.mark.parametrize("cached", [False, True])
 def test_callback_destructor_can_reenter_dispatcher(transition: str, cached: bool) -> None:
