@@ -63,7 +63,7 @@ Patterns apply to:
 | Field keys | Top-level keys and keys of nested mappings. |
 | String values | At any depth, including a text `exception` and the strings inside a structured `exception`. |
 | Integer values | Matched against their decimal text, including integers outside the 64-bit range. A matching integer is written as the redacted string: `card=4111111111111111` with `r"\b\d{16}\b"` renders `"card":"[REDACTED]"`. |
-| Exception locals | Each local's full rendering, before it is truncated to `exception_max_local_repr`. |
+| Exception locals | A bounded rendering prefix of at most `exception_max_local_repr + 4096` characters, before final truncation. Depth/item limits can shorten it; patterns requiring later context can miss visible text. |
 
 Floats, booleans, and `null` are never matched.
 

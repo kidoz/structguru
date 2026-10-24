@@ -221,9 +221,12 @@ layered:
   members by name or string value, and a `(key, value)` pair inside a list
   counts as a keyed value. The walk decides by type alone, is cycle-safe, and
   is bounded in depth and in items.
-- `sensitive_patterns` see each local's whole rendering before it is cut to
-  `exception_max_local_repr` characters, so a secret that straddles the cut is
-  still matched. If applying the patterns fails, the whole local is redacted.
+- `sensitive_patterns` scan a bounded rendering prefix of at most
+  `exception_max_local_repr + 4096` characters before the final truncation.
+  Depth and item limits can end that prefix earlier. The extra context covers
+  matches across the display cut, but a pattern requiring context beyond the
+  prefix can miss text that remains visible. If applying the patterns fails,
+  the whole local is redacted. Use sensitive keys for known secret fields.
 
 The limit is any other object's own `repr()`. A class whose `__repr__` prints a
 secret under a harmless name is covered only by patterns. A dataclass with a

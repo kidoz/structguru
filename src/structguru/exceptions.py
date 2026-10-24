@@ -92,10 +92,12 @@ def build_exception_dict(
     walk is cycle-safe and bounded in depth, items, and length. Any other
     object's own ``repr()`` text is covered only by ``redact``.
 
-    ``redact`` receives each local's rendering before it is cut to
-    ``max_local_repr`` characters, so a pattern matching text that straddles
-    the cut still applies; the runtime passes its compiled
-    ``sensitive_patterns``. A failing ``redact`` redacts the whole local.
+    ``redact`` receives a bounded rendering prefix of at most
+    ``max_local_repr + 4096`` characters, before the final cut to
+    ``max_local_repr``. Depth and item limits can end the rendering earlier.
+    Patterns requiring context past that prefix may not match visible text.
+    The runtime passes its compiled ``sensitive_patterns``; a failing
+    ``redact`` redacts the whole local.
     """
     if max_frames < 0:
         msg = f"max_frames must be >= 0, got {max_frames}"

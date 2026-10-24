@@ -13,6 +13,11 @@ All notable changes to this project are documented here. The format is based on
 - Native conversion no longer invokes datetime, UUID, or Enum conversion
   methods on unrelated duck-typed objects.
 
+### Fixed
+
+- Document the bounded exception-local pattern scan, including its 4096-character
+  look-ahead margin and limits on patterns requiring later context.
+
 ## [1.6.0] - 2026-10-24
 
 ### Added

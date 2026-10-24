@@ -132,8 +132,11 @@ the mapping is:
 A local named like a sensitive key is redacted, as is any value under a
 sensitive key inside a mapping, list, tuple, named tuple, set, dataclass (with
 its generated `__repr__`), or `SimpleNamespace`. Other objects' own `repr()`
-text is covered only by `sensitive_patterns`, which see each local's whole
-text before truncation. See [Redact sensitive data](redact-sensitive-data.md).
+text is covered only by `sensitive_patterns`, which scan each local's
+bounded rendering prefix before truncation: at most
+`exception_max_local_repr + 4096` characters, with depth and item limits also
+applying. Patterns requiring later context can miss visible text. See
+[Redact sensitive data](redact-sensitive-data.md).
 
 ## Format tracebacks faster
 

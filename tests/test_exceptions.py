@@ -646,7 +646,7 @@ class TestLocalRedaction:
         assert rendered.startswith("'xxxxxxxxx...<")
         assert rendered.endswith("+ more>")
 
-    def test_patterns_see_the_whole_repr_before_truncation(self) -> None:
+    def test_patterns_see_extra_context_before_display_truncation(self) -> None:
         seen: list[str] = []
 
         def redact(text: str) -> str:
@@ -661,6 +661,27 @@ class TestLocalRedaction:
         rendered = _frame_locals(handler, max_local_repr=16, redact=redact)["note"]
         assert "'prefix.. CANARY-SECRET and more text after it'" in seen
         assert rendered == "'prefix.. [REDAC...<28 more>"
+
+    def test_pattern_scan_is_bounded_to_display_limit_plus_margin(self) -> None:
+        from structguru.exceptions import _format_locals
+        from structguru.redaction import DEFAULT_SENSITIVE_KEYS
+
+        seen: list[str] = []
+
+        def redact(text: str) -> str:
+            seen.append(text)
+            return text
+
+        result = _format_locals(
+            {"note": "start" + "x" * 5000 + "tail"},
+            DEFAULT_SENSITIVE_KEYS,
+            16,
+            redact,
+        )
+        assert len(seen) == 1 and len(seen[0]) == 16 + 4096
+        assert "tail" not in seen[0]
+        assert result["note"].startswith("'start")
+        assert result["note"].endswith("+ more>")
 
     def test_failing_pattern_callback_fails_closed(self) -> None:
         def redact(text: str) -> str:

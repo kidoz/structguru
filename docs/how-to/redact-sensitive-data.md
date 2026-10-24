@@ -147,6 +147,11 @@ value under a sensitive key inside mappings, sequences, sets, dataclasses, and
 namespaces. Other objects' `repr()` text is covered by `sensitive_patterns`. See
 [Log exceptions](log-exceptions.md).
 
+Local patterns scan at most `exception_max_local_repr + 4096` rendered
+characters before the display cut, with depth and item limits also applying.
+A match requiring context beyond this prefix can be missed; use sensitive
+keys for known secret fields.
+
 ## Check the result
 
 Capture a rendered line and assert that the secret is gone:

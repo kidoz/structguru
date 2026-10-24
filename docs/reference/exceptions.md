@@ -70,9 +70,10 @@ With `exception_include_locals=True`:
   and a `(key, value)` pair inside a walked sequence counts as a keyed value.
 - Any other object renders with its own `repr()`; `<repr failed: ErrorType>`
   replaces a `repr()` that raises.
-- `sensitive_patterns` apply to each local's full rendering before it is
-  truncated. A pattern that fails during evaluation causes the whole local to
-  render as `[REDACTED]`.
+- `sensitive_patterns` scan at most `exception_max_local_repr + 4096` rendered
+  characters before the final display cut. Depth and item limits can shorten
+  this prefix. Patterns requiring later context can miss visible text. A pattern
+  that fails during evaluation causes the whole local to render as `[REDACTED]`.
 - Sensitive keys are the configured `sensitive_keys`, or
   `DEFAULT_SENSITIVE_KEYS`.
 
