@@ -47,10 +47,13 @@ jobs:
         run: make python-check
 
       # mypy 2.4.0's compiled build segfaults under CPython 3.15 on the Linux
-      # runners (exit 139 before analysis starts). Type checking is
-      # interpreter-independent here; the 3.11-3.14 legs run it.
-      - name: Run lint and tests without typechecking
+      # runners, both when mypy runs and when a test calls its API. Type
+      # checking is interpreter-independent here; the 3.11-3.14 legs run it
+      # and the API typing test.
+      - name: Run lint and tests without mypy
         if: matrix.python-version == '3.15'
+        env:
+          PYTEST_ADDOPTS: --deselect tests/test_core.py::test_stream_sink_consumer_types_accept_text_and_reject_binary
         run: make lint test
 
   lowest:
@@ -78,7 +81,7 @@ jobs:
           import re
           import tomllib
 
-          from packaging.requirements import Requirement
+          from packaging.requirements import InvalidRequirement, Requirement
           from packaging.utils import canonicalize_name
           from packaging.version import Version
 
@@ -102,7 +105,10 @@ jobs:
                   if canonicalize_name(dist.metadata["Name"] or "") == name:
                       continue
                   for raw in dist.requires or ():
-                      requirement = Requirement(raw)
+                      try:
+                          requirement = Requirement(raw)
+                      except InvalidRequirement:
+                          continue
                       if canonicalize_name(requirement.name) != name:
                           continue
                       if requirement.marker is not None and not requirement.marker.evaluate(
