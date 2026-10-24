@@ -144,7 +144,7 @@ jobs:
       - name: Install pinned cargo-deny
         run: cargo install cargo-deny --version 0.19.9 --locked
       - name: Audit locked Rust dependencies
-        run: cargo deny --locked check advisories bans licenses
+        run: cargo deny --locked check advisories bans licenses sources
 
   msrv:
     runs-on: ubuntu-latest

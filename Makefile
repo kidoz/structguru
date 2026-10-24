@@ -27,12 +27,12 @@ typecheck: ## Run type checker (mypy strict)
 
 audit: ## Audit locked Python and Rust dependencies
 	uv audit --locked
-	cargo deny --locked check advisories bans licenses
+	cargo deny --locked check advisories bans licenses sources
 
 sbom: ## Generate CycloneDX SBOMs for Python and Rust dependencies
 	mkdir -p dist
 	uv export --quiet --preview-features sbom-export --locked --all-extras --no-dev --format cyclonedx1.5 --output-file dist/structguru-python.cdx.json
-	uv run python scripts/generate_rust_sbom.py --output dist/structguru-rust.cdx.json
+	uv run --no-project python scripts/generate_rust_sbom.py --output dist/structguru-rust.cdx.json
 
 docs: ## Build the documentation site (mkdocs strict)
 	uv run --group docs mkdocs build --strict

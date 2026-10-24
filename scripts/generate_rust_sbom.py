@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import tomllib
 from pathlib import Path
@@ -11,9 +12,28 @@ from typing import Any
 from urllib.parse import quote
 
 
+def _purl(ecosystem: str, name: str, version: str) -> str:
+    """Return a package URL suitable for use as a stable CycloneDX reference."""
+    return f"pkg:{ecosystem}/{quote(name, safe='')}@{quote(version, safe='')}"
+
+
+def _is_crates_io(package: dict[str, Any]) -> bool:
+    source = package.get("source")
+    return source in {
+        "registry+https://github.com/rust-lang/crates.io-index",
+        "sparse+https://index.crates.io/",
+    }
+
+
 def _package_ref(package: dict[str, Any]) -> str:
-    """Return a unique CycloneDX reference for one Cargo package."""
-    return f"cargo:{package['id']}"
+    """Return a checkout-independent CycloneDX reference for one Cargo package."""
+    name = str(package["name"])
+    version = str(package["version"])
+    if _is_crates_io(package):
+        return _purl("cargo", name, version)
+    source = package.get("source")
+    kind = "workspace" if source is None else str(source).split("+", 1)[0]
+    return f"cargo:{kind}/{quote(name, safe='')}@{quote(version, safe='')}"
 
 
 def _component(package: dict[str, Any]) -> dict[str, Any]:
@@ -25,8 +45,9 @@ def _component(package: dict[str, Any]) -> dict[str, Any]:
         "bom-ref": _package_ref(package),
         "name": name,
         "version": version,
-        "purl": f"pkg:cargo/{quote(name, safe='')}@{quote(version, safe='')}",
     }
+    if _is_crates_io(package):
+        component["purl"] = _package_ref(package)
     if license_expression := package.get("license"):
         component["licenses"] = [{"expression": license_expression}]
     return component
@@ -44,7 +65,8 @@ def build_sbom(root: Path) -> dict[str, Any]:
     metadata: dict[str, Any] = json.loads(completed.stdout)
     pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     project = pyproject["project"]
-    root_ref = f"pkg:pypi/{project['name']}@{project['version']}"
+    root_name = re.sub(r"[-_.]+", "-", str(project["name"])).lower()
+    root_ref = _purl("pypi", root_name, str(project["version"]))
 
     packages = {package["id"]: package for package in metadata["packages"]}
     components = sorted(

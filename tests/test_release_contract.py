@@ -34,10 +34,52 @@ def test_rust_sbom_contains_workspace_and_dependency_graph(tmp_path: Path) -> No
 
     assert sbom["bomFormat"] == "CycloneDX"
     assert sbom["specVersion"] == "1.5"
-    assert sbom["metadata"]["component"]["name"] == "structguru"
+    root = sbom["metadata"]["component"]
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert root["name"] == "structguru"
+    assert root["bom-ref"] == root["purl"] == f"pkg:pypi/structguru@{project['version']}"
     component_names = {component["name"] for component in sbom["components"]}
     assert {"pyo3", "structguru-core", "structguru-py"} <= component_names
+    known_refs = {root["bom-ref"]}
+    component_refs = set()
+    for component in sbom["components"]:
+        assert component["bom-ref"] not in component_refs
+        component_refs.add(component["bom-ref"])
+        assert "file://" not in component["bom-ref"]
+        if component["name"] in {"structguru-core", "structguru-py"}:
+            assert "purl" not in component
+            assert component["bom-ref"].startswith("cargo:workspace/")
+        else:
+            assert component["bom-ref"] == component["purl"]
+            assert component["bom-ref"].startswith("pkg:cargo/")
+        known_refs.add(component["bom-ref"])
     assert sbom["dependencies"]
+    for dependency in sbom["dependencies"]:
+        assert dependency["ref"] in known_refs
+        assert set(dependency["dependsOn"]) <= known_refs
+
+
+def test_rust_sbom_refs_are_source_stable_and_private_purls_are_omitted() -> None:
+    import runpy
+
+    _package_ref = runpy.run_path("scripts/generate_rust_sbom.py")["_package_ref"]
+
+    private = {
+        "id": "path+file:///private/checkout/structguru-core#1.5.0",
+        "name": "structguru-core",
+        "version": "1.5.0",
+        "source": None,
+    }
+    moved = {**private, "id": "path+file:///another/checkout/structguru-core#1.5.0"}
+    registry = {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#pyo3@0.27.0",
+        "name": "pyo3",
+        "version": "0.27.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+    }
+
+    assert _package_ref(private) == _package_ref(moved) == "cargo:workspace/structguru-core@1.5.0"
+    assert _package_ref(registry) == "pkg:cargo/pyo3@0.27.0"
 
 
 def test_github_release_requires_successful_publication() -> None:
@@ -103,8 +145,15 @@ def test_ci_audits_dependencies_on_every_change() -> None:
 
     assert "supply-chain:" in workflow
     assert "uv audit --locked" in workflow
-    assert "cargo deny --locked check advisories" in workflow
+    assert "cargo deny --locked check advisories bans licenses sources" in workflow
     assert Path("deny.toml").is_file()
+
+
+def test_cargo_deny_checks_sources_in_local_and_release_audits() -> None:
+    command = "cargo deny --locked check advisories bans licenses sources"
+
+    assert command in Path("Makefile").read_text(encoding="utf-8")
+    assert command in Path(".github/workflows/wheels.yml").read_text(encoding="utf-8")
 
 
 def test_wheel_audit_is_locked_and_isolated_from_builds() -> None:

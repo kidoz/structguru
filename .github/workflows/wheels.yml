@@ -15,8 +15,11 @@ on:
       - "crates/**"
       - "src/**"
       - "Cargo.*"
+      - "deny.toml"
+      - "Makefile"
       - "pyproject.toml"
       - "uv.lock"
+      - "scripts/generate_rust_sbom.py"
       - ".github/workflows/wheels.yml"
   workflow_dispatch:
 
@@ -220,7 +223,7 @@ jobs:
       - name: Install pinned cargo-deny
         run: cargo install cargo-deny --version 0.19.9 --locked
       - name: Audit locked Rust dependencies
-        run: cargo deny --locked check advisories bans licenses
+        run: cargo deny --locked check advisories bans licenses sources
       - name: Generate CycloneDX SBOMs
         run: make sbom
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
