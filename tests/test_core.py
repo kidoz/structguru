@@ -1003,6 +1003,17 @@ class TestPlaceholderRedaction:
         assert "CANARY" not in line
         assert json.loads(line)["message"] == expected
 
+    def test_interpolated_tuple_subclass_pair_is_redacted(self) -> None:
+        class Pair(tuple):
+            pass
+
+        _runtime.configure(target="memory")
+        Logger().info("{}", [Pair(("Authorization", "CANARY"))])
+        _runtime.flush()
+        line = _runtime.drain_messages()[-1]
+        assert "CANARY" not in line
+        assert json.loads(line)["message"] == "[('Authorization', [REDACTED])]"
+
     def test_containers_without_secrets_format_as_usual(self) -> None:
         _runtime.configure(target="memory")
         wide = list(range(500))

@@ -6,6 +6,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+import structguru._rust as rust
 
 import structguru
 from structguru import _runtime
@@ -49,3 +50,24 @@ def test_concurrent_logging_preserves_every_record() -> None:
         assert len(_runtime.drain_messages()) == expected
     finally:
         _runtime.shutdown()
+
+
+def test_list_snapshot_survives_concurrent_mutation_during_conversion() -> None:
+    class MutatingClock:
+        def __init__(self, values: list[object]) -> None:
+            self.values = values
+
+        def isoformat(self) -> str:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+
+                def mutate() -> None:
+                    self.values.clear()
+                    self.values.append("replacement")
+
+                executor.submit(mutate).result(timeout=2)
+            return "converted"
+
+    for _ in range(50):
+        values: list[object] = []
+        values.extend([MutatingClock(values), "retained"])
+        assert rust._convert_value_debug(values) == ["converted", "retained"]

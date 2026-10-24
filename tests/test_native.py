@@ -263,6 +263,44 @@ def test_native_converts_non_string_map_keys() -> None:
     }
 
 
+def test_native_list_conversion_uses_a_snapshot_during_python_callbacks() -> None:
+    class MutatingClock:
+        def __init__(self, values: list[object]) -> None:
+            self.values = values
+
+        def isoformat(self) -> str:
+            self.values.clear()
+            self.values.append("replacement")
+            return "converted"
+
+    values: list[object] = []
+    values.extend([MutatingClock(values), "retained"])
+    nested = {"values": values}
+
+    assert rust._convert_value_debug(values) == ["converted", "retained"]
+    values[:] = [MutatingClock(values), "retained"]
+    assert rust._convert_value_debug(nested) == {"values": ["converted", "retained"]}
+
+
+def test_native_dataclass_map_key_does_not_read_fields() -> None:
+    from dataclasses import dataclass
+
+    @dataclass(frozen=True)
+    class Key:
+        value: str
+
+        __hash__ = object.__hash__
+
+        def __getattribute__(self, name: str) -> object:
+            if name == "value":
+                raise AssertionError("unsupported key fields must not be read")
+            return super().__getattribute__(name)
+
+    assert rust._convert_value_debug({Key("private"): "retained"}) == {
+        "<unsupported: Key>": "retained"
+    }
+
+
 def test_native_converts_integer_overflow_losslessly() -> None:
     assert rust._convert_value_debug(2**100) == 2**100
     assert rust._convert_value_debug({"n": -(2**70)}) == {"n": -(2**70)}

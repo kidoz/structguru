@@ -449,6 +449,19 @@ class TestLocalRedaction:
         assert locals_["proxy"] == "mappingproxy({'secret': [REDACTED]})"
         assert locals_["loud"] == "_LoudDict({'cookie': [REDACTED]})"
 
+    def test_tuple_subclass_pairs_are_redacted(self) -> None:
+        class Pair(tuple):
+            pass
+
+        def handler() -> None:
+            headers = [Pair((b"Authorization", "CANARY-TUPLE"))]
+            _ = headers
+            raise ValueError("x")
+
+        locals_ = _frame_locals(handler)
+        assert "CANARY-TUPLE" not in json.dumps(locals_)
+        assert locals_["headers"] == "[(b'Authorization', [REDACTED])]"
+
     def test_namespaces_byte_and_enum_keys_and_pairs_are_redacted(self) -> None:
         def handler() -> None:
             args = argparse.Namespace(user="alice", password="CANARY-AP")

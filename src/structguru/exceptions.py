@@ -473,7 +473,7 @@ class _LocalRepr:
                 self.elided = True
                 self._write("...")
                 break
-            if type(item) is tuple and len(item) == 2 and self._sensitive(item[0]):
+            if isinstance(item, tuple) and len(item) == 2 and self._sensitive(item[0]):
                 # A (key, value) pair, as in header or query-parameter lists.
                 self._write("(")
                 self._value(item[0], depth)

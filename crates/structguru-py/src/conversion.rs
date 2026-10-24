@@ -275,7 +275,8 @@ fn convert_py_value_inner(
         let Some(container_id) = enter_container(obj, containers) else {
             return Ok(marker("cycle", obj));
         };
-        let result = convert_items(list.iter(), list.len(), depth, containers);
+        let snapshot = list.get_slice(0, list.len());
+        let result = convert_items(snapshot.iter(), snapshot.len(), depth, containers);
         leave_container(container_id, containers);
         return result;
     }
@@ -463,6 +464,9 @@ fn convert_map_key(
             Ok(valid) => (valid.to_owned(), key.is_exact_instance_of::<PyString>()),
             Err(_) => (decode_surrogates(text), false),
         });
+    }
+    if key.get_type().hasattr("__dataclass_fields__")? {
+        return Ok((marker_text("unsupported", key), false));
     }
     let text = match convert_py_value_inner(key, depth + 1, containers)? {
         Value::String(text) => text,
