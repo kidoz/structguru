@@ -624,7 +624,8 @@ def configure(settings: Settings | None = None, **changes: Unpack[SettingsChange
     ``structguru.exceptions.build_exception_dict`` (with the
     ``exception_*`` knobs mirroring the processor's parameters,
     ``sensitive_keys`` reused for locals redaction, and ``sensitive_patterns``
-    applied to each local's whole rendering before it is truncated) instead of
+    applied to each local's rendering prefix of up to
+    ``exception_max_local_repr + 4096`` characters before display truncation) instead of
     the formatted traceback string.
 
     ``exception_carets=False`` omits the PEP 657 position markers (the
