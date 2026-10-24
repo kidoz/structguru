@@ -103,8 +103,10 @@ jobs:
                       f"{name}: expected at least {minimum}, installed {installed}"
                   )
           PY
+      # Lowest dependency versions predate the type information the current
+      # stubs provide, so typecheck runs in the matrix and release-Rust lanes.
       - name: Run quality gates
-        run: make python-check
+        run: make lint test
 
   docs:
     runs-on: ubuntu-latest
