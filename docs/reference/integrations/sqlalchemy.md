@@ -17,6 +17,7 @@ setup_query_logging(engine, slow_threshold_ms=100.0)
 | `engine` | `sqlalchemy.engine.Engine` | required | Engine to instrument. |
 | `slow_threshold_ms` | `float` | `100.0` | Duration, in milliseconds, at or above which a query is slow. `0` makes every query slow. |
 | `log_all` | `bool` | `False` | Also log queries below the threshold. |
+| `include_query` | `bool` | `False` | Include the first 500 characters of the SQL statement instead of `"<omitted>"`. |
 | `logger_name` | `str` | `"structguru.sqlalchemy"` | `logger` field of the records. |
 
 ## Listeners
@@ -37,7 +38,7 @@ setup_query_logging(engine, slow_threshold_ms=100.0)
 
 | Field | Value |
 |---|---|
-| `query` | The SQL statement text, cut to its first 500 characters. Parameters are not logged. |
+| `query` | `"<omitted>"` by default. With `include_query=True`, the SQL statement text cut to its first 500 characters. Parameters are not logged. |
 | `duration_ms` | Cursor execution time in milliseconds, rounded to two decimals. |
 | `slow` | Whether the query reached the threshold. |
 

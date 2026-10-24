@@ -134,7 +134,8 @@ class TestSetupQueryLogging:
         listeners["after_cursor_execute"](mock_conn, None, "SELECT 1", None, None, False)
 
         output = buf.getvalue()
-        assert "SELECT 1" in output
+        assert '"query":"<omitted>"' in output
+        assert "SELECT 1" not in output
 
 
 def test_documented_log_all_recipe_logs_fast_queries_at_debug() -> None:
@@ -150,7 +151,29 @@ def test_documented_log_all_recipe_logs_fast_queries_at_debug() -> None:
     setup_query_logging(engine, log_all=True)
     with engine.connect() as connection:
         connection.execute(sqlalchemy.text("select 1"))
+    engine.dispose()
     [record] = [json.loads(line) for line in buf.getvalue().splitlines()]
     assert record["message"] == "Query executed"
     assert record["level"] == "DEBUG"
     assert record["slow"] is False
+    assert record["query"] == "<omitted>"
+
+
+def test_include_query_opts_in_and_truncates_statement_at_500_characters() -> None:
+    import json
+
+    sqlalchemy = __import__("pytest").importorskip("sqlalchemy")
+    from structguru.integrations.sqlalchemy import setup_query_logging
+
+    statement = "SELECT '" + "s" * 600 + "'"
+    buf = io.StringIO()
+    configure(service="test", level="DEBUG", stream=buf)
+    engine = sqlalchemy.create_engine("sqlite:///:memory:")
+    setup_query_logging(engine, log_all=True, include_query=True)
+    with engine.connect() as connection:
+        connection.execute(sqlalchemy.text(statement))
+    engine.dispose()
+
+    [record] = [json.loads(line) for line in buf.getvalue().splitlines()]
+    assert record["query"] == statement[:500]
+    assert len(record["query"]) == 500

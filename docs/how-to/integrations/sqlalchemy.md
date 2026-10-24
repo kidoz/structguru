@@ -22,8 +22,12 @@ A statement that takes at least `slow_threshold_ms` milliseconds (default 100)
 is logged at `WARNING`:
 
 ```json
-{"query":"WITH RECURSIVE c(x) AS (…) SELECT count(*) FROM c","duration_ms":223.7,"slow":true,"logger":"structguru.sqlalchemy","level":"WARN","severity":4,"timestamp":"…","service":"app","message":"Slow query"}
+{"query":"<omitted>","duration_ms":223.7,"slow":true,"logger":"structguru.sqlalchemy","level":"WARN","severity":4,"timestamp":"…","service":"app","message":"Slow query"}
 ```
+
+By default, `query` is `"<omitted>"` so SQL text and embedded literals stay out
+of logs. Pass `include_query=True` to record the first 500 characters of the
+statement. Query parameters are never logged by this integration.
 
 Records logged during a request carry the request's context fields, like any
 other record.
@@ -34,7 +38,7 @@ For local development or debugging, log every statement regardless of its
 duration:
 
 ```python
-setup_query_logging(engine, log_all=True)
+setup_query_logging(engine, log_all=True, include_query=True)
 ```
 
 Statements under `slow_threshold_ms` are logged at `DEBUG` as `Query executed`

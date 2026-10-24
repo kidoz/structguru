@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- SQLAlchemy query logging now supports keyword-only `include_query=True` to
+  opt into the legacy truncated SQL statement field.
+
 ### Changed
 
 - Updated Rust dependencies to PyO3 0.30.1 and fancy-regex 0.20.0, refreshed
@@ -20,6 +25,8 @@ All notable changes to this project are documented here. The format is based on
 
 - Backtracking redaction evaluation failures now fail closed throughout the
   complete render and Sentry paths instead of leaking the original string.
+- SQLAlchemy query text is `"<omitted>"` by default so inline SQL literals do
+  not reach logs unless `include_query=True` explicitly enables them.
 
 ### Fixed
 

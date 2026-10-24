@@ -23,6 +23,7 @@ def setup_query_logging(
     *,
     slow_threshold_ms: float = 100.0,
     log_all: bool = False,
+    include_query: bool = False,
     logger_name: str = "structguru.sqlalchemy",
 ) -> None:
     """Attach query timing listeners to *engine*.
@@ -37,6 +38,10 @@ def setup_query_logging(
     log_all:
         If ``True``, also log queries under the threshold, at ``DEBUG`` as
         ``Query executed`` (``slow=False``). Slow queries keep their warning.
+    include_query:
+        If ``True``, include the first 500 characters of the SQL statement in
+        the ``query`` field. By default the field is ``"<omitted>"`` so SQL text
+        and embedded literals do not reach logs unless explicitly requested.
     logger_name:
         Name for the structguru logger.
     """
@@ -82,7 +87,7 @@ def setup_query_logging(
             log_method = log.warning if is_slow else log.debug
             log_method(
                 "Slow query" if is_slow else "Query executed",
-                query=statement[:500],
+                query=statement[:500] if include_query else "<omitted>",
                 duration_ms=round(duration_ms, 2),
                 slow=is_slow,
             )

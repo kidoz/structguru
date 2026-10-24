@@ -518,6 +518,7 @@ MIDDLEWARE = ["structguru.integrations.django.StructguruMiddleware", ...]
 from structguru.integrations.sqlalchemy import setup_query_logging
 
 setup_query_logging(engine, slow_threshold_ms=100, log_all=False)
+# query is "<omitted>" by default; pass include_query=True to log statement[:500]
 ```
 
 ### gRPC
