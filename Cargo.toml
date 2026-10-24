@@ -28,7 +28,7 @@ codegen-units = 1
 strip = true
 
 [workspace.dependencies]
-pyo3 = { version = "0.29.2" }
+pyo3 = { version = "0.30.1" }
 serde = { version = "1.0" }
 serde_json = { version = "1.0", features = ["raw_value"] }
 time = { version = "0.3", features = ["macros", "formatting"] }
@@ -37,7 +37,7 @@ time = { version = "0.3", features = ["macros", "formatting"] }
 regex = { version = "1", default-features = false, features = ["std", "unicode"] }
 # Backtracking engine for opt-in look-around/backreference redaction patterns
 # (`allow_backtracking_patterns=True`); never used unless explicitly requested.
-fancy-regex = { version = "0.19", default-features = false, features = ["std", "unicode"] }
+fancy-regex = { version = "0.20", default-features = false, features = ["std", "unicode"] }
 # Only a per-thread `f64` draw is needed (sampling filter). fastrand's WyRand
 # generator has no transitive dependencies on the wheel targets, unlike rand's
 # ChaCha-based thread RNG.
