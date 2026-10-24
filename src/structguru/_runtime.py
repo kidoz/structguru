@@ -67,6 +67,20 @@ class _ExceptionConfig(TypedDict):
 
 
 class _NativeWriter(Protocol):
+    def log_plain(
+        self,
+        config: _RuntimeConfig,
+        logger: str | None,
+        level: str,
+        message: str,
+        bound: dict[str, Any],
+        kwargs: dict[str, Any],
+        contextvars: dict[str, Any],
+        getframe: Any,
+        dispatcher: CallableDispatcherProtocol,
+        created: float | None = None,
+    ) -> int | None: ...
+
     def log(
         self,
         config: _RuntimeConfig,
@@ -158,6 +172,9 @@ def _load_rust_module() -> _RustModule | None:
 
 
 _RUST = _load_rust_module()
+# Proxied writers keep the existing log/log_capture interception points used
+# for lifecycle coordination. Do not bypass them through a forwarded method.
+_NATIVE_WRITER_TYPE = _RUST._NativeStringWriter if _RUST is not None else None
 
 
 def is_available() -> bool:

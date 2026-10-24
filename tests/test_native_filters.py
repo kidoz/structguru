@@ -6,6 +6,7 @@ the Rust native fast path via ``configure(target="memory")`` + ``drain_messages(
 
 from __future__ import annotations
 
+import io
 import json
 import time
 from typing import Any
@@ -14,6 +15,7 @@ import pytest
 
 import structguru
 from structguru import _runtime
+from structguru.core import Logger
 
 pytestmark = pytest.mark.skipif(
     not _runtime.is_available(),
@@ -25,6 +27,81 @@ def _drain_last() -> dict[str, Any]:
     """Flush the writer and return the last rendered record as a dict."""
     _runtime.flush_native()
     return json.loads(_runtime.drain_messages()[-1])
+
+
+@pytest.mark.parametrize("format", ["json", "console"])
+@pytest.mark.parametrize("name", [None, "explicit.source"])
+def test_plain_submission_matches_capture_path(format: str, name: str | None) -> None:
+    lines: list[str] = []
+    for capture in (False, True):
+        _runtime.configure(
+            target="memory",
+            format=format,
+            colors=False,
+            stream_sink=io.StringIO() if capture else None,
+            rate_limit_max=1,
+            sensitive_patterns=["private-value"],
+        )
+        log = Logger(name=name).bind(shared="bound", bound_only=1)
+        with log.contextualize(shared="context", context_only=2):
+            log._log(
+                "info",
+                "order {order_id}",
+                (),
+                {
+                    "order_id": 42,
+                    "shared": "call",
+                    "password": "private-value",
+                    "nested": {"value": "private-value"},
+                },
+                levelno=25,
+                created=1_700_000_000.0,
+            )
+        _runtime.flush()
+        [line] = _runtime.drain_messages()
+        lines.append(line)
+        assert _runtime.writer_metrics()["rate_limited"] == 0
+    assert lines[0] == lines[1]
+    assert "private-value" not in lines[0]
+    if format == "json":
+        record = json.loads(lines[0])
+        assert record["logger"] == (name if name is not None else __name__)
+        assert record["shared"] == "call"
+        assert record["bound_only"] == 1
+        assert record["context_only"] == 2
+        assert "order_id" not in record
+
+
+@pytest.mark.parametrize("callable_sink", [False, True])
+def test_plain_submission_filters_once_before_callable_delivery(callable_sink: bool) -> None:
+    received: list[str] = []
+    _runtime.configure(
+        target="memory",
+        rate_limit_max=1,
+        callable_sinks=[received.append] if callable_sink else None,
+    )
+    structguru.logger.info("same {id}", id=42)
+    structguru.logger.info("same {id}", id=42)
+    _runtime.flush()
+    [line] = _runtime.drain_messages()
+    assert json.loads(line)["message"] == "same 42"
+    assert received == ([line] if callable_sink else [])
+    assert _runtime.writer_metrics()["rate_limited"] == 1
+
+
+def test_plain_sampling_rejection_does_not_read_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    from structguru import core
+
+    class UnreadableContext:
+        def get(self) -> dict[str, Any]:
+            pytest.fail("sampled records must not read context")
+
+    _runtime.configure(target="memory", sample_rate=0.0)
+    monkeypatch.setattr(core, "_ctx", UnreadableContext())
+    structguru.logger.info("sampled out")
+    _runtime.flush()
+    assert _runtime.drain_messages() == []
+    assert _runtime.writer_metrics()["sampled"] == 1
 
 
 @pytest.mark.parametrize("ceiling", ["TRACE", "DEBUG", "INFO"])

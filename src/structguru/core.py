@@ -896,10 +896,10 @@ class Logger:
     ) -> None:
         """Internal dispatch — native Rust path (the only path since v1.0).
 
-        Python keeps what only Python can see: brace formatting, the caller's
-        module name, exception and stack capture, and the hooks. The Rust
-        writer merges bound fields, kwargs, and contextvars, redacts, renders,
-        and enqueues the record in one call.
+        Python keeps brace formatting, exception and stack capture, and hooks.
+        The Rust writer merges fields, redacts, renders, and enqueues in one
+        call. Ordinary records also resolve the caller's module in that call;
+        records requiring Python capture or hooks use the facade's lookup.
 
         The stdlib bridge passes a record's own ``levelno``, which the level
         threshold, sampling, and callable-sink routing use instead of
@@ -933,6 +933,33 @@ class Logger:
         record_filter = runtime.record_filter
         if record_filter is not None and not record_filter.allow(formatted_msg, level_number):
             return
+
+        # No Python enrichment or capture: Rust owns the remaining preparation
+        # and submission. Active callable sinks defer to the leased capture
+        # path below before touching the record.
+        if (
+            runtime.fused
+            and not runtime.enrich
+            and not exc_info
+            and not stack_info
+            and type(runtime.writer) is _runtime._NATIVE_WRITER_TYPE
+        ):
+            outcome = runtime.writer.log_plain(
+                runtime.config,
+                self.name,
+                method,
+                formatted_msg,
+                self._bound,
+                kwargs,
+                _ctx.get(),
+                sys._getframe,
+                _runtime._callable_dispatcher,
+                created,
+            )
+            if outcome is not None:
+                if outcome:
+                    _runtime._note_enqueue_outcome(outcome)
+                return
 
         name = self.name if self.name is not None else _caller_module_name()
         # Exception and stack capture are Python-owned (frame walking). The

@@ -2,6 +2,7 @@
 
 use crate::conversion::{convert_fields, text_arguments};
 use crate::dispatch;
+use crate::dispatch::CallableDispatcher;
 use crate::rendering::{RedactionConfig, RuntimeConfig, render_record};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -60,6 +61,24 @@ impl NativeStringWriter {
             }
         }
     }
+}
+
+/// Match the facade's caller lookup without keeping any frame beyond this call.
+fn caller_module_name<'py>(getframe: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyString>> {
+    let py = getframe.py();
+    let mut frame = getframe.call0()?;
+    while !frame.is_none() {
+        let globals = frame.getattr(pyo3::intern!(py, "f_globals"))?;
+        let globals = globals.cast::<PyDict>()?;
+        let name = globals
+            .get_item(pyo3::intern!(py, "__name__"))?
+            .unwrap_or_else(|| PyString::new(py, "").into_any());
+        if !name.eq("structguru.core")? {
+            return Ok(name.cast_into::<PyString>()?);
+        }
+        frame = frame.getattr(pyo3::intern!(py, "f_back"))?;
+    }
+    Ok(PyString::new(py, "unknown"))
 }
 
 #[pymethods]
@@ -302,6 +321,56 @@ impl NativeStringWriter {
             created,
         )?;
         Ok(self.enqueue_owned(py, line, config.blocking).code())
+    }
+
+    /// Ordinary facade records: find the caller, merge, render, and enqueue
+    /// without returning a Python string. The facade has already filtered.
+    ///
+    /// `None` requests the existing capture path when callable sinks are active.
+    /// Its Python submission leases still cover acceptance-to-dispatch.
+    /// Otherwise return the writer outcome.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (config, logger, level, message, bound, kwargs, contextvars, getframe, dispatcher, created=None))]
+    fn log_plain(
+        &self,
+        py: Python<'_>,
+        config: &Bound<'_, RuntimeConfig>,
+        logger: Option<&Bound<'_, PyString>>,
+        level: &str,
+        message: &Bound<'_, PyString>,
+        bound: &Bound<'_, PyDict>,
+        kwargs: &Bound<'_, PyDict>,
+        contextvars: &Bound<'_, PyDict>,
+        getframe: &Bound<'_, PyAny>,
+        dispatcher: &CallableDispatcher,
+        created: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Option<u8>> {
+        if !dispatcher.idle() {
+            return Ok(None);
+        }
+        let caller;
+        let logger = match logger {
+            Some(logger) => logger,
+            None => {
+                caller = caller_module_name(getframe)?;
+                &caller
+            }
+        };
+        let config = config.get();
+        let (line, _) = render_record(
+            config,
+            logger,
+            level,
+            message,
+            bound,
+            kwargs,
+            contextvars,
+            None,
+            None,
+            false,
+            created,
+        )?;
+        Ok(Some(self.enqueue_owned(py, line, config.blocking).code()))
     }
 
     /// Like [`log`](Self::log), returning the rendered line as well.

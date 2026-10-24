@@ -1331,7 +1331,7 @@ impl CallableDispatcher {
     /// Read without the lock: a stale `true` (a sink being added concurrently)
     /// only means this record predates the sink, exactly as if it had been
     /// logged one call sooner.
-    fn idle(&self) -> bool {
+    pub(crate) fn idle(&self) -> bool {
         !self.inner.active.load(Ordering::Acquire)
     }
 
