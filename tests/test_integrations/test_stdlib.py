@@ -56,6 +56,119 @@ def _records() -> list[dict]:
     return [json.loads(line) for line in _runtime.drain_messages()]
 
 
+@pytest.mark.parametrize("extra", [False, True])
+@pytest.mark.parametrize("exception", [False, True])
+@pytest.mark.parametrize("stack", [False, True])
+def test_bridge_forwards_without_logger_clones(
+    native_memory: None,
+    monkeypatch: pytest.MonkeyPatch,
+    extra: bool,
+    exception: bool,
+    stack: bool,
+) -> None:
+    try:
+        raise ValueError("synthetic failure")
+    except ValueError:
+        exc_info = sys.exc_info()
+    record = logging.LogRecord(
+        "clone.free",
+        25,
+        "",
+        1,
+        "literal {value}: %s",
+        ("Ada",),
+        exc_info if exception else None,
+        sinfo="Stack snapshot" if stack else None,
+    )
+    if extra:
+        record.value = "metadata"
+        record._bound_fields = "field"
+    before = record.__dict__.copy()
+
+    def fail_clone(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("forwarding a record must not clone a Logger")
+
+    monkeypatch.setattr(Logger, "_clone", fail_clone)
+    StructguruHandler().handle(record)
+    [rendered] = _records()
+    assert rendered["message"] == "literal {value}: Ada"
+    assert ("exception" in rendered) == exception
+    assert ("stack" in rendered) == stack
+    if extra:
+        assert rendered["value"] == "metadata"
+        assert rendered["_bound_fields"] == "field"
+    assert record.__dict__ == before
+
+
+def test_bridge_retains_record_read_order_around_get_message(native_memory: None) -> None:
+    _runtime.configure(target="memory", level=30)
+
+    class ChangingRecord(logging.LogRecord):
+        def getMessage(self) -> str:
+            self.name = "changed"
+            self.levelno = 35
+            self.created = 1e9
+            self.request_id = "after"
+            self.stack_info = "after stack"
+            self.exc_info = (ValueError, ValueError("after exception"), None)
+            return "literal {request_id}"
+
+    record = ChangingRecord("before", 25, "", 1, "ignored", (), None, sinfo="before stack")
+    record.request_id = "before"
+    StructguruHandler().handle(record)
+    [rendered] = _records()
+    assert rendered["logger"] == "before"
+    assert rendered["level"] == "INFO"
+    assert rendered["timestamp"] == "2001-09-09T01:46:40.000000Z"
+    assert rendered["request_id"] == "before"
+    assert rendered["message"] == "literal {request_id}"
+    assert rendered["stack"] == "after stack"
+    assert "exception" not in rendered
+
+
+def test_bridge_rejects_invalid_extra_names_before_get_message(
+    native_memory: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class UnreadableRecord(logging.LogRecord):
+        def getMessage(self) -> str:
+            pytest.fail("invalid extra names must fail before message conversion")
+
+    record = UnreadableRecord("invalid", logging.INFO, "", 1, "ignored", (), None)
+    record.__dict__[1] = "invalid name"
+    handler = StructguruHandler()
+    errors: list[logging.LogRecord] = []
+    monkeypatch.setattr(handler, "handleError", errors.append)
+    handler.handle(record)
+    assert errors == [record]
+    assert _records() == []
+
+
+def test_bridge_record_fields_override_context_without_leaking_to_cached_logger(
+    native_memory: None,
+) -> None:
+    first = logging.makeLogRecord(
+        {
+            "name": "shared",
+            "levelno": logging.INFO,
+            "msg": "first {request_id}",
+            "request_id": "record",
+            "self": "field",
+        }
+    )
+    second = logging.makeLogRecord({"name": "shared", "levelno": logging.INFO, "msg": "second"})
+    handler = StructguruHandler()
+    with Logger().contextualize(request_id="context", context_only=True):
+        handler.handle(first)
+        handler.handle(second)
+    one, two = _records()
+    assert one["message"] == "first {request_id}"
+    assert one["request_id"] == "record"
+    assert one["self"] == "field"
+    assert two["request_id"] == "context"
+    assert "self" not in two
+    assert one["context_only"] is two["context_only"] is True
+
+
 def test_bridge_handle_respects_filters(native_memory: None) -> None:
     handler = StructguruHandler()
 

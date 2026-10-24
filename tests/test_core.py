@@ -1492,6 +1492,12 @@ class TestLoggingNeverRaises:
             ("contextual", 3),
         ]
 
+    def test_internal_bound_mapping_name_remains_a_public_structured_field(self) -> None:
+        _runtime.configure(target="memory")
+        Logger().info("ordinary record", _bound_fields={"value": 42})
+        [record] = _memory_records()
+        assert record["_bound_fields"] == {"value": 42}
+
 
 def test_long_templates_are_not_cached() -> None:
     import gc

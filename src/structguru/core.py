@@ -750,8 +750,7 @@ class Logger:
 
         Equivalent to ``dataclasses.replace``, which re-runs ``__init__``
         for every field, but a plain ``__dict__`` copy runs in a third of the
-        time. ``bind()`` and ``opt()`` sit on the per-request hot path and the
-        stdlib bridge calls both for every record.
+        time. ``bind()`` and ``opt()`` sit on the per-request hot path.
         """
         clone = object.__new__(type(self))
         clone.__dict__.update(self.__dict__)
@@ -883,6 +882,8 @@ class Logger:
         kwargs: dict[str, Any],
         levelno: int | None = None,
         created: float | None = None,
+        *,
+        _bound_fields: dict[str, Any] | None = None,
     ) -> None:
         """Internal dispatch — native Rust path (the only path since v1.0).
 
@@ -895,6 +896,10 @@ class Logger:
         threshold, sampling, and callable-sink routing use instead of
         *method*'s number, and its ``created`` time (Unix seconds) for the
         ``timestamp`` field.
+
+        ``_bound_fields`` supplies an already assembled per-record mapping for
+        the stdlib bridge without cloning its cached facade. Like ``bind()``
+        fields, these values never participate in brace formatting.
         """
         # One coherent snapshot follows the record through every processing stage.
         # Reconfigure/disable may retire its writer, but cannot invalidate this
@@ -940,7 +945,7 @@ class Logger:
                 self.name,
                 method,
                 formatted_msg,
-                self._bound,
+                self._bound if _bound_fields is None else _bound_fields,
                 kwargs,
                 _ctx.get(),
                 sys._getframe,
@@ -968,7 +973,7 @@ class Logger:
 
         # Contextvars append after (and never override) event fields, matching
         # structlog's merge_contextvars setdefault semantics; the writer merges.
-        bound = self._bound
+        bound = self._bound if _bound_fields is None else _bound_fields
         contextvars = _ctx.get()
         field_names: tuple[str, ...] = ()
         if runtime.enrich:

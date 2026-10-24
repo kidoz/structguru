@@ -10,7 +10,11 @@ from typing import Any
 import pytest
 
 from structguru import _runtime
-from structguru.integrations.stdlib import install_stdlib_bridge, uninstall_stdlib_bridge
+from structguru.integrations.stdlib import (
+    StructguruHandler,
+    install_stdlib_bridge,
+    uninstall_stdlib_bridge,
+)
 
 pytestmark = pytest.mark.skipif(
     not _runtime.is_available(),
@@ -116,3 +120,34 @@ def test_bench_stdlib_bridge_below_level(benchmark: Any, bridged_logger: Any) ->
     @benchmark
     def _() -> None:
         bridged_logger.debug("debug payload %s", 42)
+
+
+@pytest.mark.parametrize("shape", ["plain", "extra", "exception", "extra_exception", "stack"])
+def test_bench_stdlib_prebuilt_record(benchmark: Any, shape: str) -> None:
+    """Isolate forwarding cost from stdlib caller lookup and record creation."""
+    record = logging.LogRecord(
+        "bench.prebuilt",
+        25,
+        "",
+        1,
+        "literal {name}: %s",
+        ("Ada",),
+        _capture_exc_info() if "exception" in shape else None,
+        sinfo="Stack snapshot" if shape == "stack" else None,
+    )
+    if "extra" in shape:
+        record.request_id = "req-123"
+        record.password = "CANARY"
+    before = record.__dict__.copy()
+    handler = StructguruHandler()
+    _runtime.configure(target="null")
+    try:
+        benchmark(handler.handle, record)
+        _runtime.flush()
+        metrics = _runtime.writer_metrics()
+        assert metrics is not None
+        assert metrics["written"] == metrics["enqueued"] > 0
+        assert metrics["dropped"] == 0
+        assert record.__dict__ == before
+    finally:
+        _runtime.shutdown()

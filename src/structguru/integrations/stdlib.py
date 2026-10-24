@@ -79,9 +79,17 @@ def _logger_for(name: str) -> Logger:
 
 def _record_extras(record: logging.LogRecord) -> dict[str, Any]:
     """Extract user-supplied ``extra=`` fields from a record."""
-    return {
-        key: value for key, value in record.__dict__.items() if key not in _STANDARD_RECORD_ATTRS
-    }
+    fields: dict[str, Any] = {}
+    for key, value in record.__dict__.items():
+        if key in _STANDARD_RECORD_ATTRS:
+            continue
+        # The former bind(**extras) rejected non-string keys before invoking
+        # getMessage(). Retain that boundary without allocating a Logger.
+        if type(key) is not str and not issubclass(type(key), str):
+            msg = "keywords must be strings"
+            raise TypeError(msg)
+        fields[key] = value
+    return fields
 
 
 class StructguruHandler(logging.Handler):
@@ -139,10 +147,11 @@ class StructguruHandler(logging.Handler):
         try:
             target = _logger_for(record.name)
             extras = _record_extras(record)
-            if extras:
-                target = target.bind(**extras)
+            if extras and target._bound:
+                extras = {**target._bound, **extras}
+            controls: dict[str, Any] = {}
             if record.exc_info:
-                target = target.opt(exception=record.exc_info)
+                controls["exc_info"] = record.exc_info
             method = method_for_level_number(record.levelno)
             if method == "trace":
                 method = "debug"  # what Logger.trace() logs as
@@ -155,18 +164,20 @@ class StructguruHandler(logging.Handler):
                     method,
                     "{}",
                     (record.getMessage(),),
-                    {"stack_info": record.stack_info},
+                    {**controls, "stack_info": record.stack_info},
                     levelno=record.levelno,
                     created=record.created,
+                    _bound_fields=extras or None,
                 )
             else:
                 target._log(
                     method,
                     record.getMessage(),
                     (),
-                    {},
+                    controls,
                     levelno=record.levelno,
                     created=record.created,
+                    _bound_fields=extras or None,
                 )
         except Exception:  # noqa: BLE001 - a logging handler must never raise
             self.handleError(record)

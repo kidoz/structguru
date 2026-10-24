@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ import structguru._rust as rust
 import structguru
 from structguru import _runtime
 from structguru.exceptions import _format_locals, _redacted_message_repr
+from structguru.integrations.stdlib import StructguruHandler
 from structguru.redaction import DEFAULT_SENSITIVE_KEYS
 
 
@@ -52,6 +54,43 @@ def test_concurrent_logging_preserves_every_record() -> None:
         assert metrics["written"] == expected
         assert metrics["dropped"] == 0
         assert len(_runtime.drain_messages()) == expected
+    finally:
+        _runtime.shutdown()
+
+
+def test_concurrent_stdlib_forwarding_isolates_record_fields() -> None:
+    workers, records_per_worker = 4, 150
+    handler = StructguruHandler()
+    _runtime.configure(target="memory", maxsize=32)
+    try:
+
+        def emit(worker: int) -> None:
+            for sequence in range(records_per_worker):
+                record = logging.LogRecord(
+                    "shared.bridge", 25, "", 1, "literal {worker}: %s", (sequence,), None
+                )
+                record.worker = worker
+                record.sequence = sequence
+                handler.handle(record)
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            list(executor.map(emit, range(workers)))
+        _runtime.flush_native()
+        records = [json.loads(line) for line in _runtime.drain_messages()]
+        expected = workers * records_per_worker
+        metrics = _runtime.writer_metrics()
+        assert metrics is not None
+        assert metrics["enqueued"] == metrics["written"] == len(records) == expected
+        assert metrics["dropped"] == 0
+        assert {
+            (record["worker"], record["sequence"], record["message"]) for record in records
+        } == {
+            (worker, sequence, f"literal {{worker}}: {sequence}")
+            for worker in range(workers)
+            for sequence in range(records_per_worker)
+        }
+        assert all(record["logger"] == "shared.bridge" for record in records)
+        assert not _gil_enabled()
     finally:
         _runtime.shutdown()
 
