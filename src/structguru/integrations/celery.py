@@ -17,6 +17,8 @@ import datetime
 import decimal
 import enum
 import math
+import os
+import threading
 import uuid
 import warnings
 from collections.abc import Mapping, Sequence
@@ -30,6 +32,18 @@ from structguru.integrations._util import REDACTED, TRUNCATED_SUFFIX, active_sen
 _HEADER_KEY = "structguru_context"
 _setup_done = False
 _active_options: tuple[bool, frozenset[str] | None] | None = None
+_setup_lock = threading.RLock()
+
+
+def _after_fork() -> None:
+    """Replace setup synchronization inherited from vanished threads."""
+    global _setup_lock  # noqa: PLW0603
+    _setup_lock = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork)
+
 
 # Bounds for context exported into message headers. Brokers cap header sizes
 # (and AMQP table keys at 255 bytes), and every task carries the header.
@@ -155,90 +169,91 @@ def setup_celery_logging(
     global _setup_done, _active_options  # noqa: PLW0603
     selected_keys = _normalize_keys(context_keys)
     options = (propagate_context, selected_keys)
-    if _setup_done:
-        if options != _active_options:
-            warnings.warn(
-                "setup_celery_logging() was already called with different options; "
-                "the first configuration stays active.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        return
-
     from celery.signals import before_task_publish, task_postrun, task_prerun
 
     from structguru._contextvars import get_contextvars
 
-    previous_contexts: ContextVar[tuple[dict[str, Any] | None, ...]] = ContextVar(
-        "structguru_celery_context_stack", default=()
-    )
+    with _setup_lock:
+        if _setup_done:
+            if options != _active_options:
+                warnings.warn(
+                    "setup_celery_logging() was already called with different options; "
+                    "the first configuration stays active.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            return
 
-    if propagate_context:
+        previous_contexts: ContextVar[tuple[dict[str, Any] | None, ...]] = ContextVar(
+            "structguru_celery_context_stack", default=()
+        )
 
-        @before_task_publish.connect(weak=False)  # type: ignore[untyped-decorator]
-        def _inject_context(
-            headers: dict[str, Any] | None = None,
+        if propagate_context:
+
+            @before_task_publish.connect(weak=False)  # type: ignore[untyped-decorator]
+            def _inject_context(
+                headers: dict[str, Any] | None = None,
+                **_kw: Any,
+            ) -> None:
+                if headers is None:
+                    return
+                try:
+                    ctx = get_contextvars()
+                    if selected_keys is not None:
+                        ctx = {k: v for k, v in ctx.items() if k in selected_keys}
+                    exported = _export_context(ctx)
+                except Exception:  # noqa: BLE001 - propagation must not break publishing
+                    return
+                headers[_HEADER_KEY] = exported
+
+        @task_prerun.connect(weak=False)  # type: ignore[untyped-decorator]
+        def _bind_task_context(
+            task_id: str | None = None,
+            task: Any = None,
             **_kw: Any,
         ) -> None:
-            if headers is None:
-                return
-            try:
-                ctx = get_contextvars()
-                if selected_keys is not None:
-                    ctx = {k: v for k, v in ctx.items() if k in selected_keys}
-                exported = _export_context(ctx)
-            except Exception:  # noqa: BLE001 - context propagation must never break publishing
-                return
-            headers[_HEADER_KEY] = exported
+            stack = previous_contexts.get()
+            eager = task is not None and getattr(task.request, "is_eager", False) is True
+            previous = get_contextvars() if eager or stack else None
+            previous_contexts.set((*stack, previous))
+            clear_contextvars()
 
-    @task_prerun.connect(weak=False)  # type: ignore[untyped-decorator]
-    def _bind_task_context(
-        task_id: str | None = None,
-        task: Any = None,
-        **_kw: Any,
-    ) -> None:
-        stack = previous_contexts.get()
-        eager = task is not None and getattr(task.request, "is_eager", False) is True
-        previous = get_contextvars() if eager or stack else None
-        previous_contexts.set((*stack, previous))
-        clear_contextvars()
+            if propagate_context and task:
+                # Eager execution bypasses before_task_publish, so inherit the same
+                # selected fields locally. Explicit task headers still take priority.
+                if eager and previous is not None:
+                    inherited = previous
+                    if selected_keys is not None:
+                        inherited = {k: v for k, v in inherited.items() if k in selected_keys}
+                    bind_contextvars(**inherited)
+                request = task.request
+                ctx: dict[str, Any] | None = None
+                if hasattr(request, _HEADER_KEY):
+                    ctx = getattr(request, _HEADER_KEY, None)
+                if ctx is None and hasattr(request, "get"):
+                    ctx = request.get(_HEADER_KEY)
+                if ctx is None:
+                    headers = getattr(request, "headers", None)
+                    if isinstance(headers, dict):
+                        ctx = headers.get(_HEADER_KEY)
+                if isinstance(ctx, dict):
+                    bind_contextvars(**{k: v for k, v in ctx.items() if isinstance(k, str)})
 
-        if propagate_context and task:
-            # Eager execution bypasses before_task_publish, so inherit the same
-            # selected fields locally. Explicit task headers still take priority.
-            if eager and previous is not None:
-                inherited = previous
-                if selected_keys is not None:
-                    inherited = {k: v for k, v in inherited.items() if k in selected_keys}
-                bind_contextvars(**inherited)
-            request = task.request
-            ctx: dict[str, Any] | None = None
-            if hasattr(request, _HEADER_KEY):
-                ctx = getattr(request, _HEADER_KEY, None)
-            if ctx is None and hasattr(request, "get"):
-                ctx = request.get(_HEADER_KEY)
-            if ctx is None:
-                headers = getattr(request, "headers", None)
-                if isinstance(headers, dict):
-                    ctx = headers.get(_HEADER_KEY)
-            if isinstance(ctx, dict):
-                bind_contextvars(**{k: v for k, v in ctx.items() if isinstance(k, str)})
+            # A producer may itself be a task. Its propagated identity must never
+            # replace the consumer's identity; correlation fields still propagate.
+            if task_id:
+                bind_contextvars(task_id=task_id)
+            if task:
+                bind_contextvars(task_name=task.name)
 
-        # A producer may itself be a task. Its propagated identity must never
-        # replace the consumer's identity; correlation fields still propagate.
-        if task_id:
-            bind_contextvars(task_id=task_id)
-        if task:
-            bind_contextvars(task_name=task.name)
+        @task_postrun.connect(weak=False)  # type: ignore[untyped-decorator]
+        def _clear_context(**_kw: Any) -> None:
+            stack = previous_contexts.get()
+            clear_contextvars()
+            if stack:
+                previous_contexts.set(stack[:-1])
+                if stack[-1] is not None:
+                    bind_contextvars(**stack[-1])
 
-    @task_postrun.connect(weak=False)  # type: ignore[untyped-decorator]
-    def _clear_context(**_kw: Any) -> None:
-        stack = previous_contexts.get()
-        clear_contextvars()
-        if stack:
-            previous_contexts.set(stack[:-1])
-            if stack[-1] is not None:
-                bind_contextvars(**stack[-1])
-
-    _active_options = options
-    _setup_done = True
+        _active_options = options
+        _setup_done = True

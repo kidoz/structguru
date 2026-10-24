@@ -526,3 +526,53 @@ def test_repeated_setup_warns_only_when_options_differ() -> None:
     headers: dict[str, Any] = {}
     assert len(signals.before_task_publish.send(sender=None, headers=headers)) == 1
     assert headers == {"structguru_context": {"request_id": "r"}}
+
+
+def test_concurrent_first_setup_connects_only_one_handler_set() -> None:
+    pytest.importorskip("celery")
+    from celery.utils.dispatch import Signal
+
+    from structguru.integrations import celery as integration
+
+    signals = SimpleNamespace(
+        before_task_publish=Signal(),
+        task_prerun=Signal(),
+        task_postrun=Signal(),
+    )
+    connect_entered = threading.Event()
+    release_connect = threading.Event()
+    original_connect = signals.before_task_publish.connect
+
+    def delayed_connect(*args: Any, **kwargs: Any) -> Any:
+        connect_entered.set()
+        assert release_connect.wait(3)
+        return original_connect(*args, **kwargs)
+
+    signals.before_task_publish.connect = delayed_connect
+    with patch.dict("sys.modules", {"celery.signals": signals}):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(integration.setup_celery_logging)
+            assert connect_entered.wait(2)
+            second = pool.submit(integration.setup_celery_logging)
+            release_connect.set()
+            first.result(timeout=3)
+            second.result(timeout=3)
+
+    headers: dict[str, Any] = {}
+    assert len(signals.before_task_publish.send(sender=None, headers=headers)) == 1
+    assert len(signals.task_prerun.send(sender=None, task=None, task_id=None)) == 1
+    assert len(signals.task_postrun.send(sender=None)) == 1
+
+
+def test_after_fork_replaces_locked_setup_lock() -> None:
+    from structguru.integrations import celery as integration
+
+    inherited = integration._setup_lock
+    inherited.acquire()
+    try:
+        integration._after_fork()
+        assert integration._setup_lock is not inherited
+        assert integration._setup_lock.acquire(blocking=False)
+        integration._setup_lock.release()
+    finally:
+        inherited.release()
