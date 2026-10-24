@@ -13,6 +13,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- Exception-local and redacted message-container traversal now runs in Rust,
+  preserving Python representations, bounds, and redaction before truncation.
 - Ordinary records without Python hooks or exception/stack capture now resolve
   the caller, render, and enqueue in one native call. Callable sinks
   retain the submission tracking used by `flush()`.

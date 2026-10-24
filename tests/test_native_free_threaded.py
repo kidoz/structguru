@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 
 import pytest
 import structguru._rust as rust
 
 import structguru
 from structguru import _runtime
+from structguru.exceptions import _format_locals, _redacted_message_repr
+from structguru.redaction import DEFAULT_SENSITIVE_KEYS
 
 
 def _gil_enabled() -> bool:
@@ -71,3 +74,27 @@ def test_list_snapshot_survives_concurrent_mutation_during_conversion() -> None:
         values: list[object] = []
         values.extend([MutatingClock(values), "retained"])
         assert rust._convert_value_debug(values) == ["converted", "retained"]
+
+
+def test_concurrent_local_repr_keeps_redaction_and_traversal_state_isolated() -> None:
+    @dataclass
+    class Account:
+        user: str
+        password: str
+
+    def render(worker_id: int) -> int:
+        shared = {"token": "CANARY", "worker": worker_id}
+        value = {"left": shared, "right": shared, "account": Account("Ada", "CANARY")}
+        for _ in range(100):
+            local = _format_locals({"value": value}, DEFAULT_SENSITIVE_KEYS, 2000)["value"]
+            message = _redacted_message_repr(value, DEFAULT_SENSITIVE_KEYS)
+            assert message is not None
+            for text in (local, message):
+                assert "CANARY" not in text
+                assert text.count("[REDACTED]") == 3
+                assert text.count(f"'worker': {worker_id}") == 2
+                assert "..." not in text
+        return 100
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        assert sum(executor.map(render, range(4))) == 400

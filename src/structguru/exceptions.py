@@ -9,15 +9,20 @@ from __future__ import annotations
 
 import dataclasses
 import enum
-import itertools
+import importlib
 import sys
 import traceback
 import types
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
-from typing import Any
+from typing import Any, cast
 
 from structguru.redaction import DEFAULT_SENSITIVE_KEYS
+
+_render_local_repr = cast(
+    "Callable[..., tuple[str, bool, bool, bool]]",
+    importlib.import_module("structguru._rust")._render_local_repr,
+)
 
 _MAX_GROUP_DEPTH = 10
 _MAX_EXCEPTION_NODES = 100
@@ -64,9 +69,10 @@ def build_exception_dict(
 
     Accepts ``True`` (use the current exception), a ``BaseException`` instance,
     or a ``(type, value, tb)`` tuple; returns ``None`` when *exc_info* does not
-    resolve to an active exception. Frame walking, ``f_locals`` access, and
-    ``repr`` are Python-owned — the native renderer receives this dict and only
-    serializes it. Exception groups include an ``exceptions`` list, bounded to
+    resolve to an active exception. Python owns frame walking and ``f_locals``
+    access; a native helper walks local containers and calls Python ``repr``
+    for leaves. The record renderer serializes the resulting dict. Exception
+    groups include an ``exceptions`` list, bounded to
     ten nesting levels and 100 exception nodes per record. Groups report omitted
     direct children in ``exceptions_truncated`` when either limit is reached.
 
@@ -215,18 +221,24 @@ def _format_locals(
         if isinstance(name, str) and name.lower() in sensitive_keys:
             out[name] = _REDACTED
             continue
-        writer = _LocalRepr(sensitive_keys, limit + _PATTERN_MARGIN)
-        rendered = writer.render(value)
+        rendered, truncated, _, _ = _render_local_repr(
+            value,
+            sensitive_keys,
+            min(limit + _PATTERN_MARGIN, sys.maxsize),
+            _MAX_LOCAL_ITEMS,
+            _MAX_LOCAL_DEPTH,
+            _REPR_HOOKS,
+        )
         if redact is not None:
             try:
                 rendered = redact(rendered)
             except Exception:  # noqa: BLE001 - fail closed rather than emit unchecked text
                 out[name] = _REDACTED
                 continue
-        if writer.truncated or len(rendered) > limit:
+        if truncated or len(rendered) > limit:
             remaining = max(len(rendered) - limit, 0)
             # A rendering cut at the budget reports a lower bound.
-            more = f"{remaining}+" if writer.truncated else str(remaining)
+            more = f"{remaining}+" if truncated else str(remaining)
             rendered = f"{rendered[:limit]}...<{more} more>"
         out[name] = rendered
     return out
@@ -256,7 +268,7 @@ def _argparse_namespace_repr() -> object:
 
 
 def _walk_kind(cls: type) -> str | None:
-    """Name the ``_LocalRepr`` method that walks *cls*, or ``None`` for a leaf.
+    """Name the container walk for *cls*, or return ``None`` for a leaf.
 
     Only type-level attributes are consulted, so no instance code runs. The
     answer is cached per class: message formatting asks for every argument
@@ -293,219 +305,72 @@ def _classify(cls: type) -> str | None:
     return None
 
 
+def _repr_sensitive(key: object, sensitive_keys: frozenset[str]) -> bool:
+    """Match unusual keys with Python's Enum, string, and bytes semantics."""
+    if isinstance(key, enum.Enum):
+        return any(
+            isinstance(name, str) and name.lower() in sensitive_keys
+            for name in (key._name_, key._value_)
+        )
+    if isinstance(key, str):
+        return str.lower(key) in sensitive_keys
+    if isinstance(key, (bytes, bytearray)) and len(key) <= _MAX_BYTES_KEY:
+        try:
+            return bytes(key).decode("utf-8").lower() in sensitive_keys
+        except UnicodeDecodeError:
+            return False
+    return False
+
+
+def _repr_shape(value: Any, kind: str, cls: type) -> tuple[str, str]:
+    """Preserve Python container spellings for types beyond exact builtins."""
+    if kind == "_mapping":
+        return f"{cls.__qualname__}({{", "})"
+    if kind == "_named_tuple":
+        return f"{cls.__name__}(", ")"
+    if kind == "_dataclass":
+        return f"{cls.__qualname__}(", ")"
+    if kind == "_namespace":
+        if cls is types.SimpleNamespace:
+            name = "namespace"
+        elif getattr(cls, "__repr__", None) is _NAMESPACE_REPR:
+            name = cls.__qualname__
+        else:
+            name = cls.__name__
+        return f"{name}(", ")"
+    if issubclass(cls, (set, frozenset)):
+        return (f"{cls.__qualname__}({{", "})") if value else (f"{cls.__qualname__}(", ")")
+    return f"{cls.__qualname__}([", "])"
+
+
+def _repr_items(value: Any, kind: str, cls: type) -> Iterable[Any]:
+    """Expose unusual containers without invoking their own representation."""
+    if kind == "_mapping":
+        return dict.items(value) if issubclass(cls, dict) else value.items()
+    if kind == "_named_tuple":
+        return zip(getattr(cls, "_fields"), tuple.__iter__(value), strict=False)
+    if kind == "_dataclass":
+        fields = [item for item in dataclasses.fields(cls) if item.repr]
+        return ((item.name, getattr(value, item.name)) for item in fields)
+    if kind == "_namespace":
+        return dict.items(vars(value))
+    return cast("Iterable[Any]", value)
+
+
+_REPR_HOOKS = (_walk_kind, _repr_shape, _repr_items, _repr_sensitive)
+
+
 def _redacted_message_repr(value: Any, sensitive_keys: frozenset[str]) -> str | None:
     """Render a container a message placeholder interpolates, if it needs redaction.
 
-    Returns the ``_LocalRepr`` rendering of *value* when it redacted a
+    Returns the native rendering of *value* when it redacted a
     value under one of *sensitive_keys* (lower-case) or hid nesting deeper
     than it walks, and ``None`` otherwise, so the caller formats *value* as
     usual. Items and length are not capped, like ``str()``.
     """
     if _walk_kind(type(value)) is None:
         return None
-    writer = _LocalRepr(sensitive_keys, sys.maxsize, _UNCAPPED, _MAX_MESSAGE_DEPTH)
-    rendered = writer.render(value)
-    return rendered if writer.redacted or writer.elided else None
-
-
-class _LocalRepr:
-    """Render one local like ``repr()`` with values under sensitive keys redacted.
-
-    Only type-level checks select a walk, so no instance attribute runs to
-    decide how to render a value, and a walked container's own ``__repr__``
-    never runs. Output stops at ``budget`` characters and sets ``truncated``.
-    ``redacted`` records that a value was redacted, and ``elided`` that items
-    or nesting past the caps (or past the budget) were left out.
-    """
-
-    __slots__ = (
-        "_active",
-        "_budget",
-        "_keys",
-        "_max_depth",
-        "_max_items",
-        "_parts",
-        "_size",
-        "elided",
-        "redacted",
-        "truncated",
+    rendered, _, redacted, elided = _render_local_repr(
+        value, sensitive_keys, sys.maxsize, _UNCAPPED, _MAX_MESSAGE_DEPTH, _REPR_HOOKS
     )
-
-    def __init__(
-        self,
-        sensitive_keys: frozenset[str],
-        budget: int,
-        max_items: int = _MAX_LOCAL_ITEMS,
-        max_depth: int = _MAX_LOCAL_DEPTH,
-    ) -> None:
-        self._keys = sensitive_keys
-        self._budget = budget
-        self._max_items = max_items
-        self._max_depth = max_depth
-        self._parts: list[str] = []
-        self._size = 0
-        self._active: set[int] = set()
-        self.truncated = False
-        self.redacted = False
-        self.elided = False
-
-    def render(self, value: Any) -> str:
-        self._value(value, 0)
-        return "".join(self._parts)
-
-    def _write(self, text: str) -> None:
-        room = self._budget - self._size
-        if len(text) > room:
-            text = text[:room]
-            self.truncated = self.elided = True
-        self._parts.append(text)
-        self._size += len(text)
-
-    def _write_redacted(self) -> None:
-        self.redacted = True
-        self._write(_REDACTED)
-
-    def _sensitive(self, key: object) -> bool:
-        if type(key) is str:
-            return key.lower() in self._keys
-        if isinstance(key, enum.Enum):
-            # A composite Flag member has no name.
-            names = (key._name_, key._value_)
-            return any(isinstance(name, str) and name.lower() in self._keys for name in names)
-        if isinstance(key, str):
-            return str.lower(key) in self._keys
-        if isinstance(key, (bytes, bytearray)) and len(key) <= _MAX_BYTES_KEY:
-            try:
-                return bytes(key).decode("utf-8").lower() in self._keys
-            except UnicodeDecodeError:
-                return False
-        return False
-
-    def _leaf(self, value: Any) -> None:
-        if type(value) in (str, bytes, bytearray):
-            # Enough characters to overflow the budget, without copying the rest.
-            value = value[: self._budget - self._size + 1]
-        try:
-            text = repr(value)
-        except Exception as exc:  # noqa: BLE001
-            text = f"<repr failed: {type(exc).__name__}>"
-        self._write(text)
-
-    def _value(self, value: Any, depth: int) -> None:
-        if self.truncated:
-            return
-        kind = _walk_kind(type(value))
-        if kind is None:
-            self._leaf(value)
-        else:
-            self._walk(value, depth, getattr(self, kind))
-
-    def _walk(self, value: Any, depth: int, render: Callable[[Any, int], None]) -> None:
-        if depth >= self._max_depth:
-            self.elided = True
-            self._write("...")
-            return
-        if id(value) in self._active:
-            self._write("...")
-            return
-        self._active.add(id(value))
-        try:
-            render(value, depth + 1)
-        except Exception as exc:  # noqa: BLE001 - iteration or attribute access may fail
-            self._write(f"<repr failed: {type(exc).__name__}>")
-        finally:
-            self._active.discard(id(value))
-
-    def _entries(
-        self, items: Iterable[tuple[object, Any]], depth: int, separator: str, keyed: bool
-    ) -> None:
-        # Snapshot first: rendering an item may mutate the container.
-        limit = self._max_items
-        for index, (key, item) in enumerate(list(itertools.islice(items, limit + 1))):
-            if self.truncated:
-                return
-            if index:
-                self._write(", ")
-            if index == limit:
-                self.elided = True
-                self._write("...")
-                return
-            if keyed:
-                self._value(key, depth)
-            else:
-                self._write(str(key))
-            self._write(separator)
-            if self._sensitive(key):
-                self._write_redacted()
-            else:
-                self._value(item, depth)
-
-    def _mapping(self, value: Any, depth: int) -> None:
-        cls = type(value)
-        items = dict.items(value) if issubclass(cls, dict) else value.items()
-        wrapped = cls is not dict
-        self._write(f"{cls.__qualname__}({{" if wrapped else "{")
-        self._entries(items, depth, ": ", keyed=True)
-        self._write("})" if wrapped else "}")
-
-    def _sequence(self, value: Any, depth: int) -> None:
-        cls = type(value)
-        if cls is list:
-            opening, closing = "[", "]"
-        elif cls is tuple:
-            opening, closing = "(", ",)" if len(value) == 1 else ")"
-        elif cls is set and value:
-            opening, closing = "{", "}"
-        elif issubclass(cls, (set, frozenset)):
-            opening, closing = (
-                (f"{cls.__qualname__}({{", "})") if value else (f"{cls.__qualname__}(", ")")
-            )
-        else:
-            opening, closing = f"{cls.__qualname__}([", "])"
-        self._write(opening)
-        limit = self._max_items
-        for index, item in enumerate(list(itertools.islice(value, limit + 1))):
-            if self.truncated:
-                return
-            if index:
-                self._write(", ")
-            if index == limit:
-                self.elided = True
-                self._write("...")
-                break
-            if isinstance(item, tuple) and len(item) == 2 and self._sensitive(item[0]):
-                # A (key, value) pair, as in header or query-parameter lists.
-                self._write("(")
-                self._value(item[0], depth)
-                self._write(", ")
-                self._write_redacted()
-                self._write(")")
-            else:
-                self._value(item, depth)
-        self._write(closing)
-
-    def _named_tuple(self, value: Any, depth: int) -> None:
-        cls = type(value)
-        self._write(f"{cls.__name__}(")
-        self._entries(zip(cls._fields, tuple.__iter__(value), strict=False), depth, "=", False)
-        self._write(")")
-
-    def _dataclass(self, value: Any, depth: int) -> None:
-        fields = [item for item in dataclasses.fields(type(value)) if item.repr]
-        self._write(f"{type(value).__qualname__}(")
-        self._entries(
-            ((item.name, getattr(value, item.name)) for item in fields), depth, "=", False
-        )
-        self._write(")")
-
-    def _namespace(self, value: Any, depth: int) -> None:
-        cls = type(value)
-        if cls is types.SimpleNamespace:
-            name = "namespace"
-        elif getattr(cls, "__repr__", None) is _NAMESPACE_REPR:
-            name = cls.__qualname__
-        else:  # argparse.Namespace names the class without its qualifier.
-            name = cls.__name__
-        self._write(f"{name}(")
-        self._entries(dict.items(vars(value)), depth, "=", keyed=False)
-        self._write(")")
+    return rendered if redacted or elided else None
