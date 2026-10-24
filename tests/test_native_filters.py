@@ -356,6 +356,32 @@ def test_backtracking_opt_in_redacts_message() -> None:
     assert record["message"] == "token secret=[REDACTED]"
 
 
+@pytest.mark.parametrize("format", ["json", "console"])
+def test_backtracking_limit_redacts_every_rendered_string(format: str) -> None:
+    canary = "a" * 2048 + "!"
+    _runtime.configure(
+        target="memory",
+        format=format,
+        colors=False,
+        sensitive_patterns=[r"(a+)+\1$"],
+        allow_backtracking_patterns=True,
+    )
+    try:
+        structguru.logger.info(canary, nested={"value": canary}, **{canary: canary})
+        _runtime.flush()
+        [line] = _runtime.drain_messages()
+    finally:
+        _runtime.shutdown()
+
+    assert canary not in line
+    assert "[REDACTED]" in line
+    if format == "json":
+        record = json.loads(line)
+        assert record["message"] == "[REDACTED]"
+        assert record["nested"]["value"] == "[REDACTED]"
+        assert record["[REDACTED]"] == "[REDACTED]"
+
+
 def test_invalid_pattern_raises_even_with_backtracking_opt_in() -> None:
     with pytest.raises(ValueError, match="invalid sensitive_patterns regex"):
         _runtime.configure(

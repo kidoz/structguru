@@ -216,6 +216,31 @@ def test_sentry_hook_receives_pattern_redacted_message_and_fields() -> None:
     assert captured[0]["detail"] == "field [REDACTED]"
 
 
+def test_sentry_reconstruction_fails_closed_on_backtracking_limit() -> None:
+    captured: list[dict[str, Any]] = []
+    canary = "a" * 2048 + "!"
+
+    def hook(_logger: Any, _method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+        captured.append(event_dict)
+        return event_dict
+
+    _runtime.configure(
+        target="memory",
+        sensitive_patterns=[r"(a+)+\1$"],
+        allow_backtracking_patterns=True,
+        sentry_processor=hook,
+    )
+    try:
+        structguru.logger.error(canary, detail=canary)
+        _drain_all()
+    finally:
+        _runtime.shutdown()
+
+    assert captured[0]["event"] == "[REDACTED]"
+    assert captured[0]["detail"] == "[REDACTED]"
+    assert canary not in str(captured)
+
+
 def test_real_sentry_processor_never_receives_unredacted_extras() -> None:
     from structguru.integrations import sentry as sentry_mod
     from structguru.integrations.sentry import SentryProcessor

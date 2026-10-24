@@ -71,9 +71,8 @@ impl RedactionPattern {
         match self {
             Self::Linear(re) if re.is_match(text) => re.replace_all(text, replacement),
             Self::Linear(_) => Cow::Borrowed(text),
-            Self::Backtracking(re) => {
-                replace_all_backtracking(re, text, replacement).unwrap_or(Cow::Borrowed(REDACTED))
-            }
+            Self::Backtracking(re) => replace_all_backtracking(re, text, replacement)
+                .unwrap_or_else(|| Cow::Owned(REDACTED.to_owned())),
         }
     }
 }
@@ -1234,6 +1233,16 @@ mod tests {
         assert_eq!(
             pattern.replace_all("aaaaaaaaaaaaaaaaaaaaaaaaaaaa!", "[X]"),
             REDACTED,
+        );
+    }
+
+    #[test]
+    fn backtracking_evaluation_failure_redacts_through_render_pipeline() {
+        let pattern = RedactionPattern::backtracking_with_limit(r"(a+)+\1$", 1).unwrap();
+        let text = "aaaaaaaaaaaaaaaaaaaaaaaaaaaa!";
+        assert_eq!(
+            apply_patterns(text, &[pattern], "[X]"),
+            Some(REDACTED.to_owned())
         );
     }
 

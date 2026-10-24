@@ -11,6 +11,11 @@ All notable changes to this project are documented here. The format is based on
 - Updated Rust dependencies to PyO3 0.30.1 and fancy-regex 0.20.0, refreshed
   the Cargo lockfile, and removed the duplicate syn version.
 
+### Security
+
+- Backtracking redaction evaluation failures now fail closed throughout the
+  complete render and Sentry paths instead of leaking the original string.
+
 ### Fixed
 
 - Tuple-subclass pairs are redacted in messages and exception locals, list
