@@ -153,10 +153,13 @@ jobs:
                       f"{name}: expected at least {minimum}, installed {installed}"
                   )
           PY
-      # Lowest dependency versions predate the type information the current
-      # stubs provide, so typecheck runs in the matrix and release-Rust lanes.
-      - name: Run required source quality gates
-        run: make lint test
+      # Integration extras pin newer library floors than the core: the oldest
+      # Flask, with the latest transitive Werkzeug, cannot even be imported.
+      # Lowest-direct gates the core, while the matrix legs run integrations.
+      - name: Run core tests
+        run: >-
+          uv run --no-sync python -m pytest --ignore=tests/benchmarks
+          --ignore=tests/test_integrations
 
   release-free-threaded:
     name: release gate free-threaded Python ${{ matrix.python-version }}

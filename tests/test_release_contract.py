@@ -206,7 +206,8 @@ def test_lowest_direct_dependency_lanes_do_not_restore_locked_versions() -> None
         assert "uv run --no-sync python - <<'PY'" in job
         assert "importlib.metadata.version(name)" in job
         assert "assert Version(installed) >= Version(minimum)" in job
-        assert "run: make lint test" in job
+        assert "--ignore=tests/benchmarks" in job
+        assert "--ignore=tests/test_integrations" in job
     assert "needs: metadata" in _job_header(workflow, "release-lowest")
 
 
