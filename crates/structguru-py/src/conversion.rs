@@ -3,16 +3,100 @@
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyException, PyTypeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{
     PyAny, PyBool, PyBytes, PyDict, PyDictMethods, PyFloat, PyInt, PyList, PyListMethods, PyString,
-    PyTuple, PyTupleMethods,
+    PyTuple, PyTupleMethods, PyType,
 };
 use std::borrow::Cow;
 use std::collections::HashSet;
 use structguru_core::Value;
 
 const MAX_VALUE_DEPTH: usize = 64;
+const MAX_BYTES_KEY: usize = 128;
 type ContainerStack = Vec<usize>;
+
+struct KnownTypes {
+    enumeration: Py<PyType>,
+    date: Py<PyType>,
+    time: Py<PyType>,
+    uuid: Py<PyType>,
+}
+
+fn known_types(py: Python<'_>) -> PyResult<&KnownTypes> {
+    static TYPES: PyOnceLock<KnownTypes> = PyOnceLock::new();
+    TYPES.get_or_try_init(py, || {
+        let load = |module: &str, name: &str| -> PyResult<Py<PyType>> {
+            Ok(py
+                .import(module)?
+                .getattr(name)?
+                .cast_into::<PyType>()?
+                .unbind())
+        };
+        Ok(KnownTypes {
+            enumeration: load("enum", "Enum")?,
+            date: load("datetime", "date")?,
+            time: load("datetime", "time")?,
+            uuid: load("uuid", "UUID")?,
+        })
+    })
+}
+
+/// Match Enum identity before rendering its key as the member's value.
+/// Ordinary strings/bytes/scalars need no metadata; bytes decode in the key
+/// converter. Type checks never consult an arbitrary instance's __class__.
+fn key_aliases(key: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    if key.is_exact_instance_of::<PyString>()
+        || key.is_exact_instance_of::<PyInt>()
+        || key.is_exact_instance_of::<PyFloat>()
+        || key.is_exact_instance_of::<PyBool>()
+        || key.is_instance_of::<PyBytes>()
+        || key.is_none()
+    {
+        return Ok(Vec::new());
+    }
+    let py = key.py();
+    if !key
+        .get_type()
+        .is_subclass(known_types(py)?.enumeration.bind(py))?
+    {
+        return Ok(Vec::new());
+    }
+    let mut aliases = Vec::with_capacity(2);
+    for attribute in ["_name_", "_value_"] {
+        let name = key.getattr(attribute)?;
+        if let Ok(name) = name.cast::<PyString>() {
+            aliases.push(string_to_owned(name));
+        }
+    }
+    Ok(aliases)
+}
+
+fn convert_aliased_value(
+    aliases: PyResult<Vec<String>>,
+    obj: &Bound<'_, PyAny>,
+    depth: usize,
+    containers: &mut ContainerStack,
+) -> PyResult<Value> {
+    let aliases = match aliases {
+        Ok(aliases) => aliases,
+        // A supported Enum with unreadable identity cannot be cleared for
+        // output safely. Preserve the field and fail closed on its value.
+        Err(err) if err.is_instance_of::<PyException>(obj.py()) => {
+            return Ok(Value::String("[REDACTED]".to_owned()));
+        }
+        Err(err) => return Err(err),
+    };
+    let value = convert_py_value_inner(obj, depth, containers)?;
+    Ok(if aliases.is_empty() {
+        value
+    } else {
+        Value::Keyed {
+            aliases: aliases.into_boxed_slice(),
+            value: Box::new(value),
+        }
+    })
+}
 
 #[pyfunction]
 pub(crate) fn _convert_value_debug<'py>(
@@ -53,7 +137,12 @@ pub(crate) fn convert_fields(fields: &Bound<'_, PyDict>) -> PyResult<Vec<(String
         let key = pair.get_item(0)?;
         let value = pair.get_item(1)?;
         plain &= is_plain_key(&key);
-        entries.push((field_key(&key)?, convert_py_value(&value)?));
+        let text = field_key(&key)?;
+        let mut containers = ContainerStack::with_capacity(8);
+        entries.push((
+            text,
+            convert_aliased_value(key_aliases(&key), &value, 1, &mut containers)?,
+        ));
     }
     if !plain {
         structguru_core::collapse_duplicate_keys(&mut entries);
@@ -290,7 +379,7 @@ fn convert_py_value_inner(
     }
 
     // Exotic leaves (datetime/date/UUID/Enum/dataclass) delegate to the
-    // object's own Python conversion. A conversion that raises — a duck-typed
+    // object's own Python conversion. A conversion that raises — a datetime's
     // `isoformat()` that fails, a dataclass field whose access raises — must
     // not lose the record either, so it collapses to the unsupported marker.
     recover(obj, convert_exotic_leaf(obj, depth, containers))
@@ -435,9 +524,13 @@ fn convert_dict(
         let pair = item.cast::<PyTuple>()?;
         let key = pair.get_item(0)?;
         let value = pair.get_item(1)?;
+        let aliases = key_aliases(&key);
         let (key, plain_key) = convert_map_key(&key, depth, containers)?;
         plain &= plain_key;
-        entries.push((key, convert_py_value_inner(&value, depth + 1, containers)?));
+        entries.push((
+            key,
+            convert_aliased_value(aliases, &value, depth + 1, containers)?,
+        ));
     }
     // `1` and `"1"`, or `None` and NaN, are distinct keys that render alike.
     if !plain {
@@ -459,6 +552,15 @@ fn convert_map_key(
     depth: usize,
     containers: &mut ContainerStack,
 ) -> PyResult<(String, bool)> {
+    if let Ok(bytes) = key.cast::<PyBytes>() {
+        let bytes = bytes.as_bytes();
+        if bytes.len() <= MAX_BYTES_KEY
+            && let Ok(text) = std::str::from_utf8(bytes)
+        {
+            return Ok((text.to_owned(), false));
+        }
+        return Ok((marker_text("unsupported", key), false));
+    }
     if let Ok(text) = key.cast::<PyString>() {
         return Ok(match text.to_str() {
             Ok(valid) => (valid.to_owned(), key.is_exact_instance_of::<PyString>()),
@@ -505,9 +607,11 @@ fn convert_exotic_leaf(
 ) -> PyResult<Value> {
     let type_object = obj.get_type();
 
-    // Enum: the EnumType metaclass exposes `__members__` on the class; the
-    // member's payload is its `.value`.
-    if type_object.hasattr("__members__")? {
+    // Recognize supported types by real inheritance, never by duck-typed
+    // methods or type names: an arbitrary isoformat()/__str__ may expose data.
+    let py = obj.py();
+    let types = known_types(py)?;
+    if type_object.is_subclass(types.enumeration.bind(py))? {
         let value = obj.getattr("value")?;
         // Recurse with depth + 1 like every other container path: an enum whose
         // `.value` cycles back (e.g. a member whose `_value_` is itself) would
@@ -528,14 +632,15 @@ fn convert_exotic_leaf(
 
     // datetime.datetime / datetime.date / datetime.time: `isoformat()` gives
     // the ISO 8601 text. (datetime is a subclass of date, so both are covered.)
-    if type_object.hasattr("isoformat")? {
+    if type_object.is_subclass(types.date.bind(py))?
+        || type_object.is_subclass(types.time.bind(py))?
+    {
         let iso = obj.call_method0("isoformat")?;
         return Ok(Value::String(string_to_owned(iso.cast::<PyString>()?)));
     }
 
-    // uuid.UUID: has both .hex and .int attributes; str() gives canonical form.
-    // The type name check avoids misdetecting objects that happen to have both.
-    if type_object.hasattr("hex")? && type_object.hasattr("int")? && type_name(obj) == "UUID" {
+    // uuid.UUID: str() gives canonical form for actual UUID instances.
+    if type_object.is_subclass(types.uuid.bind(py))? {
         return Ok(Value::String(string_to_owned(&obj.str()?)));
     }
 
@@ -602,6 +707,7 @@ fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny
         Value::Int(value) => value.into_bound_py_any(py),
         Value::Float(value) => value.into_bound_py_any(py),
         Value::String(value) => value.into_bound_py_any(py),
+        Value::Keyed { value, .. } => value_to_py(py, value),
         Value::List(items) => {
             let values: Vec<Bound<'py, PyAny>> = items
                 .iter()

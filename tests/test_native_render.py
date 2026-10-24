@@ -390,7 +390,7 @@ def test_mutating_field_conversion_uses_dictionary_snapshot(format: str, kind: s
 
     payload: dict[str, Any] = {}
 
-    class ISOValue:
+    class ISOValue(dt.date):
         def isoformat(self) -> str:
             payload.clear()
             payload["replacement"] = "after snapshot"
@@ -407,7 +407,7 @@ def test_mutating_field_conversion_uses_dictionary_snapshot(format: str, kind: s
             return object.__getattribute__(self, name)
 
     payload.update(
-        first=ISOValue() if kind == "isoformat" else DataclassValue("converted"),
+        first=ISOValue(2026, 1, 1) if kind == "isoformat" else DataclassValue("converted"),
         second="snapshot retained",
     )
     _runtime.configure(target="memory", format=format, colors=False)
@@ -423,12 +423,12 @@ def test_mutating_field_conversion_uses_dictionary_snapshot(format: str, kind: s
 def test_standalone_native_renderer_snapshots_top_level_fields() -> None:
     fields: dict[str, Any] = {}
 
-    class ISOValue:
+    class ISOValue(dt.date):
         def isoformat(self) -> str:
             fields.clear()
             return "converted"
 
-    fields.update(first=ISOValue(), second="retained")
+    fields.update(first=ISOValue(2026, 1, 1), second="retained")
     assert _runtime._RUST is not None
     record = json.loads(_runtime._RUST.render_line(fields, "test", "info", "svc", "message"))
     assert record["first"] == "converted" and record["second"] == "retained"

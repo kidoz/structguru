@@ -12,6 +12,12 @@ pub enum Value {
     String(String),
     List(Vec<Value>),
     Map(Vec<(String, Value)>),
+    /// Original mapping-key names retained only for redaction. Serialization
+    /// and structural metrics expose the value, never this internal metadata.
+    Keyed {
+        aliases: Box<[String]>,
+        value: Box<Value>,
+    },
     /// Pre-serialized, already-valid JSON emitted verbatim.
     ///
     /// Used for integers outside the `i64` range: the boundary emits their
@@ -39,6 +45,10 @@ impl Value {
     }
 
     fn update_stats(&self, depth: usize, stats: &mut ValueStats) {
+        if let Value::Keyed { value, .. } = self {
+            value.update_stats(depth, stats);
+            return;
+        }
         stats.nodes += 1;
         stats.max_depth = stats.max_depth.max(depth);
 
@@ -58,6 +68,7 @@ impl Value {
             | Value::Int(_)
             | Value::Float(_)
             | Value::String(_)
+            | Value::Keyed { .. }
             | Value::Raw(_) => {}
         }
     }
@@ -122,6 +133,7 @@ impl Serialize for Value {
             Value::Int(value) => serializer.serialize_i64(*value),
             Value::Float(value) => serializer.serialize_f64(*value),
             Value::String(value) => serializer.serialize_str(value),
+            Value::Keyed { value, .. } => value.serialize(serializer),
             Value::List(items) => {
                 let mut seq = serializer.serialize_seq(Some(items.len()))?;
                 for item in items {
@@ -148,6 +160,20 @@ impl Serialize for Value {
 #[cfg(test)]
 mod tests {
     use super::{Value, ValueStats, collapse_duplicate_keys};
+
+    #[test]
+    fn key_alias_metadata_is_not_serialized_or_counted() {
+        let inner = Value::List(vec![Value::Int(42)]);
+        let keyed = Value::Keyed {
+            aliases: vec!["password".to_owned()].into_boxed_slice(),
+            value: Box::new(inner.clone()),
+        };
+        assert_eq!(
+            keyed.to_json_string().unwrap(),
+            inner.to_json_string().unwrap()
+        );
+        assert_eq!(keyed.stats(), inner.stats());
+    }
 
     #[test]
     fn stats_count_nested_value_nodes() {

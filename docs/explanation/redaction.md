@@ -45,6 +45,12 @@ redacts that whole text. Passing `sensitive_keys` replaces the fourteen
 built-in keys rather than adding to them; `DEFAULT_SENSITIVE_KEYS` is exported
 so a configuration can extend the defaults explicitly.
 
+Mapping keys supplied as UTF-8 `bytes` of at most 128 bytes are decoded and
+matched as text. Enum keys match by their member name or string value as well
+as the rendered key; their normal serialized key is kept. Invalid UTF-8 and
+longer bytes keys retain the unsupported-type marker. Keys that normalize to
+the same text retain the last value and its key identity.
+
 **Pattern-based redaction** handles secrets inside free text: an e-mail address
 in a message, a token in a URL, a card number. Each pattern rewrites every
 match, in declaration order, in the message, the logger name, the service
@@ -161,6 +167,12 @@ and bodies, and redaction can only catch what its keys and patterns
 anticipate. And reading an attribute can run code. Django's `LazyObject`
 evaluates itself and an ORM proxy may query the database, so every check the
 converter makes looks at the object's type, never at the instance.
+
+Datetime and UUID conversion requires actual `datetime.date`, `datetime.time`,
+or `uuid.UUID` instances (including subclasses); Enum conversion requires an
+actual Enum type. Defining `isoformat()` or naming a class `UUID` does not opt
+an unrelated type into conversion. Supported subclasses can still execute
+their own conversion methods.
 
 A marker is an ordinary string, so patterns apply to it too. A dataclass is
 converted field by field into a mapping, so key-based redaction reaches inside

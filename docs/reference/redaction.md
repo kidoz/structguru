@@ -35,6 +35,10 @@ configure(sensitive_keys=[*DEFAULT_SENSITIVE_KEYS, "internal_ref"])
 - The value of a matching field is replaced by the string `[REDACTED]`, at any
   depth in nested mappings and in mappings inside lists. The key is kept.
   `pattern_replacement` does not apply to key-based redaction.
+- Mapping keys also match as UTF-8 `bytes` up to 128 bytes, or as Enum members
+  by member name or string value. UTF-8 bytes keys are decoded for output;
+  Enum keys retain their serialized value. Invalid UTF-8 or longer bytes keys
+  remain unsupported markers. Normalization collisions keep the last value.
 - Naming `message`, `logger`, `service`, or `stack` in `sensitive_keys`
   replaces that whole text with `[REDACTED]`.
 - In the message, a placeholder whose name, attribute, or index names a

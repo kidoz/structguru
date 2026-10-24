@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 
 import pytest
@@ -105,13 +106,13 @@ def test_native_replaces_unsupported_objects_inside_containers() -> None:
 
 
 def test_native_failing_conversion_collapses_to_marker() -> None:
-    # A duck-typed leaf whose own conversion raises must not surface as an
+    # A supported leaf whose own conversion raises must not surface as an
     # exception from the log call; it falls back like any unsupported value.
-    class BrokenClock:
+    class BrokenClock(dt.date):
         def isoformat(self) -> str:
             raise RuntimeError("clock unavailable")
 
-    assert rust._convert_value_debug(BrokenClock()) == "<unsupported: BrokenClock>"
+    assert rust._convert_value_debug(BrokenClock(2026, 1, 1)) == "<unsupported: BrokenClock>"
 
 
 def test_native_dataclass_field_failure_collapses_to_marker() -> None:
@@ -147,12 +148,12 @@ def test_native_never_probes_instance_attributes() -> None:
 def test_native_propagates_non_exception_base_exceptions() -> None:
     # Recovery is scoped to ``Exception``: a KeyboardInterrupt or SystemExit
     # raised by a conversion still reaches the caller.
-    class Interrupting:
+    class Interrupting(dt.date):
         def isoformat(self) -> str:
             raise KeyboardInterrupt
 
     with pytest.raises(KeyboardInterrupt):
-        rust._convert_value_debug(Interrupting())
+        rust._convert_value_debug(Interrupting(2026, 1, 1))
 
 
 def test_native_cyclic_enum_value_hits_depth_marker_not_abort() -> None:
@@ -264,7 +265,10 @@ def test_native_converts_non_string_map_keys() -> None:
 
 
 def test_native_list_conversion_uses_a_snapshot_during_python_callbacks() -> None:
-    class MutatingClock:
+    class MutatingClock(dt.date):
+        def __new__(cls, values: list[object]) -> MutatingClock:
+            return super().__new__(cls, 2026, 1, 1)
+
         def __init__(self, values: list[object]) -> None:
             self.values = values
 

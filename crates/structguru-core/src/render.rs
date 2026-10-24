@@ -164,6 +164,18 @@ fn is_sensitive(key: &str, keys: &[impl AsRef<str>]) -> bool {
 /// `RedactingProcessor`: no value-pattern matching).
 fn redact(value: &mut Value, keys: &[impl AsRef<str>]) {
     match value {
+        Value::Keyed {
+            aliases,
+            value: child,
+        } => {
+            let redacted = if aliases.iter().any(|alias| is_sensitive(alias, keys)) {
+                Value::String(REDACTED.to_owned())
+            } else {
+                redact(child, keys);
+                std::mem::replace(child.as_mut(), Value::Null)
+            };
+            *value = redacted;
+        }
         Value::Map(entries) => {
             for (key, child) in entries.iter_mut() {
                 if is_sensitive(key, keys) {
@@ -204,6 +216,7 @@ fn redact(value: &mut Value, keys: &[impl AsRef<str>]) {
 /// secret — `password=(\S+)` with `$1[REDACTED]` would re-emit the secret.
 fn redact_patterns(value: &mut Value, patterns: &[RedactionPattern], replacement: &str) {
     match value {
+        Value::Keyed { value, .. } => redact_patterns(value, patterns, replacement),
         Value::Map(entries) => {
             let mut renamed = false;
             for (key, child) in entries.iter_mut() {
@@ -583,6 +596,7 @@ fn display_value(value: &Value, buf: &mut String) {
             buf.push('}');
         }
         Value::Raw(json) => buf.push_str(json), // already-serialized; emit verbatim
+        Value::Keyed { value, .. } => display_value(value, buf),
     }
 }
 

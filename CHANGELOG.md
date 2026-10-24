@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Security
+
+- Key redaction now recognizes bounded UTF-8 bytes keys and Enum member names
+  or string values before mapping-key normalization loses their identity.
+- Native conversion no longer invokes datetime, UUID, or Enum conversion
+  methods on unrelated duck-typed objects.
+
 ## [1.6.0] - 2026-10-24
 
 ### Added

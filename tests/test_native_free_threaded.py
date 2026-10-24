@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime as dt
+import enum
 import json
 import logging
 import sys
@@ -142,8 +144,49 @@ def test_concurrent_structured_exceptions_preserve_lines_and_redacted_locals() -
         _runtime.shutdown()
 
 
+def test_concurrent_mapping_key_redaction_keeps_original_enum_identity() -> None:
+    class Key(enum.IntEnum):
+        password = 1
+
+    _runtime.configure(target="memory", maxsize=32)
+    try:
+
+        def emit(worker: int) -> None:
+            for sequence in range(50):
+                structguru.logger.info(
+                    "keys",
+                    payload={Key.password: "CANARY", b"authorization": "CANARY", b"safe": 42},
+                    worker=worker,
+                    sequence=sequence,
+                )
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            list(executor.map(emit, range(4)))
+        _runtime.flush()
+        lines = _runtime.drain_messages()
+        records = [json.loads(line) for line in lines]
+        assert len(records) == 200
+        assert all("CANARY" not in line for line in lines)
+        assert all(
+            record["payload"] == {"1": "[REDACTED]", "authorization": "[REDACTED]", "safe": 42}
+            for record in records
+        )
+        assert {(record["worker"], record["sequence"]) for record in records} == {
+            (worker, sequence) for worker in range(4) for sequence in range(50)
+        }
+        metrics = _runtime.writer_metrics()
+        assert metrics is not None and metrics["enqueued"] == metrics["written"] == 200
+        assert metrics["dropped"] == 0
+        assert not _gil_enabled()
+    finally:
+        _runtime.shutdown()
+
+
 def test_list_snapshot_survives_concurrent_mutation_during_conversion() -> None:
-    class MutatingClock:
+    class MutatingClock(dt.date):
+        def __new__(cls, values: list[object]) -> MutatingClock:
+            return super().__new__(cls, 2026, 1, 1)
+
         def __init__(self, values: list[object]) -> None:
             self.values = values
 
