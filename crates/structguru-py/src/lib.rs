@@ -8,6 +8,7 @@ mod exception;
 mod filter;
 mod local_repr;
 mod rendering;
+mod submission;
 mod template;
 mod writer;
 

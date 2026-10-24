@@ -596,6 +596,7 @@ struct WorkerShared {
 /// transport semantics we need before real stdout/file sinks are attached:
 /// bounded nonblocking enqueue, background drain, flush, close, and metrics.
 pub struct StringWriter {
+    owner_pid: u32,
     shared: Arc<WorkerShared>,
     worker: Mutex<Option<JoinHandle<()>>>,
     memory_handle: MemorySinkHandle,
@@ -697,6 +698,7 @@ impl StringWriter {
         let worker = thread::spawn(move || worker_loop(worker_shared, sink));
 
         Self {
+            owner_pid: std::process::id(),
             shared,
             worker: Mutex::new(Some(worker)),
             memory_handle,
@@ -715,6 +717,10 @@ impl StringWriter {
         self.abandoned.store(true, Ordering::Release);
     }
 
+    fn unavailable(&self) -> bool {
+        self.owner_pid != std::process::id() || self.abandoned.load(Ordering::Acquire)
+    }
+
     pub fn maxsize(&self) -> usize {
         self.shared.maxsize
     }
@@ -727,6 +733,9 @@ impl StringWriter {
     }
 
     pub fn try_enqueue_with_reason(&self, message: String) -> Result<(), EnqueueError> {
+        if self.unavailable() {
+            return Err(EnqueueError::Closed(message));
+        }
         let mut state = self.lock_state();
         if state.closed {
             return Err(EnqueueError::Closed(message));
@@ -748,6 +757,9 @@ impl StringWriter {
     /// as a drop: this is the fast half of a blocking enqueue, and the caller
     /// goes on to wait for space instead of giving the record up.
     pub fn enqueue_if_space(&self, message: String) -> Result<(), String> {
+        if self.unavailable() {
+            return Err(message);
+        }
         let mut state = self.lock_state();
         if state.closed || (self.shared.maxsize > 0 && state.queue.len() >= self.shared.maxsize) {
             return Err(message);
@@ -763,9 +775,12 @@ impl StringWriter {
     /// Returns `Err` only if the writer is closed. Callers should release the
     /// GIL around this so a full queue does not freeze other Python threads.
     pub fn enqueue_blocking(&self, message: String) -> Result<(), String> {
+        if self.unavailable() {
+            return Err(message);
+        }
         let mut state = self.lock_state();
         loop {
-            if state.closed {
+            if state.closed || self.unavailable() {
                 return Err(message);
             }
             if self.shared.maxsize == 0 || state.queue.len() < self.shared.maxsize {
@@ -795,6 +810,9 @@ impl StringWriter {
     /// Abandonment discards records still queued. The write in progress may
     /// finish; the worker then stops without flushing or taking more work.
     pub fn flush(&self, stall: Option<Duration>) -> u64 {
+        if self.unavailable() {
+            return 0;
+        }
         let mut state = self.lock_state();
         let target = state.counters.enqueued;
         if state.flushed_through >= target {
@@ -821,7 +839,7 @@ impl StringWriter {
         // Abandoned (post-fork) writers have no live worker thread to drain or
         // join, and their inherited state mutex may be permanently locked — never
         // touch it. `Drop` leaks the stale JoinHandle for the same reason.
-        if self.abandoned.load(Ordering::Acquire) {
+        if self.unavailable() {
             return 0;
         }
         {
@@ -921,12 +939,18 @@ impl StringWriter {
     }
 
     pub fn resume(&self) {
+        if self.unavailable() {
+            return;
+        }
         let mut state = self.lock_state();
         state.paused = false;
         self.shared.available.notify_all();
     }
 
     pub fn messages(&self) -> Vec<String> {
+        if self.owner_pid != std::process::id() {
+            return Vec::new();
+        }
         self.memory_handle.messages()
     }
 
@@ -936,6 +960,14 @@ impl StringWriter {
     }
 
     pub fn metrics(&self) -> WorkerMetrics {
+        if self.owner_pid != std::process::id() {
+            return WorkerMetrics {
+                maxsize: self.shared.maxsize,
+                closed: true,
+                worker_done: true,
+                ..WorkerMetrics::default()
+            };
+        }
         let state = self.lock_state();
         WorkerMetrics {
             enqueued: state.counters.enqueued,
@@ -962,7 +994,7 @@ impl StringWriter {
 
 impl Drop for StringWriter {
     fn drop(&mut self) {
-        if self.abandoned.load(Ordering::Acquire) {
+        if self.unavailable() {
             // The worker died with the parent process, and glibc recycles a dead
             // thread's descriptor for the next thread the child spawns, so this
             // handle may now name the child's live worker. Joining it would hang
@@ -1123,6 +1155,56 @@ fn worker_loop(shared: Arc<WorkerShared>, mut sink: Box<dyn StringSink>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abandoned_and_foreign_writers_bypass_inherited_state_mutexes() {
+        for foreign in [false, true] {
+            let mut writer = StringWriter::new_paused(0);
+            let pid = writer.owner_pid;
+            if foreign {
+                writer.owner_pid = pid.wrapping_add(1);
+            }
+            let writer = Arc::new(writer);
+            let held = writer.lock_state();
+            if !foreign {
+                writer.abandon();
+            }
+            let accessor = Arc::clone(&writer);
+            let (done, result) = std::sync::mpsc::channel();
+            let thread = thread::spawn(move || {
+                let rejected = accessor.enqueue_blocking("blocked".into()).is_err()
+                    && accessor.enqueue_if_space("fast".into()).is_err()
+                    && matches!(
+                        accessor.try_enqueue_with_reason("drop".into()),
+                        Err(EnqueueError::Closed(_))
+                    );
+                let safe = accessor.flush(Some(Duration::from_millis(10))) == 0
+                    && accessor.close(Some(Duration::from_millis(10))) == 0;
+                if foreign {
+                    assert!(accessor.metrics().closed);
+                    assert!(accessor.messages().is_empty());
+                }
+                let _ = done.send(rejected && safe);
+            });
+            let observed = result.recv_timeout(Duration::from_secs(1));
+            // Release the injected lock and neutralization for bounded cleanup,
+            // including when the regression has made the accessor block.
+            drop(held);
+            writer.abandoned.store(false, Ordering::Release);
+            if foreign {
+                // The accessor can only finish after the lock is released on
+                // a broken build; its flush has a finite timeout above.
+                thread.join().unwrap();
+                let mut owned = Arc::try_unwrap(writer).ok().unwrap();
+                owned.owner_pid = pid;
+                owned.close(None);
+            } else {
+                writer.close(None);
+                thread.join().unwrap();
+            }
+            assert!(observed.unwrap());
+        }
+    }
     use std::io::{Error, ErrorKind, Result as IoResult};
 
     #[test]

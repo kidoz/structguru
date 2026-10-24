@@ -15,6 +15,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- `flush()` covers fused native submissions before enqueue and retains retiring
+  writers across concurrent reconfiguration.
+- Callable-sink replacements keep delivery active on free-threaded Python and
+  preserve the previous runtime when worker creation fails with `RuntimeError`.
+- Inherited writer handles avoid parent locks before child fork hooks run;
+  deferred sink finalizers run after the child runtime is published.
 - Rate limiting and filter statistics recover poisoned mutex state.
 - Document the bounded exception-local pattern scan, including its 4096-character
   look-ahead margin and limits on patterns requiring later context.

@@ -162,11 +162,17 @@ synchronous stream, callable queue, and Sentry. It then drains callable
 deliveries, since a callback may itself log to the writer, and waits for the
 writer to write and flush every covered record.
 
+This includes ordinary calls that render and enqueue entirely in Rust: they
+hold a native submission lease before rendering or waiting for queue space.
+The flush keeps references to the current and retiring writers at entry and
+checks again after callable delivery, so a concurrent reconfiguration cannot
+hide a previous writer that is still draining.
+
 "Before the call" matters. Submission leases and callable producer leases have
 monotonically increasing identities, so work that starts later neither satisfies
-nor prolongs an earlier flush. A reentrant `flush()` from a stream or Sentry hook
-excludes the submission currently running on that thread instead of waiting for
-itself. A submission that makes no progress for 10 seconds produces a bounded
+nor prolongs an earlier flush. A reentrant `flush()` from conversion, a stream,
+or a Sentry hook excludes the submission currently running on that thread
+instead of waiting for itself. A submission that makes no progress for 10 seconds produces a bounded
 warning and stops blocking the flush. Inherited leases are reset in a forked
 child. Until 1.3.0, a flush waited for the queue to become empty, a moment that
 never arrives while other threads refill the queue faster than the sink drains
@@ -174,16 +180,22 @@ it; targets are fixed instead of waiting for a quiet moment.
 
 ## Reconfiguration
 
-`configure()` and `update()` build every fallible resource before touching the
-active runtime: patterns are compiled, files opened, sidecar locks acquired. A
-failure raises and leaves the previous runtime running, so a typo in a regex or
-an unwritable path cannot turn working logging off.
+`configure()` and `update()` compile patterns, open files, and acquire sidecar
+locks before publishing a new runtime. A failure raises and leaves the previous
+runtime running, so a typo in a regex or an unwritable path cannot turn working
+logging off.
 
-Only then is the new snapshot published. The old writer is closed after that:
-it drains the records it accepted, then its thread is joined, and calls still
-in flight against the old snapshot are rejected as described above. Callable
-dispatch then moves to a new generation and drains the old one, subject to the
-stall limit.
+After publication, callable dispatch prepares a replacement worker before
+retiring its previous generation. Existing sinks remain active throughout this
+transition, including on free-threaded Python. If worker creation fails, the
+call raises `RuntimeError` and restores its previous runtime unless a newer
+configuration has already replaced it. The previous callable generation stays
+usable.
+
+Callable dispatch then drains its old generation, subject to the stall limit.
+The old writer is closed afterwards: it drains the records it accepted, then
+its thread is joined. Calls still in flight against a closed snapshot are
+rejected as described above.
 
 A level-only change, through `set_level()` or `update(level=...)`, skips all of
 this. It keeps the writer, its queue and counters, the sampling and
@@ -240,6 +252,14 @@ may have left locked:
   registrations. Deliveries queued in the parent are not repeated in the
   child.
 - It resets `lifecycle_metrics()` to zero for the new process.
+- It publishes the fresh runtime before running deferred sink finalizers, which
+  may themselves log or reconfigure.
+
+Inherited native writer handles reject submissions and return from flush and
+close without acquiring parent locks, even before structguru's child hook runs.
+Public logging calls made by earlier child hooks are inactive until the runtime
+has been rebuilt. Register application child hooks after the first
+`configure()` if their log records must be delivered.
 
 If the child cannot start its writer, logging in that child is disabled as
 after `shutdown()`, and one line explaining why is written straight to file

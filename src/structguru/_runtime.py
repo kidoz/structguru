@@ -234,6 +234,8 @@ class _RuntimeState:
 
 _state_lock = threading.Lock()
 _runtime: _RuntimeState | None = None
+_runtime_pid = os.getpid()
+_retiring_writers: list[_NativeWriter] = []
 _lifecycle_generation = 0
 
 
@@ -261,6 +263,41 @@ _submission_active: set[int] = set()
 _submission_local = threading.local()
 
 
+def _ensure_process() -> None:
+    if _runtime_pid != os.getpid():
+        _after_in_child()
+
+
+def _flush_writers() -> list[_NativeWriter]:
+    with _state_lock:
+        candidates = [*_retiring_writers]
+        if _runtime is not None:
+            candidates.append(_runtime.writer)
+    writers: list[_NativeWriter] = []
+    for writer in candidates:
+        if not any(writer is previous for previous in writers):
+            writers.append(writer)
+    return writers
+
+
+def _untrack_writer(writer: _NativeWriter) -> None:
+    with _state_lock:
+        for index, retiring in enumerate(_retiring_writers):
+            if retiring is writer:
+                removed = _retiring_writers.pop(index)
+                break
+        else:
+            return
+    del removed
+
+
+def _close_retired_writer(writer: _NativeWriter) -> None:
+    try:
+        _note_writer_abandoned(writer.close(stall_timeout=_CALLABLE_STALL_TIMEOUT))
+    finally:
+        _untrack_writer(writer)
+
+
 def _begin_submission() -> int:
     global _submission_next
     with _submission_condition:
@@ -285,6 +322,8 @@ def _end_submission(lease_id: int) -> None:
 
 
 def _wait_for_submissions(timeout: float) -> int:
+    dispatcher = _callable_dispatcher
+    native_target = dispatcher._submission_barrier()
     with _submission_condition:
         target = _submission_next
         own: set[int] = getattr(_submission_local, "active", set())
@@ -298,18 +337,21 @@ def _wait_for_submissions(timeout: float) -> int:
         while remaining:
             left = deadline - time.monotonic()
             if left <= 0:
-                return len(remaining)
+                break
             _submission_condition.wait(left)
             remaining = pending()
             if len(remaining) < previous:
                 previous = len(remaining)
                 deadline = time.monotonic() + timeout
-        return 0
+        stalled = len(remaining)
+    return stalled + dispatcher._wait_submissions(native_target, timeout)
 
 
 def current_runtime() -> _RuntimeState | None:
     """Return the current immutable-by-convention runtime snapshot."""
-    return _runtime if _RUST is not None else None
+    # Earlier child hooks must not enter inherited Python or native locks.
+    # Logging resumes when our child hook publishes the fresh runtime.
+    return _runtime if _RUST is not None and _runtime_pid == os.getpid() else None
 
 
 def is_native_enabled() -> bool:
@@ -320,6 +362,7 @@ def is_native_enabled() -> bool:
 def set_level(level: str | int) -> None:
     """Adjust the native level threshold at runtime (per-process)."""
     global _runtime, _lifecycle_generation
+    _ensure_process()
     threshold = _level_number(level)
     with _state_lock:
         if _runtime is not None:
@@ -350,6 +393,7 @@ def add_callable_sink(
     If the dispatch infrastructure is not running, it is started. Registration
     never replaces the active queue generation or waits for its backlog.
     """
+    _ensure_process()
     token = _callable_dispatcher.add(
         fn, min_level, enabled=is_native_enabled(), level_callback=level_callback
     )
@@ -365,6 +409,7 @@ def remove_callable_sink(token: int, *, finalizer: Callable[[], None] | None = N
     that stops returning is abandoned after ``_CALLABLE_STALL_TIMEOUT``, as in
     ``flush``.
     """
+    _ensure_process()
     removed, abandoned = _callable_dispatcher.remove(
         token, finalizer=finalizer, stall_timeout=_CALLABLE_STALL_TIMEOUT
     )
@@ -728,6 +773,7 @@ def _new_writer(settings: Settings) -> _NativeWriter:
 def _apply_settings(settings: Settings, *, expected: _RuntimeState | None = None) -> bool:
     """Build resources before publishing a snapshot; retry stale incremental updates."""
     global _runtime, _lifecycle_generation
+    _ensure_process()
     if _RUST is None:
         msg = "native extension is not available"
         raise RuntimeError(msg)
@@ -789,7 +835,7 @@ def _apply_settings(settings: Settings, *, expected: _RuntimeState | None = None
                 if settings.sensitive_keys is not None
                 else None
             ),
-            # Patterns must see each local's whole rendering before truncation.
+            # Patterns see the bounded local-rendering prefix before its display cut.
             "redact": new_config.redact_patterns if new_config.pattern_count else None,
         }
 
@@ -831,18 +877,47 @@ def _apply_settings(settings: Settings, *, expected: _RuntimeState | None = None
         stale = expected is not None and _runtime is not expected
         old_runtime = _runtime
         if not stale:
+            if old_runtime is not None:
+                _retiring_writers.append(old_runtime.writer)
             _runtime = new_runtime
             _lifecycle_generation += 1
     if stale:
         _note_writer_abandoned(new_writer.close(stall_timeout=_CALLABLE_STALL_TIMEOUT))
         return False
 
-    # Closing a retired writer is safe while an in-flight logger still owns its
-    # snapshot: the Rust writer rejects a late enqueue instead of invalidating the
-    # Python object. No record can observe a partially updated configuration.
+    # Keep the previous writer usable until fallible dispatcher preparation
+    # succeeds. Roll back only our own publication, never a newer configure().
+    try:
+        _sync_callable_dispatcher()
+    except Exception:
+        with _state_lock:
+            # A level-only update replaces the snapshot but keeps our writer.
+            # Roll it back with us, preserving that newer level; only a new
+            # writer or shutdown transfers ownership to a different transition.
+            active = _runtime
+            restored = active is not None and active.writer is new_writer
+            if restored:
+                _runtime = old_runtime
+                if old_runtime is not None and active is not new_runtime:
+                    assert active is not None
+                    _runtime = replace(
+                        old_runtime,
+                        level_threshold=active.level_threshold,
+                        settings=replace(old_runtime.settings, level=active.settings.level),
+                    )
+                if not any(writer is new_writer for writer in _retiring_writers):
+                    _retiring_writers.append(new_writer)
+                _lifecycle_generation += 1
+        _close_retired_writer(new_writer)
+        if old_runtime is not None:
+            if restored:
+                _untrack_writer(old_runtime.writer)
+            else:
+                _close_retired_writer(old_runtime.writer)
+        _sync_callable_dispatcher(reconfigured=False)
+        raise
     if old_runtime is not None:
-        _note_writer_abandoned(old_runtime.writer.close(stall_timeout=_CALLABLE_STALL_TIMEOUT))
-    _sync_callable_dispatcher()
+        _close_retired_writer(old_runtime.writer)
 
     _register_lifecycle_hooks()
     return True
@@ -858,6 +933,7 @@ def _sync_callable_dispatcher(*, reconfigured: bool = True) -> None:
     matches the runtime. Retries after a concurrent transition converge too;
     that transition applies its own change.
     """
+    _ensure_process()
     replacing = reconfigured
     while True:
         with _state_lock:
@@ -921,6 +997,9 @@ def _after_in_child() -> None:
     global _runtime, _state_lock, _drop_lock, _lifecycle_rejected, _callable_dispatcher
     global _lifecycle_generation, _submission_lock, _submission_condition
     global _submission_next, _submission_active, _submission_local
+    global _runtime_pid, _retiring_writers
+    if _runtime_pid == os.getpid():
+        return
     state = _runtime
     # The forking thread resumes inside any submission it already owns.
     # Other threads' leases disappear, but these must still block child flushers.
@@ -936,8 +1015,13 @@ def _after_in_child() -> None:
     _submission_local = threading.local()
     _submission_local.active = surviving_leases
     _lifecycle_rejected = 0
+    _retiring_writers = []
     if state is None or _RUST is None:
-        _callable_dispatcher = _callable_dispatcher.fork_child(enabled=False)
+        _callable_dispatcher = _callable_dispatcher.fork_child(
+            enabled=False, defer_finalizers=True
+        )
+        _runtime_pid = os.getpid()
+        _callable_dispatcher._finish_fork()
         return
     state.writer.abandon()  # never join the parent's (now absent) worker thread
     respawned = False
@@ -956,7 +1040,22 @@ def _after_in_child() -> None:
     finally:
         # The inherited dispatcher's worker thread and locks did not survive; a
         # fresh one takes over the registrations and never touches the old state.
-        _callable_dispatcher = _callable_dispatcher.fork_child(enabled=respawned)
+        try:
+            child_dispatcher = _callable_dispatcher.fork_child(
+                enabled=respawned, defer_finalizers=True
+            )
+        except Exception as exc:  # noqa: BLE001 - disable safely when a child worker cannot start
+            child_dispatcher = _callable_dispatcher.fork_child(
+                enabled=False, defer_finalizers=True
+            )
+            failed = _runtime
+            _runtime = None
+            if failed is not None and respawned:
+                _note_writer_abandoned(failed.writer.close(stall_timeout=_CALLABLE_STALL_TIMEOUT))
+            _report_fork_respawn_failure(exc)
+        _callable_dispatcher = child_dispatcher
+        _runtime_pid = os.getpid()
+        child_dispatcher._finish_fork()
 
 
 def _report_fork_respawn_failure(exc: Exception) -> None:
@@ -983,14 +1082,17 @@ def shutdown() -> None:
     Calls started after shutdown completes are disabled and are not counted.
     """
     global _runtime, _lifecycle_generation
+    _ensure_process()
     # Callback-generated logs need a live native writer until callbacks drain.
     _note_abandoned(_callable_dispatcher.stop(drain=True, stall_timeout=_CALLABLE_STALL_TIMEOUT))
     with _state_lock:
         old_runtime = _runtime
+        if old_runtime is not None:
+            _retiring_writers.append(old_runtime.writer)
         _runtime = None
         _lifecycle_generation += 1
     if old_runtime is not None:
-        _note_writer_abandoned(old_runtime.writer.close(stall_timeout=_CALLABLE_STALL_TIMEOUT))
+        _close_retired_writer(old_runtime.writer)
     _sync_callable_dispatcher()
 
 
@@ -1024,24 +1126,24 @@ def render_and_enqueue(
     stdlib record's own number) when given, otherwise by ``level``'s number.
     """
     writer = runtime.writer
-    if runtime.fused and _callable_dispatcher.idle():
-        outcome = writer.log(
-            runtime.config,
-            logger,
-            level,
-            message,
-            bound,
-            kwargs,
-            contextvars,
-            exception,
-            stack,
-            created,
-        )
-        if outcome:
-            _note_enqueue_outcome(outcome)
-        return None
     lease_id = _begin_submission()
     try:
+        if runtime.fused and _callable_dispatcher.idle():
+            outcome = writer.log(
+                runtime.config,
+                logger,
+                level,
+                message,
+                bound,
+                kwargs,
+                contextvars,
+                exception,
+                stack,
+                created,
+            )
+            if outcome:
+                _note_enqueue_outcome(outcome)
+            return None
         outcome, line, sentry_line = writer.log_capture(
             runtime.config,
             logger,
@@ -1114,6 +1216,7 @@ def lifecycle_metrics() -> dict[str, int]:
     The counter survives configuration changes and shutdown; a forked child starts
     at zero. Unlike ``writer_metrics``, this always returns a snapshot.
     """
+    _ensure_process()
     with _drop_lock:
         return {"rejected": _lifecycle_rejected}
 
@@ -1326,6 +1429,9 @@ def flush() -> None:
     ``shutdown``, reconfiguration, fork, and interpreter exit all drain
     automatically.
     """
+    if _runtime_pid != os.getpid():
+        return
+    writers = _flush_writers()
     # First close the gap between native acceptance and secondary-destination
     # submission. Reentrant stream/Sentry calls exclude their own active lease.
     stalled = _wait_for_submissions(_CALLABLE_STALL_TIMEOUT)
@@ -1338,9 +1444,11 @@ def flush() -> None:
     # Callbacks may log to the native writer or replace it by reconfiguring.
     # Drain them first, then flush the resulting runtime's writer.
     _note_abandoned(_callable_dispatcher.flush(stall_timeout=_CALLABLE_STALL_TIMEOUT))
-    state = current_runtime()
-    if state is not None:
-        _note_writer_abandoned(state.writer.flush(stall_timeout=_CALLABLE_STALL_TIMEOUT))
+    for writer in _flush_writers():
+        if not any(writer is previous for previous in writers):
+            writers.append(writer)
+    for writer in writers:
+        _note_writer_abandoned(writer.flush(stall_timeout=_CALLABLE_STALL_TIMEOUT))
 
 
 # Pre-1.0.5 name, kept as an alias: `flush` is the public spelling.

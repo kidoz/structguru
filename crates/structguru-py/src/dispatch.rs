@@ -18,12 +18,12 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ffi::CString;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use pyo3::exceptions::PyUserWarning;
+use pyo3::exceptions::{PyRuntimeError, PyUserWarning};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 
@@ -239,7 +239,8 @@ impl Channel {
         maxsize: usize,
         dispatcher: Weak<DispatcherInner>,
         sequencer: Arc<Sequencer>,
-    ) -> Arc<Channel> {
+        fail_spawn: bool,
+    ) -> PyResult<Arc<Channel>> {
         let ticket = sequencer.take();
         let channel = Arc::new(Channel {
             maxsize,
@@ -255,15 +256,26 @@ impl Channel {
             halted: AtomicBool::new(false),
         });
         let worker = Arc::clone(&channel);
-        let spawned = std::thread::Builder::new()
-            .name("structguru-callable-sinks".to_owned())
-            .spawn(move || worker.run(dispatcher));
-        let handle = spawned.unwrap_or_else(|error| {
-            channel.sequencer.give_back(ticket);
-            panic!("spawn callable sink dispatch worker: {error}")
-        });
+        let spawned = if fail_spawn {
+            Err(std::io::Error::other(
+                "injected callable worker spawn failure",
+            ))
+        } else {
+            std::thread::Builder::new()
+                .name("structguru-callable-sinks".to_owned())
+                .spawn(move || worker.run(dispatcher))
+        };
+        let handle = match spawned {
+            Ok(handle) => handle,
+            Err(error) => {
+                channel.sequencer.give_back(ticket);
+                return Err(PyRuntimeError::new_err(format!(
+                    "unable to spawn callable sink dispatch worker: {error}"
+                )));
+            }
+        };
         *channel.lock_thread() = Some(handle);
-        channel
+        Ok(channel)
     }
 
     fn lock(&self) -> MutexGuard<'_, ChannelState> {
@@ -872,6 +884,10 @@ impl Drop for RegistryGuard<'_> {
 }
 
 struct DispatcherInner {
+    fork_finalizers: Mutex<Vec<Py<PyAny>>>,
+    fail_spawn: AtomicBool,
+    replacement_gate: AtomicU8,
+    submissions: crate::submission::Submissions,
     registry: Mutex<Registry>,
     /// Set while a generation is active; read lock-free on the hot path.
     active: AtomicBool,
@@ -917,17 +933,72 @@ impl DispatcherInner {
         }
     }
 
-    fn start_channel(self: &Arc<Self>, py: Python<'_>, registry: &mut Registry) -> PyResult<()> {
+    fn prepare_channel(
+        self: &Arc<Self>,
+        py: Python<'_>,
+        maxsize: usize,
+    ) -> PyResult<Py<DispatchChannel>> {
         let channel = Channel::start(
-            registry.maxsize,
+            maxsize,
             Arc::downgrade(self),
             Arc::clone(&self.sequencer),
-        );
-        let handle = Py::new(py, DispatchChannel { inner: channel })?;
+            self.fail_spawn.swap(false, Ordering::AcqRel),
+        )?;
+        match Py::new(
+            py,
+            DispatchChannel {
+                inner: Arc::clone(&channel),
+            },
+        ) {
+            Ok(handle) => Ok(handle),
+            Err(error) => {
+                // An unpublished successor must not wait on the active
+                // generation's ticket after allocation fails.
+                channel.retire();
+                channel.sequencer.give_back(channel.ticket);
+                Err(error)
+            }
+        }
+    }
+
+    fn install_channel(
+        &self,
+        py: Python<'_>,
+        registry: &mut Registry,
+        handle: Py<DispatchChannel>,
+    ) {
         registry.channel = Some(handle.clone_ref(py));
         registry.channels.push(handle);
         self.active.store(true, Ordering::Release);
+    }
+
+    fn start_channel(self: &Arc<Self>, py: Python<'_>, registry: &mut Registry) -> PyResult<()> {
+        let handle = self.prepare_channel(py, registry.maxsize)?;
+        self.install_channel(py, registry, handle);
         Ok(())
+    }
+
+    fn retire_for_replacement(&self, py: Python<'_>, registry: &mut Registry) {
+        if let Some(channel) = registry.channel.take() {
+            channel.get().inner.retire();
+        }
+        // Test-only widening of the lock-free observer window. No Python is
+        // called while holding the registry; release uses only this atomic.
+        if self
+            .replacement_gate
+            .compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            py.detach(|| {
+                let deadline = Instant::now();
+                while self.replacement_gate.load(Ordering::Acquire) == 2
+                    && deadline.elapsed() < Duration::from_secs(5)
+                {
+                    std::thread::park_timeout(Duration::from_millis(1));
+                }
+            });
+            self.replacement_gate.store(0, Ordering::Release);
+        }
     }
 
     /// Retire the active generation; caller must hold the registry lock.
@@ -1089,6 +1160,10 @@ impl CallableDispatcher {
         };
         let (dropped, errors) = counters;
         let inner = Arc::new(DispatcherInner {
+            fork_finalizers: Mutex::new(Vec::new()),
+            fail_spawn: AtomicBool::new(false),
+            replacement_gate: AtomicU8::new(0),
+            submissions: crate::submission::Submissions::default(),
             registry: Mutex::new(registry),
             active: AtomicBool::new(false),
             dropped: AtomicU64::new(dropped),
@@ -1101,8 +1176,39 @@ impl CallableDispatcher {
     }
 }
 
+impl CallableDispatcher {
+    pub(crate) fn begin_submission(&self) -> crate::submission::Submission<'_> {
+        self.inner.submissions.begin()
+    }
+}
+
 #[pymethods]
 impl CallableDispatcher {
+    fn _submission_barrier(&self) -> u64 {
+        self.inner.submissions.barrier()
+    }
+
+    fn _fail_next_spawn_for_test(&self) {
+        self.inner.fail_spawn.store(true, Ordering::Release);
+    }
+
+    fn _pause_next_replacement_for_test(&self) {
+        self.inner.replacement_gate.store(1, Ordering::Release);
+    }
+
+    fn _replacement_waiting_for_test(&self) -> bool {
+        self.inner.replacement_gate.load(Ordering::Acquire) == 2
+    }
+
+    fn _release_replacement_for_test(&self) {
+        self.inner.replacement_gate.store(0, Ordering::Release);
+    }
+
+    fn _wait_submissions(&self, py: Python<'_>, target: u64, timeout: f64) -> usize {
+        let timeout = Duration::try_from_secs_f64(timeout.max(0.0)).unwrap_or(Duration::MAX);
+        py.detach(|| self.inner.submissions.wait(target, timeout))
+    }
+
     #[new]
     fn new(py: Python<'_>) -> Self {
         Self::from_parts(py, Vec::new(), Vec::new(), 1, 1024, (0, 0))
@@ -1123,6 +1229,11 @@ impl CallableDispatcher {
         level_callback: Option<Py<PyAny>>,
     ) -> PyResult<i64> {
         let mut registry = self.inner.lock_registry();
+        let prepared = if enabled && registry.channel.is_none() && registry.halt == Halt::Running {
+            Some(self.inner.prepare_channel(py, registry.maxsize)?)
+        } else {
+            None
+        };
         let token = registry.next_token;
         registry.next_token += 1;
         registry.runtime.insert(
@@ -1135,8 +1246,8 @@ impl CallableDispatcher {
             },
         );
         registry.eligible.clear();
-        if enabled && registry.channel.is_none() && registry.halt == Halt::Running {
-            self.inner.start_channel(py, &mut registry)?;
+        if let Some(channel) = prepared {
+            self.inner.install_channel(py, &mut registry, channel);
         }
         self.inner.publish(py, &mut registry);
         Ok(token)
@@ -1212,15 +1323,22 @@ impl CallableDispatcher {
     ) -> PyResult<usize> {
         let channels = {
             let mut registry = self.inner.lock_registry();
-            self.inner.retire_active(&mut registry);
+            let prepared = if !callbacks.is_empty() || !registry.runtime.is_empty() {
+                Some(self.inner.prepare_channel(py, maxsize)?)
+            } else {
+                None
+            };
+            self.inner.retire_for_replacement(py, &mut registry);
             let channels = registry.live_channels();
             registry.set_configured(callbacks);
             registry.maxsize = maxsize;
             registry.halt = Halt::Running;
             self.inner.dropped.store(0, Ordering::Release);
             self.inner.errors.store(0, Ordering::Release);
-            if registry.has_sinks() {
-                self.inner.start_channel(py, &mut registry)?;
+            if let Some(channel) = prepared {
+                self.inner.install_channel(py, &mut registry, channel);
+            } else {
+                self.inner.active.store(false, Ordering::Release);
             }
             self.inner.publish(py, &mut registry);
             channels
@@ -1261,8 +1379,17 @@ impl CallableDispatcher {
             }
             return Ok(());
         };
-        if registry.maxsize != maxsize || !registry.is_configured_with(&callbacks) {
-            self.inner.retire_active(&mut registry);
+        let changed = registry.maxsize != maxsize || !registry.is_configured_with(&callbacks);
+        let prepared = if (changed || registry.channel.is_none())
+            && (!callbacks.is_empty() || !registry.runtime.is_empty())
+            && registry.halt != Halt::Abandoned
+        {
+            Some(self.inner.prepare_channel(py, maxsize)?)
+        } else {
+            None
+        };
+        if changed {
+            self.inner.retire_for_replacement(py, &mut registry);
             registry.set_configured(callbacks);
             registry.maxsize = maxsize;
             self.inner.publish(py, &mut registry);
@@ -1270,8 +1397,10 @@ impl CallableDispatcher {
         if registry.halt == Halt::Lifecycle {
             registry.halt = Halt::Running;
         }
-        if registry.channel.is_none() && registry.has_sinks() && registry.halt == Halt::Running {
-            self.inner.start_channel(py, &mut registry)?;
+        if let Some(channel) = prepared {
+            self.inner.install_channel(py, &mut registry, channel);
+        } else if registry.channel.is_none() {
+            self.inner.active.store(false, Ordering::Release);
         }
         Ok(())
     }
@@ -1441,8 +1570,8 @@ impl CallableDispatcher {
     /// records are not delivered in the child, and finalizers that removal
     /// deferred run now since nothing waits on the parent's counts. The caller
     /// replaces its reference; the inherited dispatcher is never used again.
-    #[pyo3(signature = (*, enabled))]
-    fn fork_child(&self, py: Python<'_>, enabled: bool) -> PyResult<Self> {
+    #[pyo3(signature = (*, enabled, defer_finalizers=false))]
+    fn fork_child(&self, py: Python<'_>, enabled: bool, defer_finalizers: bool) -> PyResult<Self> {
         // The surviving thread may have forked from inside a callback; the
         // child does not continue that delivery.
         CALLBACK_DEPTH.with(|depth| depth.set(0));
@@ -1470,11 +1599,34 @@ impl CallableDispatcher {
                 child.inner.start_channel(py, &mut registry)?;
             }
         }
-        for finalizer in &snapshot.finalizers {
-            // Releasing a sink must never break logging.
-            let _ = finalizer.bind(py).call0();
+        *child
+            .inner
+            .fork_finalizers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = snapshot
+            .finalizers
+            .iter()
+            .map(|finalizer| finalizer.clone_ref(py))
+            .collect();
+        if !defer_finalizers {
+            child._finish_fork(py);
         }
         Ok(child)
+    }
+
+    /// Finish child cleanup only after the runtime publishes this dispatcher.
+    /// A finalizer can log or configure; it must never reenter inherited locks.
+    fn _finish_fork(&self, py: Python<'_>) {
+        let callbacks = std::mem::take(
+            &mut *self
+                .inner
+                .fork_finalizers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for finalizer in callbacks {
+            let _ = finalizer.bind(py).call0();
+        }
     }
 
     /// The active queue generation, or `None` while dispatch is stopped.

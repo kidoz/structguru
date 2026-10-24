@@ -348,6 +348,7 @@ impl NativeStringWriter {
         if !dispatcher.idle() {
             return Ok(None);
         }
+        let _submission = dispatcher.begin_submission();
         let caller;
         let logger = match logger {
             Some(logger) => logger,
