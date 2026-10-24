@@ -35,7 +35,7 @@ sbom: ## Generate CycloneDX SBOMs for Python and Rust dependencies
 	uv run python scripts/generate_rust_sbom.py --output dist/structguru-rust.cdx.json
 
 docs: ## Build the documentation site (mkdocs strict)
-	uv run mkdocs build --strict
+	uv run --group docs mkdocs build --strict
 
 python-check: lint typecheck test ## Run all required Python source quality gates
 

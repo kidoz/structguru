@@ -10,6 +10,11 @@ All notable changes to this project are documented here. The format is based on
 
 - Updated Rust dependencies to PyO3 0.30.1 and fancy-regex 0.20.0, refreshed
   the Cargo lockfile, and removed the duplicate syn version.
+- The Python 3.15 source-gate CI legs are back. `make install` no longer
+  installs the docs toolchain, whose PyYAML dependency has no cp315 wheel, and
+  the requests integration tests use `pytest-httpserver` instead of
+  `responses`, the other PyYAML consumer. Use `make docs` to install MkDocs
+  explicitly.
 
 ### Security
 

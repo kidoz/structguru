@@ -51,7 +51,6 @@ all = [
 dev = [
     { include-group = "test" },
     { include-group = "lint" },
-    { include-group = "docs" },
     { include-group = "bench" },
 ]
 test = [
@@ -59,7 +58,6 @@ test = [
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "pytest-httpserver>=1.2.0",
-    "responses>=0.26.3",
     # structlog + orjson are kept as test-only deps for the golden parity suite
     # (which compares native output against the standard structlog/orjson path).
     "structlog>=26.1.0",
@@ -138,7 +136,6 @@ module = [
     "httpx.*",
     "requests",
     "requests.*",
-    "responses",
     "pytest_httpserver",
 ]
 ignore_missing_imports = true

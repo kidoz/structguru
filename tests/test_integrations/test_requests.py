@@ -2,10 +2,11 @@
 
 import io
 import json
+import socket
 
 import pytest
-import responses
 from conftest import configure
+from pytest_httpserver import HTTPServer
 
 from structguru.integrations.requests import get_logging_session
 
@@ -14,14 +15,18 @@ def _records(buf: io.StringIO) -> list[dict]:
     return [json.loads(line) for line in buf.getvalue().splitlines() if line.strip()]
 
 
-@responses.activate
-def test_requests_logging_session_success() -> None:
+def _with_credentials(url: str) -> str:
+    """Embed userinfo in *url*, as callers sometimes hand it to requests."""
+    return url.replace("http://", "http://user:pass@", 1)
+
+
+def test_requests_logging_session_success(httpserver: HTTPServer) -> None:
     buf = io.StringIO()
     configure(service="test", level="DEBUG", stream=buf)
-    responses.add(responses.GET, "http://test.local/api", json={"status": "ok"}, status=200)
+    httpserver.expect_request("/api").respond_with_json({"status": "ok"})
 
     session = get_logging_session()
-    response = session.get("http://test.local/api", headers={"x-request-id": "123"})
+    response = session.get(httpserver.url_for("/api"), headers={"x-request-id": "123"})
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
@@ -37,31 +42,30 @@ def test_requests_logging_session_success() -> None:
     assert isinstance(rec["duration_ms"], (int, float))
 
 
-@responses.activate
-def test_requests_logged_url_strips_query_and_credentials() -> None:
+def test_requests_logged_url_strips_query_and_credentials(httpserver: HTTPServer) -> None:
     buf = io.StringIO()
     configure(service="test", level="DEBUG", stream=buf)
-    responses.add(responses.GET, "http://user:pass@test.local/charge", json={}, status=200)
+    httpserver.expect_request("/charge").respond_with_json({})
 
+    url = httpserver.url_for("/charge")
     session = get_logging_session()
     # Credentials and a token embedded directly in the URL string are what the
     # integration sees (params= are merged later, during request preparation).
-    session.get("http://user:pass@test.local/charge?token=SECRET")
+    session.get(_with_credentials(url) + "?token=SECRET")
 
     rec = _records(buf)[0]
     assert "SECRET" not in rec["http_url"]
     assert "pass" not in rec["http_url"]
-    assert rec["http_url"] == "http://test.local/charge?"
+    assert rec["http_url"] == f"{url}?"
 
 
-@responses.activate
-def test_requests_logging_session_error() -> None:
+def test_requests_logging_session_error(httpserver: HTTPServer) -> None:
     buf = io.StringIO()
     configure(service="test", level="DEBUG", stream=buf)
-    responses.add(responses.GET, "http://test.local/api/error", json={"error": "bad"}, status=500)
+    httpserver.expect_request("/api/error").respond_with_json({"error": "bad"}, status=500)
 
     session = get_logging_session()
-    response = session.get("http://test.local/api/error")
+    response = session.get(httpserver.url_for("/api/error"))
 
     assert response.status_code == 500
     records = _records(buf)
@@ -72,16 +76,19 @@ def test_requests_logging_session_error() -> None:
     assert rec["status_code"] == 500
 
 
-@responses.activate
 def test_requests_logging_session_transport_failure() -> None:
     buf = io.StringIO()
     configure(service="test", level="DEBUG", stream=buf)
-    # No matching response registered -> requests raises, which the session
-    # must still log as a failure (without a status_code) and re-raise.
+    # Bind and release a port so nothing is listening: requests raises before a
+    # response exists, which the session must still log (without a status_code)
+    # and re-raise.
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
     session = get_logging_session()
 
     with pytest.raises(Exception):
-        session.get("http://unmatched.local/api")
+        session.get(f"http://127.0.0.1:{port}/api")
 
     records = _records(buf)
     assert len(records) == 1
@@ -91,13 +98,13 @@ def test_requests_logging_session_transport_failure() -> None:
     assert "status_code" not in rec
 
 
-@responses.activate
-def test_requests_bytes_url_is_sanitized() -> None:
+def test_requests_bytes_url_is_sanitized(httpserver: HTTPServer) -> None:
     buf = io.StringIO()
     configure(stream=buf)
-    responses.add(responses.GET, "https://user:pass@test.local/path", json={}, status=200)
-    get_logging_session().get(b"https://user:pass@test.local/path?token=VALUE")
-    assert _records(buf)[0]["http_url"] == "https://test.local/path?"
+    httpserver.expect_request("/path").respond_with_json({})
+    url = httpserver.url_for("/path")
+    get_logging_session().get(_with_credentials(url).encode() + b"?token=VALUE")
+    assert _records(buf)[0]["http_url"] == f"{url}?"
     assert "pass" not in buf.getvalue() and "VALUE" not in buf.getvalue()
 
 
@@ -122,21 +129,21 @@ def test_requests_invalid_port_preserves_original_exception(
     assert record["message"] == "Outbound HTTP Request Failed"
 
 
-@responses.activate
-def test_requests_logged_url_marks_params_supplied_separately() -> None:
+def test_requests_logged_url_marks_params_supplied_separately(httpserver: HTTPServer) -> None:
     buf = io.StringIO()
     configure(service="test", level="DEBUG", stream=buf)
-    responses.add(responses.GET, "http://test.local/api", json={}, status=200)
+    httpserver.expect_request("/api").respond_with_json({})
 
+    url = httpserver.url_for("/api")
     session = get_logging_session()
-    session.get("http://test.local/api", params={"api_key": "SECRET"})
+    session.get(url, params={"api_key": "SECRET"})
     session.params = {"token": "SESSION-SECRET"}
-    session.get("http://test.local/api")
+    session.get(url)
     session.params = {}
-    session.get("http://test.local/api", params={"dropped": None})
+    session.get(url, params={"dropped": None})
 
     urls = [record["http_url"] for record in _records(buf)]
-    assert urls == ["http://test.local/api?", "http://test.local/api?", "http://test.local/api"]
+    assert urls == [f"{url}?", f"{url}?", url]
     assert "SECRET" not in buf.getvalue()
 
 

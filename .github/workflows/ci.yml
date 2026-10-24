@@ -17,10 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # No 3.15 leg until PyYAML ships cp315 wheels: it has none for 3.15 and
-        # its sdist build crashes the runners, so `make install` cannot finish.
-        # 3.15 stays covered by the abi3 wheel and the free-threaded 3.15t job.
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        # PyYAML has no cp315 wheel and its sdist build crashes the runners, so
+        # it must stay out of `make install`: it is only pulled by the opt-in
+        # docs group, which this job does not install.
+        python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
