@@ -628,3 +628,33 @@ def test_sensitive_patterns_cover_structured_exception_keys_and_values() -> None
     assert "carol@corp.com" not in line
     record = json.loads(line)
     assert record["exception"]["message"] == "owner [REDACTED]"
+
+
+@pytest.mark.parametrize("backtracking", [False, True])
+def test_invalid_redaction_pattern_diagnostic_omits_source(backtracking: bool) -> None:
+    from structguru import Settings
+
+    pattern = "SYNTHETIC_PATTERN_CANARY["
+    settings = Settings(
+        target="memory",
+        sensitive_patterns=["valid", pattern],
+        allow_backtracking_patterns=backtracking,
+    )
+    with pytest.raises(ValueError) as captured:
+        structguru.configure(settings)
+    import traceback
+
+    diagnostic = "".join(traceback.format_exception(captured.value))
+    assert "SYNTHETIC_PATTERN_CANARY" not in diagnostic
+    assert "sensitive_patterns[1]" in diagnostic
+
+
+@pytest.mark.parametrize("codepoint", range(0x206A, 0x2070))
+def test_console_escapes_deprecated_format_controls(codepoint: int) -> None:
+    char = chr(codepoint)
+    structguru.configure(target="memory", format="console", colors=False)
+    structguru.logger.info(f"unsafe{char}message", value=f"unsafe{char}value")
+    _runtime.flush()
+    [line] = _runtime.drain_messages()
+    assert char not in line
+    assert f"\\u{codepoint:04x}" in line

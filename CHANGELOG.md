@@ -15,6 +15,8 @@ All notable changes to this project are documented here. The format is based on
   previous SDK exception-capture behavior and its redaction bypass.
 - Unix log and sidecar opens reject symlinks and non-regular files; log
   directories must still be trusted. Active native files require read access.
+- Stdlib bridge diagnostics omit raw record and exception text, invalid redaction
+  regex errors omit pattern source, and console escaping covers U+206A–U+206F.
 
 - Celery context headers redact bytes and Enum sensitive keys and apply active
   patterns to exported text before truncation or broker publication.

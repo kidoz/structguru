@@ -8,6 +8,19 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use structguru_core::{RedactionPattern, Value};
 
+// Never expose compiler diagnostics: they embed the pattern source.
+fn compile_pattern(
+    pattern: &str,
+    allow_backtracking: bool,
+    index: usize,
+) -> PyResult<RedactionPattern> {
+    RedactionPattern::compile(pattern, allow_backtracking).map_err(|_| {
+        PyValueError::new_err(format!(
+            "sensitive_patterns[{index}]: invalid or unsupported regex"
+        ))
+    })
+}
+
 /// Validate regex pattern strings for native value-pattern redaction.
 ///
 /// Compiles each pattern with Rust's `regex` engine and returns the count.
@@ -21,8 +34,8 @@ pub(crate) fn validate_patterns(
     patterns: Vec<String>,
     allow_backtracking: bool,
 ) -> PyResult<usize> {
-    for p in &patterns {
-        RedactionPattern::compile(p, allow_backtracking).map_err(PyValueError::new_err)?;
+    for (index, p) in patterns.iter().enumerate() {
+        compile_pattern(p, allow_backtracking, index)?;
     }
     Ok(patterns.len())
 }
@@ -61,9 +74,9 @@ pub(crate) fn render_line(
     let compiled_patterns: Vec<RedactionPattern> = match &sensitive_patterns {
         Some(patterns) => patterns
             .iter()
-            .map(|p| RedactionPattern::linear(p))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(PyValueError::new_err)?,
+            .enumerate()
+            .map(|(index, p)| compile_pattern(p, false, index))
+            .collect::<PyResult<Vec<_>>>()?,
         None => Vec::new(),
     };
     let patterns_ref = if compiled_patterns.is_empty() {
@@ -107,9 +120,9 @@ impl RedactionConfig {
     ) -> PyResult<Self> {
         let compiled = patterns
             .iter()
-            .map(|p| RedactionPattern::compile(p, allow_backtracking))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(PyValueError::new_err)?;
+            .enumerate()
+            .map(|(index, p)| compile_pattern(p, allow_backtracking, index))
+            .collect::<PyResult<Vec<_>>>()?;
         Ok(Self {
             patterns: compiled,
             replacement: replacement.unwrap_or_else(|| "[REDACTED]".to_owned()),
@@ -214,9 +227,9 @@ pub(crate) fn render_line_console(
     let compiled: Vec<RedactionPattern> = match &sensitive_patterns {
         Some(patterns) => patterns
             .iter()
-            .map(|p| RedactionPattern::linear(p))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(PyValueError::new_err)?,
+            .enumerate()
+            .map(|(index, p)| compile_pattern(p, false, index))
+            .collect::<PyResult<Vec<_>>>()?,
         None => Vec::new(),
     };
     let patterns_ref = if compiled.is_empty() {
@@ -390,9 +403,9 @@ impl RuntimeConfig {
         let patterns = sensitive_patterns
             .unwrap_or_default()
             .iter()
-            .map(|pattern| RedactionPattern::compile(pattern, allow_backtracking))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(PyValueError::new_err)?;
+            .enumerate()
+            .map(|(index, pattern)| compile_pattern(pattern, allow_backtracking, index))
+            .collect::<PyResult<Vec<_>>>()?;
         Ok(Self {
             service: string_to_owned(service),
             sensitive_keys,

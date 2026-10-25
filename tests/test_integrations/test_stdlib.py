@@ -127,7 +127,7 @@ def test_bridge_retains_record_read_order_around_get_message(native_memory: None
 
 
 def test_bridge_rejects_invalid_extra_names_before_get_message(
-    native_memory: None, monkeypatch: pytest.MonkeyPatch
+    native_memory: None, capfd: pytest.CaptureFixture[str]
 ) -> None:
     class UnreadableRecord(logging.LogRecord):
         def getMessage(self) -> str:
@@ -136,10 +136,8 @@ def test_bridge_rejects_invalid_extra_names_before_get_message(
     record = UnreadableRecord("invalid", logging.INFO, "", 1, "ignored", (), None)
     record.__dict__[1] = "invalid name"
     handler = StructguruHandler()
-    errors: list[logging.LogRecord] = []
-    monkeypatch.setattr(handler, "handleError", errors.append)
     handler.handle(record)
-    assert errors == [record]
+    assert "stdlib emit failed" in capfd.readouterr().err
     assert _records() == []
 
 
@@ -1219,3 +1217,17 @@ def test_root_attachment_takes_logging_lock_before_its_condition(
             core._retire_handler_generation(relay, raw=True)
             core._retire_handler_generation(relay, raw=False)
         core._set_stdlib_bridge_active(False)
+
+
+def test_bridge_failure_diagnostic_omits_record_and_exception_text(
+    capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class BrokenRecord(logging.LogRecord):
+        def getMessage(self) -> str:
+            raise ValueError("SYNTHETIC_CANARY")
+
+    monkeypatch.setattr(logging, "raiseExceptions", True)
+    StructguruHandler().handle(BrokenRecord("broken", 40, "", 1, "SYNTHETIC_CANARY", (), None))
+    error = capfd.readouterr().err
+    assert "ValueError" in error and "stdlib emit failed" in error
+    assert "SYNTHETIC_CANARY" not in error and "Traceback" not in error

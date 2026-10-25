@@ -11,6 +11,7 @@ console formatting, redaction, level filtering, and output stream as
     install_stdlib_bridge(level="INFO", suppress_loggers=("urllib3", "botocore"))
 
     import logging
+import os
     logging.getLogger("sqlalchemy.engine").info("SELECT 1")
     # -> {"logger":"sqlalchemy.engine","level":"INFO",...,"message":"SELECT 1"}
 
@@ -179,8 +180,15 @@ class StructguruHandler(logging.Handler):
                     created=record.created,
                     _bound_fields=extras or None,
                 )
-        except Exception:  # noqa: BLE001 - a logging handler must never raise
-            self.handleError(record)
+        except Exception as exc:  # noqa: BLE001 - a logging handler must never raise
+            # handleError prints the original record, traceback and arguments.
+            # Diagnostics must not bypass native redaction on a failed emit.
+            if logging.raiseExceptions:
+                try:
+                    name = ascii(type(exc).__name__[:80]).encode("ascii")
+                    os.write(2, b"structguru: stdlib emit failed (" + name + b")\n")
+                except OSError:
+                    pass
 
 
 def _apply_suppression(names: Iterable[str], level: str) -> None:
