@@ -249,6 +249,7 @@ version = "1.6.0"
 dependencies = [
  "fancy-regex",
  "fastrand",
+ "libc",
  "regex",
  "serde",
  "serde_json",

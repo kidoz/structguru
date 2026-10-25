@@ -1015,6 +1015,8 @@ def _after_in_child() -> None:
     _submission_local = threading.local()
     _submission_local.active = surviving_leases
     _lifecycle_rejected = 0
+    for retiring in _retiring_writers:
+        retiring.abandon()
     _retiring_writers = []
     if state is None or _RUST is None:
         _callable_dispatcher = _callable_dispatcher.fork_child(

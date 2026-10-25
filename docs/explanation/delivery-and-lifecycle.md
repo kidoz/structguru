@@ -298,8 +298,18 @@ permissions. A relative `file_path` is resolved to an absolute one at
 `configure()`, so a later `os.chdir()` cannot split the log or move its lock
 and backups.
 
-Opening a log or lock path follows symlinks. On Windows, creation uses inherited
-filesystem permissions and does not install an owner-only ACL. Applications
+On Unix, opening a log or lock path rejects a final-component symlink and
+validates that the opened handle names a regular file, including on reopen.
+The active file needs read and append access so writers can inspect its final
+byte while holding the sidecar lock; after an interrupted write, the next record
+starts on a new line even when a different writer produced the partial line.
+Inherited sidecar descriptors are closed in forked children before replacement
+writers open the same lock path; this does not unlock a live parent's descriptor.
+
+Log directories must not be attacker-writable: no-follow opens do not protect
+ancestor directories, hard links, or replacement of the sidecar lock path.
+On Windows, file creation uses inherited permissions, does not install an
+owner-only ACL, and does not provide Unix no-follow protection. Applications
 must provision their log directory and existing files accordingly.
 
 The coordination has limits. The sidecar sits next to the log, and both should

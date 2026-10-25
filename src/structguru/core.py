@@ -20,6 +20,7 @@ import itertools
 import logging
 import os
 import re
+import stat
 import string
 import sys
 import threading
@@ -89,8 +90,12 @@ class _SecureFileHandler(logging.FileHandler):
 
     def _open(self) -> Any:
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         descriptor = os.open(self.baseFilename, flags, 0o600)
         try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                msg = "log path must be a regular file"
+                raise ValueError(msg)
             return os.fdopen(
                 descriptor,
                 self.mode,

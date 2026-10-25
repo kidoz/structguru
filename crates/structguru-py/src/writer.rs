@@ -4,7 +4,7 @@ use crate::conversion::{convert_fields, text_arguments};
 use crate::dispatch;
 use crate::dispatch::CallableDispatcher;
 use crate::rendering::{RedactionConfig, RuntimeConfig, render_record};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyString};
 use structguru_core::StringWriter;
@@ -83,6 +83,11 @@ fn caller_module_name<'py>(getframe: &Bound<'py, PyAny>) -> PyResult<Bound<'py, 
 
 #[pymethods]
 impl NativeStringWriter {
+    #[staticmethod]
+    fn _fail_next_spawn_for_test() {
+        StringWriter::fail_next_spawn_for_test();
+    }
+
     #[new]
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
@@ -126,7 +131,7 @@ impl NativeStringWriter {
                     sinks.push(Box::new(StdoutSink));
                 }
 
-                let writer = if !sinks.is_empty() {
+                if !sinks.is_empty() {
                     if sinks.len() == 1 {
                         StringWriter::with_boxed_sink(maxsize, sinks.pop().unwrap())
                     } else {
@@ -145,14 +150,17 @@ impl NativeStringWriter {
                                 StringWriter::new(maxsize)
                             }
                         }
-                        other => {
-                            return Err(SinkError::new(format!("unknown writer target: {other}")));
-                        }
+                        other => Err(SinkError::new(format!("unknown writer target: {other}"))),
                     }
-                };
-                Ok(writer)
+                }
             })
-            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+            .map_err(|err| {
+                if err.is_spawn_failure() {
+                    PyRuntimeError::new_err(err.to_string())
+                } else {
+                    PyValueError::new_err(err.to_string())
+                }
+            })?;
         Ok(Self { writer })
     }
 

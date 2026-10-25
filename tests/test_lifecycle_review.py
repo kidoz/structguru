@@ -351,6 +351,24 @@ def test_child_publishes_runtime_before_running_deferred_sink_finalizers() -> No
     assert result.returncode == 0, result.stderr
 
 
+def test_writer_spawn_failure_preserves_runtime_and_recovers() -> None:
+    from structguru._rust import _NativeStringWriter
+
+    _runtime.configure(target="memory", service="original")
+    original = _runtime.current_runtime()
+    _NativeStringWriter._fail_next_spawn_for_test()
+    with pytest.raises(RuntimeError, match="start native writer"):
+        _runtime.configure(target="memory", service="replacement")
+    assert _runtime.current_runtime() is original
+    structguru.logger.info("still live")
+    _runtime.flush()
+    assert json.loads(_runtime.drain_messages()[0])["service"] == "original"
+    _runtime.configure(target="memory", service="recovered")
+    structguru.logger.info("new writer")
+    _runtime.flush()
+    assert json.loads(_runtime.drain_messages()[0])["service"] == "recovered"
+
+
 def test_concurrent_fork_child_and_snapshot_publication() -> None:
     # A segfault or deadlock must stay bounded and isolated from pytest.
     result = subprocess.run(

@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
+use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -11,12 +12,18 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SinkError {
     message: String,
+    spawn_failure: bool,
 }
 
 impl SinkError {
+    pub fn is_spawn_failure(&self) -> bool {
+        self.spawn_failure
+    }
+
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            spawn_failure: false,
         }
     }
 }
@@ -37,6 +44,11 @@ pub enum EnqueueError {
 }
 
 pub trait StringSink: Send {
+    /// Cleanup that may run in a forked child without acquiring inherited locks.
+    fn fork_cleanup(&self) -> Vec<Arc<dyn Fn() + Send + Sync>> {
+        Vec::new()
+    }
+
     fn write(&mut self, message: String) -> Result<(), SinkError>;
 
     fn flush(&mut self) -> Result<(), SinkError> {
@@ -210,6 +222,61 @@ impl StringSink for FailingSink {
     }
 }
 
+/// Share the lock descriptor with the writer's fork cleanup. The vanished
+/// worker owns the sink in a child, so normal Drop cannot close its descriptor.
+struct InheritedLock {
+    file: ManuallyDrop<File>,
+    #[cfg(unix)]
+    owner_pid: u32,
+    closed: AtomicBool,
+}
+
+impl InheritedLock {
+    fn new(file: File) -> Self {
+        Self {
+            file: ManuallyDrop::new(file),
+            #[cfg(unix)]
+            owner_pid: std::process::id(),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    fn file(&self) -> Result<&File, SinkError> {
+        #[cfg(unix)]
+        if self.owner_pid != std::process::id() {
+            return Err(SinkError::new(
+                "inherited file sink must be rebuilt after fork",
+            ));
+        }
+        if self.closed.load(Ordering::Acquire) {
+            return Err(SinkError::new("file sink lock is closed"));
+        }
+        Ok(&self.file)
+    }
+
+    fn close_in_child(&self) {
+        #[cfg(unix)]
+        if self.owner_pid != std::process::id() && !self.closed.swap(true, Ordering::AcqRel) {
+            use std::os::fd::{AsRawFd, FromRawFd};
+            // SAFETY: only the parent worker uses this File. It cannot survive
+            // in a child, and inherited writer methods reject access by PID.
+            // ManuallyDrop plus `closed` prevents any subsequent double close.
+            // Close rather than unlock: unlocking would release the parent's
+            // shared open-file-description lock while it is still writing.
+            drop(unsafe { File::from_raw_fd(self.file.as_raw_fd()) });
+        }
+    }
+}
+
+impl Drop for InheritedLock {
+    fn drop(&mut self) {
+        if !self.closed.load(Ordering::Acquire) {
+            // SAFETY: this is the last owner and child cleanup has not closed it.
+            unsafe { ManuallyDrop::drop(&mut self.file) };
+        }
+    }
+}
+
 /// Rotating file sink mirroring CPython's `logging.handlers.RotatingFileHandler`.
 ///
 /// Writes to `path`; when the cumulative written bytes reach `max_bytes`, the
@@ -226,7 +293,7 @@ pub struct RotatingFileSink {
     /// Unbuffered: each record is one `write_all`, so a failed record is never
     /// retained in memory and written later.
     file: Option<File>,
-    lock_file: File,
+    lock_file: Arc<InheritedLock>,
     path: PathBuf,
     max_bytes: usize,
     backup_count: usize,
@@ -280,7 +347,7 @@ impl RotatingFileSink {
         let active_identity = file_identity(&meta);
         Ok(Self {
             file: Some(file),
-            lock_file,
+            lock_file: Arc::new(InheritedLock::new(lock_file)),
             path,
             max_bytes,
             backup_count,
@@ -385,6 +452,22 @@ impl RotatingFileSink {
         {
             self.rotate()?;
         }
+        if let Some(file) = self.file.as_mut() {
+            let len = file
+                .metadata()
+                .map_err(|err| SinkError::new(err.to_string()))?
+                .len();
+            self.torn = if len == 0 {
+                false
+            } else {
+                file.seek(SeekFrom::End(-1))
+                    .map_err(|err| SinkError::new(err.to_string()))?;
+                let mut tail = [0];
+                file.read_exact(&mut tail)
+                    .map_err(|err| SinkError::new(err.to_string()))?;
+                tail[0] != b'\n'
+            };
+        }
         let terminated;
         let bytes = if self.torn {
             terminated = ["\n", message.as_str()].concat();
@@ -405,11 +488,16 @@ impl RotatingFileSink {
 }
 
 impl StringSink for RotatingFileSink {
+    fn fork_cleanup(&self) -> Vec<Arc<dyn Fn() + Send + Sync>> {
+        let lock = Arc::clone(&self.lock_file);
+        vec![Arc::new(move || lock.close_in_child())]
+    }
+
     fn write(&mut self, message: String) -> Result<(), SinkError> {
-        lock_exclusive(&self.lock_file)?;
+        lock_exclusive(self.lock_file.file()?)?;
         let write_result = self.write_locked(message);
         let unlock_result =
-            File::unlock(&self.lock_file).map_err(|err| SinkError::new(err.to_string()));
+            File::unlock(self.lock_file.file()?).map_err(|err| SinkError::new(err.to_string()));
         write_result.and(unlock_result)
     }
 }
@@ -438,9 +526,21 @@ fn write_counted(file: &mut File, bytes: &[u8]) -> (usize, std::io::Result<()>) 
     (written, Ok(()))
 }
 
+fn checked_file(opened: std::io::Result<File>) -> Result<File, SinkError> {
+    let file = opened.map_err(|err| SinkError::new(err.to_string()))?;
+    if !file
+        .metadata()
+        .map_err(|err| SinkError::new(err.to_string()))?
+        .is_file()
+    {
+        return Err(SinkError::new("log and lock paths must be regular files"));
+    }
+    Ok(file)
+}
+
 fn open_append(path: &Path) -> Result<File, SinkError> {
     let mut options = OpenOptions::new();
-    options.create(true).append(true);
+    options.create(true).append(true).read(true);
     // Log files routinely carry sensitive data (that is why redaction exists),
     // so create them owner-only (0600) rather than inheriting the umask default
     // (commonly world-readable 0644). Only applies to files this call creates;
@@ -448,11 +548,11 @@ fn open_append(path: &Path) -> Result<File, SinkError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    options
-        .open(path)
-        .map_err(|err| SinkError::new(err.to_string()))
+    checked_file(options.open(path))
 }
 
 fn open_lock(path: &Path) -> Result<File, SinkError> {
@@ -462,11 +562,11 @@ fn open_lock(path: &Path) -> Result<File, SinkError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    options
-        .open(lock_path)
-        .map_err(|err| SinkError::new(err.to_string()))
+    checked_file(options.open(lock_path))
 }
 
 fn lock_path(path: &Path) -> PathBuf {
@@ -504,6 +604,13 @@ impl MultiSink {
 }
 
 impl StringSink for MultiSink {
+    fn fork_cleanup(&self) -> Vec<Arc<dyn Fn() + Send + Sync>> {
+        self.sinks
+            .iter()
+            .flat_map(|sink| sink.fork_cleanup())
+            .collect()
+    }
+
     fn write(&mut self, message: String) -> Result<(), SinkError> {
         let mut last_err: Option<SinkError> = None;
         let mut ok_count = 0;
@@ -601,19 +708,29 @@ pub struct StringWriter {
     worker: Mutex<Option<JoinHandle<()>>>,
     memory_handle: MemorySinkHandle,
     abandoned: AtomicBool,
+    fork_cleanup: Vec<Arc<dyn Fn() + Send + Sync>>,
+}
+
+thread_local! {
+    static FAIL_NEXT_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl StringWriter {
-    pub fn new(maxsize: usize) -> Self {
+    #[doc(hidden)]
+    pub fn fail_next_spawn_for_test() {
+        FAIL_NEXT_SPAWN.with(|flag| flag.set(true));
+    }
+
+    pub fn new(maxsize: usize) -> Result<Self, SinkError> {
         Self::with_paused(maxsize, false)
     }
 
-    pub fn new_paused(maxsize: usize) -> Self {
+    pub fn new_paused(maxsize: usize) -> Result<Self, SinkError> {
         Self::with_paused(maxsize, true)
     }
 
     /// Writer that drains to the process's stdout, one write per record.
-    pub fn new_stdout(maxsize: usize) -> Self {
+    pub fn new_stdout(maxsize: usize) -> Result<Self, SinkError> {
         Self::with_sink(
             maxsize,
             false,
@@ -622,7 +739,7 @@ impl StringWriter {
         )
     }
 
-    pub fn new_null(maxsize: usize) -> Self {
+    pub fn new_null(maxsize: usize) -> Result<Self, SinkError> {
         Self::with_sink(
             maxsize,
             false,
@@ -631,7 +748,7 @@ impl StringWriter {
         )
     }
 
-    pub fn new_failing(maxsize: usize, fail_after: usize, paused: bool) -> Self {
+    pub fn new_failing(maxsize: usize, fail_after: usize, paused: bool) -> Result<Self, SinkError> {
         let (sink, handle) = FailingSink::new(fail_after);
         Self::with_sink(maxsize, paused, Box::new(sink), handle)
     }
@@ -644,16 +761,11 @@ impl StringWriter {
         backup_count: usize,
     ) -> Result<Self, SinkError> {
         let sink = RotatingFileSink::new(path, max_bytes, backup_count)?;
-        Ok(Self::with_sink(
-            maxsize,
-            false,
-            Box::new(sink),
-            MemorySinkHandle::default(),
-        ))
+        Self::with_sink(maxsize, false, Box::new(sink), MemorySinkHandle::default())
     }
 
     /// Writer that fans out to multiple sinks.
-    pub fn new_multi(maxsize: usize, sinks: Vec<Box<dyn StringSink>>) -> Self {
+    pub fn new_multi(maxsize: usize, sinks: Vec<Box<dyn StringSink>>) -> Result<Self, SinkError> {
         Self::with_sink(
             maxsize,
             false,
@@ -663,11 +775,11 @@ impl StringWriter {
     }
 
     /// Writer wrapping a caller-built sink (for PyO3-layer composition).
-    pub fn with_boxed_sink(maxsize: usize, sink: Box<dyn StringSink>) -> Self {
+    pub fn with_boxed_sink(maxsize: usize, sink: Box<dyn StringSink>) -> Result<Self, SinkError> {
         Self::with_sink(maxsize, false, sink, MemorySinkHandle::default())
     }
 
-    fn with_paused(maxsize: usize, paused: bool) -> Self {
+    fn with_paused(maxsize: usize, paused: bool) -> Result<Self, SinkError> {
         let (sink, handle) = MemorySink::new();
         Self::with_sink(maxsize, paused, Box::new(sink), handle)
     }
@@ -677,7 +789,7 @@ impl StringWriter {
         paused: bool,
         sink: Box<dyn StringSink>,
         memory_handle: MemorySinkHandle,
-    ) -> Self {
+    ) -> Result<Self, SinkError> {
         let shared = Arc::new(WorkerShared {
             maxsize,
             state: Mutex::new(WorkerState {
@@ -694,16 +806,29 @@ impl StringWriter {
             drained: Condvar::new(),
             space: Condvar::new(),
         });
+        let fork_cleanup = sink.fork_cleanup();
         let worker_shared = Arc::clone(&shared);
-        let worker = thread::spawn(move || worker_loop(worker_shared, sink));
+        let work = move || worker_loop(worker_shared, sink);
+        let worker = if FAIL_NEXT_SPAWN.with(|flag| flag.replace(false)) {
+            Err(std::io::Error::other("injected writer spawn failure"))
+        } else {
+            thread::Builder::new()
+                .name("structguru-writer".into())
+                .spawn(work)
+        }
+        .map_err(|err| SinkError {
+            message: format!("could not start native writer: {err}"),
+            spawn_failure: true,
+        })?;
 
-        Self {
+        Ok(Self {
             owner_pid: std::process::id(),
             shared,
             worker: Mutex::new(Some(worker)),
             memory_handle,
             abandoned: AtomicBool::new(false),
-        }
+            fork_cleanup,
+        })
     }
 
     /// Neutralize this writer after a `fork()`: the background thread does not
@@ -714,6 +839,11 @@ impl StringWriter {
     /// hit the replacement writer's live worker. The caller replaces the writer
     /// with a fresh one in the child.
     pub fn abandon(&self) {
+        if self.owner_pid != std::process::id() {
+            for cleanup in &self.fork_cleanup {
+                cleanup();
+            }
+        }
         self.abandoned.store(true, Ordering::Release);
     }
 
@@ -994,6 +1124,9 @@ impl StringWriter {
 
 impl Drop for StringWriter {
     fn drop(&mut self) {
+        if self.owner_pid != std::process::id() {
+            self.abandon();
+        }
         if self.unavailable() {
             // The worker died with the parent process, and glibc recycles a dead
             // thread's descriptor for the next thread the child spawns, so this
@@ -1159,7 +1292,7 @@ mod tests {
     #[test]
     fn abandoned_and_foreign_writers_bypass_inherited_state_mutexes() {
         for foreign in [false, true] {
-            let mut writer = StringWriter::new_paused(0);
+            let mut writer = StringWriter::new_paused(0).unwrap();
             let pid = writer.owner_pid;
             if foreign {
                 writer.owner_pid = pid.wrapping_add(1);
@@ -1234,14 +1367,17 @@ mod tests {
 
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let writer = Arc::new(StringWriter::with_boxed_sink(
-            8,
-            Box::new(BlockingFlush {
-                entered: entered_tx,
-                release: release_rx,
-                first: true,
-            }),
-        ));
+        let writer = Arc::new(
+            StringWriter::with_boxed_sink(
+                8,
+                Box::new(BlockingFlush {
+                    entered: entered_tx,
+                    release: release_rx,
+                    first: true,
+                }),
+            )
+            .unwrap(),
+        );
         writer.try_enqueue("record".into()).unwrap();
         entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let in_flight = writer.metrics().in_flight;
@@ -1280,10 +1416,9 @@ mod tests {
         }
 
         let (token_tx, token_rx) = mpsc::channel();
-        let writer = Arc::new(StringWriter::with_boxed_sink(
-            8,
-            Box::new(GatedSink { tokens: token_rx }),
-        ));
+        let writer = Arc::new(
+            StringWriter::with_boxed_sink(8, Box::new(GatedSink { tokens: token_rx })).unwrap(),
+        );
         writer.try_enqueue("a".into()).unwrap();
         writer.try_enqueue("b".into()).unwrap();
         let (done_tx, done_rx) = mpsc::channel();
@@ -1332,7 +1467,7 @@ mod tests {
             }
         }
 
-        let writer = StringWriter::with_boxed_sink(8, Box::new(PanicSink));
+        let writer = StringWriter::with_boxed_sink(8, Box::new(PanicSink)).unwrap();
         writer.try_enqueue("record".into()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while !writer.metrics().worker_done {
@@ -1380,7 +1515,8 @@ mod tests {
             Box::new(StuckSink {
                 entered: entered_tx,
             }),
-        );
+        )
+        .unwrap();
         writer.try_enqueue("record".into()).unwrap();
         entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
@@ -1460,7 +1596,8 @@ mod tests {
                 written: Arc::clone(&written),
                 blocked: false,
             }),
-        );
+        )
+        .unwrap();
         writer.try_enqueue("first".into()).unwrap();
         writer.try_enqueue("second".into()).unwrap();
         writer.try_enqueue("third".into()).unwrap();
@@ -1528,7 +1665,8 @@ mod tests {
             Box::new(StuckSink {
                 entered: entered_tx,
             }),
-        );
+        )
+        .unwrap();
         writer.try_enqueue("record".into()).unwrap();
         entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
@@ -1561,7 +1699,7 @@ mod tests {
             }
         }
 
-        let writer = StringWriter::with_boxed_sink(8, Box::new(SlowSink));
+        let writer = StringWriter::with_boxed_sink(8, Box::new(SlowSink)).unwrap();
         for i in 0..3 {
             writer.try_enqueue(format!("record {i}")).unwrap();
         }
@@ -1621,7 +1759,7 @@ mod tests {
 
     #[test]
     fn enqueue_if_space_never_counts_a_drop() {
-        let writer = StringWriter::new_paused(1);
+        let writer = StringWriter::new_paused(1).unwrap();
         assert!(writer.enqueue_if_space("first".to_owned()).is_ok());
         let rejected = writer.enqueue_if_space("second".to_owned());
         assert_eq!(rejected, Err("second".to_owned()));
@@ -1635,7 +1773,7 @@ mod tests {
 
     #[test]
     fn enqueue_reports_full_and_closed_at_the_queue_boundary() {
-        let writer = StringWriter::new_paused(1);
+        let writer = StringWriter::new_paused(1).unwrap();
         assert_eq!(writer.try_enqueue_with_reason("accepted".into()), Ok(()));
         assert_eq!(
             writer.try_enqueue_with_reason("overflow".into()),
@@ -1652,7 +1790,7 @@ mod tests {
 
     #[test]
     fn writer_drains_messages_in_order() {
-        let writer = StringWriter::new(0);
+        let writer = StringWriter::new(0).unwrap();
 
         assert_eq!(writer.try_enqueue("first".to_owned()), Ok(()));
         assert_eq!(writer.try_enqueue("second".to_owned()), Ok(()));
@@ -1669,7 +1807,7 @@ mod tests {
 
     #[test]
     fn blocking_enqueue_applies_backpressure_without_dropping() {
-        let writer = StringWriter::new(2); // small bounded queue
+        let writer = StringWriter::new(2).unwrap(); // small bounded queue
         for i in 0..50 {
             writer.enqueue_blocking(format!("m{i}")).unwrap();
         }
@@ -1682,7 +1820,7 @@ mod tests {
 
     #[test]
     fn bounded_writer_drops_when_full() {
-        let writer = StringWriter::new_paused(1);
+        let writer = StringWriter::new_paused(1).unwrap();
 
         assert_eq!(writer.try_enqueue("kept".to_owned()), Ok(()));
         assert_eq!(
@@ -1701,7 +1839,7 @@ mod tests {
 
     #[test]
     fn abandoned_writer_close_is_a_noop() {
-        let writer = StringWriter::new(0);
+        let writer = StringWriter::new(0).unwrap();
         writer.try_enqueue("x".to_owned()).unwrap();
         writer.abandon();
         // close() must not touch the state mutex or join the worker thread.
@@ -1713,7 +1851,7 @@ mod tests {
 
     #[test]
     fn close_is_idempotent_and_rejects_new_messages() {
-        let writer = StringWriter::new(0);
+        let writer = StringWriter::new(0).unwrap();
 
         assert_eq!(writer.try_enqueue("before close".to_owned()), Ok(()));
         writer.close(None);
@@ -1749,7 +1887,7 @@ mod tests {
         const WNOHANG: i32 = 1;
         const SIGKILL: i32 = 9;
 
-        let parent = StringWriter::new_null(8);
+        let parent = StringWriter::new_null(8).unwrap();
         assert_eq!(parent.try_enqueue("parent".to_owned()), Ok(()));
         parent.flush(None);
 
@@ -1761,7 +1899,9 @@ mod tests {
             parent.abandon();
             // Enough fresh workers to reuse every thread descriptor the parent
             // left behind, so one of them inherits the dead worker's identity.
-            let children: Vec<StringWriter> = (0..64).map(|_| StringWriter::new_null(8)).collect();
+            let children: Vec<StringWriter> = (0..64)
+                .map(|_| StringWriter::new_null(8).unwrap())
+                .collect();
             drop(parent);
             let closed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 for child in &children {
@@ -1802,7 +1942,7 @@ mod tests {
 
     #[test]
     fn sink_errors_are_counted_without_stopping_worker() {
-        let writer = StringWriter::new_failing(0, 1, false);
+        let writer = StringWriter::new_failing(0, 1, false).unwrap();
 
         assert_eq!(writer.try_enqueue("first".to_owned()), Ok(()));
         assert_eq!(writer.try_enqueue("second".to_owned()), Ok(()));
@@ -1826,7 +1966,8 @@ mod tests {
             false,
             Box::new(WriteSink::new(output.clone())),
             MemorySinkHandle::default(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(writer.try_enqueue("first\n".to_owned()), Ok(()));
         assert_eq!(writer.try_enqueue("second".to_owned()), Ok(()));
@@ -1848,7 +1989,8 @@ mod tests {
             false,
             Box::new(WriteSink::new(output.clone())),
             MemorySinkHandle::default(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(writer.try_enqueue("first".to_owned()), Ok(()));
         assert_eq!(writer.try_enqueue("second".to_owned()), Ok(()));
@@ -1877,6 +2019,7 @@ mod tests {
     }
 
     fn cleanup(path: &Path) {
+        let _ = std::fs::remove_file(path);
         for i in 0..=6 {
             let _ = std::fs::remove_file(backup_path(path, i));
         }
@@ -2067,11 +2210,141 @@ mod tests {
         second.write("AB".to_owned()).unwrap(); // crosses 10 bytes: rotates
         first.write("cd".to_owned()).unwrap(); // must land in the new active file
 
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ABcd");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "AB\ncd");
         assert_eq!(
             std::fs::read_to_string(backup_path(&path, 1)).unwrap(),
             "123456789"
         );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn shared_partial_record_is_separated_after_append_and_reopen() {
+        let path = temp_log_path("shared-partial");
+        let mut first = RotatingFileSink::new(&path, 0, 0).unwrap();
+        let mut second = RotatingFileSink::new(&path, 0, 0).unwrap();
+        first.write("{\"record\":1}\n".into()).unwrap();
+        // Simulate a short write followed by an I/O error in the other writer.
+        first
+            .file
+            .as_mut()
+            .unwrap()
+            .write_all(b"{\"record\":")
+            .unwrap();
+        second.write("{\"record\":2}\n".into()).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "{\"record\":1}\n{\"record\":\n{\"record\":2}\n"
+        );
+        // Opening on an existing partial line must recover shared state too.
+        first.file.as_mut().unwrap().write_all(b"partial").unwrap();
+        let mut reopened = RotatingFileSink::new(&path, 0, 0).unwrap();
+        reopened.write("next\n".into()).unwrap();
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .ends_with("partial\nnext\n")
+        );
+        cleanup(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_and_sidecar_reject_symlinks_and_non_regular_files() {
+        use std::os::unix::fs::symlink;
+        let path = temp_log_path("nofollow");
+        let target = temp_log_path("nofollow-target");
+        fs::write(&target, "unchanged").unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(RotatingFileSink::new(&path, 0, 0).is_err());
+        fs::remove_file(&path).unwrap();
+        // The same validation is required on every active-file reopen.
+        let mut sink = RotatingFileSink::new(&path, 0, 0).unwrap();
+        fs::remove_file(&path).unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(sink.write("must not reach target\n".into()).is_err());
+        drop(sink);
+        cleanup(&path);
+        symlink(&target, lock_path(&path)).unwrap();
+        assert!(RotatingFileSink::new(&path, 0, 0).is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "unchanged");
+        cleanup(&path);
+        cleanup(&target);
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(RotatingFileSink::new(&path, 0, 0).is_err());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn writer_spawn_failure_is_fallible_and_next_attempt_recovers() {
+        StringWriter::fail_next_spawn_for_test();
+        let failure = StringWriter::new(4).err().expect("spawn should fail");
+        assert!(failure.is_spawn_failure());
+        let writer = StringWriter::new(4).unwrap();
+        writer.try_enqueue("recovered".into()).unwrap();
+        writer.flush(None);
+        assert_eq!(writer.messages(), vec!["recovered"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_rebuilds_file_writer_after_parent_exits_with_sidecar_locked() {
+        use std::os::unix::net::UnixStream;
+        let path = temp_log_path("fork-held-sidecar");
+        let (mut monitor, mut report) = UnixStream::pair().unwrap();
+        monitor
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        // Isolate the locking parent: it must exit without unlocking. The
+        // test harness never owns its descriptor, only the grandchild inherits it.
+        // SAFETY: child code never uses an inherited writer mutex or handle.
+        let parent = unsafe { libc::fork() };
+        assert!(parent >= 0);
+        if parent == 0 {
+            drop(monitor);
+            let sink = RotatingFileSink::new(&path, 0, 0).unwrap();
+            File::lock(&sink.lock_file.file).unwrap();
+            let writer = StringWriter::with_boxed_sink(4, Box::new(sink)).unwrap();
+            // SAFETY: as above; only the child-side abandon hook is used.
+            let child = unsafe { libc::fork() };
+            if child > 0 {
+                report.write_all(&child.to_ne_bytes()).unwrap();
+                // No unlock or Rust destructors: simulate abrupt parent exit.
+                unsafe { libc::_exit(0) };
+            }
+            if child == 0 {
+                writer.abandon();
+                // Closing the inherited descriptor must also be idempotent.
+                writer.abandon();
+                let replacement = StringWriter::new_file(4, &path, 0, 0).unwrap();
+                replacement.try_enqueue("child recovered\n".into()).unwrap();
+                replacement.close(None);
+                report.write_all(b"x").unwrap();
+                unsafe { libc::_exit(0) };
+            }
+            unsafe { libc::_exit(1) };
+        }
+        drop(report);
+        let mut pid = [0; size_of::<libc::pid_t>()];
+        monitor.read_exact(&mut pid).unwrap();
+        let child = libc::pid_t::from_ne_bytes(pid);
+        let mut status = 0;
+        unsafe { libc::waitpid(parent, &mut status, 0) };
+        assert_eq!(status, 0);
+        let mut outcome = [0];
+        let result = monitor.read_exact(&mut outcome);
+        if result.is_err() {
+            unsafe { libc::kill(child, libc::SIGKILL) };
+        }
+        assert!(
+            result.is_ok(),
+            "child blocked on inherited lock: {result:?}"
+        );
+        assert_eq!(&outcome, b"x");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "child recovered\n");
         cleanup(&path);
     }
 
@@ -2132,7 +2405,7 @@ mod tests {
         let (memory, handle) = MemorySink::new();
         let inner = MultiSink::new(vec![Box::new(a), Box::new(memory)]);
         let outer = MultiSink::new(vec![Box::new(inner), Box::new(b)]);
-        let writer = StringWriter::with_boxed_sink(8, Box::new(outer));
+        let writer = StringWriter::with_boxed_sink(8, Box::new(outer)).unwrap();
         writer.enqueue_blocking("survives".to_owned()).unwrap();
         writer.close(None);
         assert_eq!(handle.messages(), vec!["survives"]);

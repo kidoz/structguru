@@ -20,3 +20,6 @@ time.workspace = true
 regex.workspace = true
 fancy-regex.workspace = true
 fastrand.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

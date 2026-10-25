@@ -10,6 +10,9 @@ All notable changes to this project are documented here. The format is based on
 
 - Protect callable-dispatch fork snapshots with reader lifetimes and deferred
   `Arc` reclamation during concurrent publication on free-threaded Python.
+- Unix log and sidecar opens reject symlinks and non-regular files; log
+  directories must still be trusted. Active native files require read access.
+
 - Celery context headers redact bytes and Enum sensitive keys and apply active
   patterns to exported text before truncation or broker publication.
 - Key redaction now recognizes bounded UTF-8 bytes keys and Enum member names
@@ -18,6 +21,14 @@ All notable changes to this project are documented here. The format is based on
   methods on unrelated duck-typed objects.
 
 ### Fixed
+
+- Fork recovery closes inherited sidecar descriptors before rebuilding writers,
+  including when a parent exited while holding the lock.
+- File writers inspect shared trailing bytes under the sidecar lock so partial
+  records from another writer cannot merge with the next record.
+- Native writer thread creation fails with `RuntimeError` and preserves the
+  active configuration. Numeric level thresholds above `2**63 - 1` consistently
+  fail with `ValueError` before native conversion.
 
 - `flush()` covers fused native submissions before enqueue and retains retiring
   writers across concurrent reconfiguration.

@@ -1551,3 +1551,14 @@ def test_stack_keeps_frames_of_modules_sharing_the_package_prefix() -> None:
     record = _memory_records()[-1]
     assert record["logger"] == "structguru_ext"
     assert record["stack"].splitlines()[-1].strip() == 'File "<string>", line 2, in helper'
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires Unix no-follow opens")
+def test_add_file_sink_rejects_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.write_text("unchanged")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    with pytest.raises(OSError):
+        Logger().add(link)
+    assert target.read_text() == "unchanged"
