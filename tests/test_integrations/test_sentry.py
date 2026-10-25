@@ -38,7 +38,12 @@ def test_catch_aliases_capture_exceptions_in_sentry(level: str, canonical: str) 
     sdk = _mock_sentry()
     error = ValueError("caught")
     with patch.object(sentry_mod, "_sentry_sdk", sdk):
-        configure(target="null", sentry_processor=SentryProcessor())
+        configure(
+            target="null",
+            sentry_processor=SentryProcessor(
+                capture_raw_exceptions=True,
+            ),
+        )
         with logger.catch(level=level):
             raise error
     sdk.capture_exception.assert_called_once_with(error)
@@ -122,7 +127,9 @@ class TestSentryProcessor:
         mock_sentry = _mock_sentry()
         exc = RuntimeError("boom")
         with patch.object(sentry_mod, "_sentry_sdk", mock_sentry):
-            proc = SentryProcessor(event_level=logging.ERROR, require_redaction=False)
+            proc = SentryProcessor(
+                capture_raw_exceptions=True, event_level=logging.ERROR, require_redaction=False
+            )
             proc(None, "error", {"event": "fail", "exc_info": exc})
 
         mock_sentry.capture_exception.assert_called_once_with(exc)
@@ -133,7 +140,9 @@ class TestSentryProcessor:
             try:
                 raise ValueError("boom")
             except ValueError:
-                proc = SentryProcessor(event_level=logging.ERROR, require_redaction=False)
+                proc = SentryProcessor(
+                    capture_raw_exceptions=True, event_level=logging.ERROR, require_redaction=False
+                )
                 proc(None, "error", {"event": "fail", "exc_info": True})
 
         assert mock_sentry.capture_exception.call_count == 1
@@ -144,7 +153,9 @@ class TestSentryProcessor:
         mock_sentry = _mock_sentry()
         exc = KeyError("k")
         with patch.object(sentry_mod, "_sentry_sdk", mock_sentry):
-            proc = SentryProcessor(event_level=logging.ERROR, require_redaction=False)
+            proc = SentryProcessor(
+                capture_raw_exceptions=True, event_level=logging.ERROR, require_redaction=False
+            )
             proc(None, "error", {"event": "fail", "exc_info": (type(exc), exc, None)})
 
         mock_sentry.capture_exception.assert_called_once_with(exc)
@@ -216,7 +227,9 @@ def test_falls_back_to_push_scope_without_new_scope() -> None:
     error = ValueError("boom")
     event = {"event": "failed", "service": "api", "exc_info": error, REDACTED_MARKER_KEY: True}
     with patch.object(sentry_mod, "_sentry_sdk", sdk):
-        SentryProcessor(tag_keys=frozenset({"service"}))(None, "error", event)
+        SentryProcessor(capture_raw_exceptions=True, tag_keys=frozenset({"service"}))(
+            None, "error", event
+        )
     sdk.push_scope.assert_called_once_with()
     scope.set_tag.assert_called_once_with("service", "api")
     sdk.capture_exception.assert_called_once_with(error)
@@ -250,3 +263,78 @@ def test_real_sdk_without_new_scope_still_captures_events(
             logger.exception("failed")
         sentry_sdk.flush()
     assert len(events) == 1
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize("structured", [False, True])
+def test_default_capture_serialized_payload_excludes_raw_exceptions_and_locals(
+    structured: bool,
+) -> None:
+    import json
+
+    sentry_sdk = pytest.importorskip("sentry_sdk")
+    from sentry_sdk.transport import Transport
+
+    from structguru import configure, logger
+
+    events: list[dict] = []
+
+    class CapturingTransport(Transport):
+        def capture_envelope(self, envelope: object) -> None:
+            for item in envelope.items:  # type: ignore[attr-defined]
+                if item.type == "event":
+                    events.append(json.loads(item.get_bytes()))
+
+    with sentry_sdk.init(
+        dsn="https://key@example.invalid/1",
+        transport=CapturingTransport,
+        default_integrations=False,
+        include_local_variables=True,
+        attach_stacktrace=True,
+    ):
+        configure(
+            target="null",
+            sentry_processor=SentryProcessor(),
+            sensitive_patterns=["MESSAGE_CANARY"],
+            structured_exceptions=structured,
+            exception_include_locals=False,
+        )
+        local_value = "LOCAL_CANARY_MUST_NOT_LEAVE"
+        try:
+            try:
+                raise ValueError("MESSAGE_CANARY")
+            except ValueError as cause:
+                raise RuntimeError("MESSAGE_CANARY") from cause
+        except RuntimeError:
+            logger.exception("sanitized failure", safe="survives")
+        assert local_value
+        sentry_sdk.flush()
+    assert len(events) == 1
+    serialized = json.dumps(events[0])
+    assert "MESSAGE_CANARY" not in serialized
+    assert "LOCAL_CANARY_MUST_NOT_LEAVE" not in serialized
+    assert "[REDACTED]" in serialized and "survives" in serialized
+    values = events[0]["exception"]["values"]
+    assert len(values) == 1 and "stacktrace" not in values[0]
+    assert "vars" not in serialized
+
+
+def test_default_processor_never_resolves_raw_exception() -> None:
+    class UnreadableError(Exception):
+        def __str__(self) -> str:
+            pytest.fail("default capture must not inspect the raw exception")
+
+    sdk = _mock_sentry()
+    event = {
+        "event": "safe",
+        "exception": "ValueError: [REDACTED]",
+        "exc_info": UnreadableError(),
+        REDACTED_MARKER_KEY: True,
+    }
+    with patch.object(sentry_mod, "_sentry_sdk", sdk):
+        SentryProcessor()(None, "error", event)
+    sdk.capture_exception.assert_not_called()
+    assert (
+        sdk.capture_event.call_args.args[0]["exception"]["values"][0]["value"]
+        == event["exception"]
+    )

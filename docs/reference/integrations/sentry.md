@@ -23,6 +23,7 @@ update(
 | `tag_keys` | `frozenset[str] \| None` | `None` | Event keys set as Sentry tags. |
 | `breadcrumb_level` | `int` | `logging.INFO` (20) | Minimum level recorded as a breadcrumb. |
 | `capture_messages` | `bool` | `False` | Capture records at or above `event_level` that carry no exception with `capture_message()`. |
+| `capture_raw_exceptions` | `bool` | `False` | Pass the original exception to `capture_exception()`, bypassing structguru redaction for SDK exception inspection. |
 | `require_redaction` | `bool` | `True` | Attach the event as Sentry extras only when it carries the redaction marker. |
 
 ## Invocation
@@ -42,7 +43,7 @@ are suppressed.
 | `event` | The redacted message. |
 | each field of the record | The redacted value, including `exception` text or object and OpenTelemetry fields. A field named `event` does not replace the message. |
 | `service`, `logger`, `level`, `severity`, `timestamp` | As rendered. |
-| `exc_info` | The call's raw exception information, when present. |
+| `exc_info` | A boolean exception-presence marker; original exception information only when the hook explicitly sets `capture_raw_exceptions=True`. |
 | `_structguru_redacted` | `True` (`REDACTED_MARKER_KEY`). |
 
 ## Levels
@@ -78,18 +79,22 @@ marker.
       value `str(payload[key])`;
     - the extra `structlog_event` is set to `payload` when the redaction
       marker is present or `require_redaction=False`;
-    - with `exc_info`, the exception is passed to
-      `sentry_sdk.capture_exception()`;
+    - with `exc_info`, `sentry_sdk.capture_event()` receives a `LoggedException`
+      whose value is the sanitized exception text (or JSON for structured
+      exceptions); no SDK traceback frames are supplied. The redaction marker
+      is required unless `require_redaction=False`;
+    - with `capture_raw_exceptions=True`, the original exception is passed to
+      `sentry_sdk.capture_exception()` instead;
     - without `exc_info` and with `capture_messages=True`, the message is
       passed to `sentry_sdk.capture_message(event, level=<Sentry level>)`.
 
 With the defaults, `logger.error("...")` without an exception produces only a
 breadcrumb, and `logger.exception("...")` produces a captured event. `exc_info`
-may be `True` (resolved with `sys.exc_info()`), an exception instance, or a
-`(type, value, traceback)` tuple; the raw exception is used only for
-`capture_exception()`. What the SDK extracts from that exception, such as
-frame locals, is governed by the SDK's own settings, outside structguru's
-redaction (see
+on log calls may be `True`, an exception instance, or a
+`(type, value, traceback)` tuple. By default the hook receives only its presence
+and the sanitized `exception` field. Raw capture explicitly opts into SDK
+inspection outside structguru's redaction, including exception chains, source
+context and locals (see
 [Keep secrets out of Sentry](../../how-to/report-errors-to-sentry.md#keep-secrets-out-of-sentry)).
 The processor returns `event_dict` unchanged.
 

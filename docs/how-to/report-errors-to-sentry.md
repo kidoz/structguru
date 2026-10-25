@@ -36,7 +36,7 @@ With these settings:
 - every record at `INFO` or above is added as a breadcrumb;
 - a record at `ERROR` or above that carries an exception
   (`logger.exception(...)`, `exc_info=`, `logger.catch()`) is sent as a Sentry
-  event through `capture_exception`, with the record's fields under the
+  event through `capture_event`, with the record's fields under the
   `structlog_event` extra and the `tag_keys` fields as tags;
 - a plain `logger.error("...")` without an exception stays a breadcrumb, as with
   Sentry's own `LoggingIntegration`.
@@ -63,25 +63,23 @@ Records at or above `event_level` without an exception are then sent through
 
 ## Keep secrets out of Sentry
 
-Everything structguru renders is redacted before export: the message and
-fields Sentry receives are the ones the renderer has already redacted with
-your `sensitive_keys` and `sensitive_patterns`. The one raw object that
-reaches Sentry is the exception. `SentryProcessor` passes the raw exception
-object to `sentry_sdk.capture_exception`, and what the SDK then extracts from
-it is governed by the SDK's own settings, not structguru's redaction. By
-default the SDK attaches the raw, unredacted local variables of every stack
-frame to the event (`include_local_variables=True`). Turn that off when you
-initialize the SDK:
+By default, exception events are constructed from the rendered, sanitized
+`exception` field using `capture_event`. The SDK receives no original exception
+or traceback to inspect, so it cannot extract raw chained messages, source
+context or frame locals from that exception. `exception_include_locals=False`
+remains the default. If you explicitly include locals in structured exceptions,
+the sanitized structured data is included in the event's exception text and extras.
+
+To let the SDK inspect the original exception, opt in explicitly:
 
 ```python
-sentry_sdk.init(
-    dsn="https://<key>@<org>.ingest.sentry.io/<project>",
-    include_local_variables=False,
-)
+SentryProcessor(capture_raw_exceptions=True)
 ```
 
-For finer control, scrub the event in the SDK's `before_send` hook. See
-[Redact sensitive data](redact-sensitive-data.md).
+This bypasses structguru redaction for exception messages, chains, source context
+and traceback locals. Configure the SDK's `include_local_variables=False` and
+`before_send` scrubbing as needed; turning off locals alone does not redact
+messages or source context. See [Redact sensitive data](redact-sensitive-data.md).
 
 ## Avoid duplicate events with the stdlib bridge
 

@@ -453,9 +453,9 @@ def notify_sentry(
 ) -> None:
     """Invoke the configured Sentry processor with the redacted rendered event.
 
-    Mirrors ``notify_metrics`` but passes the raw ``exc_info`` (in the shape
-    ``SentryProcessor._resolve_exception`` expects: ``True``, a ``(type, exc, tb)``
-    tuple, or a ``BaseException``) so exception capture works. Field values and
+    Mirrors ``notify_metrics``. By default ``exc_info`` is only a boolean
+    presence marker; hooks receive the original exception only when their
+    ``capture_raw_exceptions`` attribute is explicitly true. Field values and
     the message are reconstructed from the JSON produced by the Rust renderer,
     guaranteeing that key and pattern redaction runs before third-party export.
     Hook errors are swallowed — Sentry must never break logging.
@@ -473,12 +473,16 @@ def notify_sentry(
         # natively as a field but must not replace the message exported here.
         if key != "event" and key in rendered:
             event_dict[key] = rendered[key]
-    if exc_info is not None:
-        event_dict["exc_info"] = exc_info
     from structguru.redaction import REDACTED_MARKER_KEY
 
     event_dict[REDACTED_MARKER_KEY] = True
     try:
+        if exc_info is not None:
+            event_dict["exc_info"] = (
+                exc_info
+                if getattr(state.sentry_processor, "capture_raw_exceptions", False) is True
+                else bool(exc_info)
+            )
         state.sentry_processor(None, method, event_dict)
     except Exception:  # noqa: BLE001 - hooks must never break logging
         pass

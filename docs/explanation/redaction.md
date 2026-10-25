@@ -142,15 +142,17 @@ convention, "redact before exporting", into a check made at run time. The
 marker is removed from Sentry extras and from rendered output, and a user field
 with the same name never reaches a sink.
 
-The one raw object that reaches Sentry is the exception. The hook passes the
-original `exc_info` so that `SentryProcessor` can call `capture_exception`,
-and it is used only for that. Breadcrumbs, extras, and tags never carry it:
-the SDK serializes arbitrary objects, and before 1.2.1 an exception message
-containing a secret reached Sentry that way. What the SDK itself extracts from
-the exception passed to `capture_exception`, such as the message and frames,
-is outside structguru's redaction and is governed by the SDK's own settings.
-[Report errors to Sentry](../how-to/report-errors-to-sentry.md) covers the
-setup.
+By default, `exc_info` at the hook boundary is only a boolean presence marker.
+`SentryProcessor` builds exception events from the sanitized `exception` field
+with `capture_event`; it supplies no traceback frames or original exceptions
+for SDK inspection. Locals are omitted unless explicitly enabled in structguru's
+structured exception settings.
+
+`SentryProcessor(capture_raw_exceptions=True)` opts into the original `exc_info`
+and `capture_exception`. Messages, chains, source context and locals extracted
+by the SDK then lie outside structguru's redaction policy. Custom hooks can
+also explicitly opt into raw input with `capture_raw_exceptions = True`.
+[Report errors to Sentry](../how-to/report-errors-to-sentry.md) covers the setup.
 
 ## Field values are never stringified
 

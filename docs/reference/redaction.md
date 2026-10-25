@@ -98,8 +98,8 @@ string being matched is replaced by `[REDACTED]`.
   installed.
 
 The Sentry hook receives field values and the message reconstructed from the
-redacted JSON line; the raw exception object is passed only for
-`capture_exception`. See [Sentry](integrations/sentry.md).
+redacted JSON line. Exception capture uses only sanitized data by default;
+`capture_raw_exceptions=True` explicitly enables raw SDK exception inspection. See [Sentry](integrations/sentry.md).
 
 ## Integrations that reuse the keys
 

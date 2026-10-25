@@ -10,7 +10,7 @@ Combines a loguru-style API — brace formatting, `bind`, `contextualize`, `opt`
 - **Structured JSON output** in production (rendered natively in Rust for speed)
 - **Pretty colored console** output in development
 - **Context management** — `bind()` for persistent context, `contextualize()` for request-scoped context
-- **Sentry integration** — redacted breadcrumbs/events with raw exceptions preserved for capture
+- **Sentry integration** — redacted breadcrumbs/events with raw exception capture available by opt-in
 - **stdlib interop** — `logger.add()` sinks can also receive third-party `logging` records
 - **RFC 5424 severity codes** included in every log record
 - **Native Rust runtime** — rendering and output run through the bundled abi3 extension
@@ -452,7 +452,7 @@ Behavior notes:
 - **Console mode** (`format="console"`): renders colored, human-readable lines instead of JSON — structguru's own stable dev format (`<timestamp> [<LEVEL>] <message>  k=v`), with ANSI colors by default on a TTY. Override with `colors=True/False`. String values are double-quoted with `"` and `\` escaped, keys containing spaces, `=`, quotes, or backslashes are quoted, and control characters, U+2028/U+2029, and bidirectional controls are escaped everywhere, so a field key or value cannot forge another field or line. Floats use the JSON renderer's text (`1.0`, `1e+300`); the stack and a formatted `exception` follow as indented blocks.
 - **File sinks** (`file_path=...`): write to a rotating file natively. Defaults mirror `RotatingFileHandler` (50 MB, 5 backups); configure via `file_max_bytes`/`file_backup_count`. Set `also_stdout=True` to mirror output to both file and stdout (e.g. container + persistent log).
 - **Callable sinks** (`callable_sinks=[fn, ...]`): use a bounded queue (`callable_queue_maxsize=1024`). `overflow="block"` provides lossless backpressure; `overflow="drop"` reports `callable_dropped` metrics. One background thread at a time calls the sinks, in log order, also across reconfiguration; `logger.add()` never waits for the queue. Sink exceptions are counted in `callable_errors` with a rate-limited warning. Flush and lifecycle operations drain queued calls; a sink that makes no progress for 10 seconds is abandoned with a warning instead of blocking them.
-- **Sentry integration** (`sentry_processor=SentryProcessor(...)`): receives the already-redacted event and raw `exc_info` only for exception capture.
+- **Sentry integration** (`sentry_processor=SentryProcessor(...)`): receives the already-redacted event; raw exception capture requires `capture_raw_exceptions=True`.
 - **Scope**: the native renderer covers JSON and console rendering, file/stdout/callable sinks, redaction, sampling/rate limiting, metrics, exceptions, and stack information. `logger.add()` sinks receive native and stdlib records.
 
 Shutdown and reconfiguration drain records already accepted by the native queue.

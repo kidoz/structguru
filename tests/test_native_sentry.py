@@ -2,7 +2,7 @@
 
 Verifies the ``configure(sentry_processor=...)`` hook: a structlog-style
 processor invoked per kept record on the caller's thread, mirroring
-``metric_processor`` but passing raw ``exc_info`` for exception capture.
+``metric_processor`` with sanitized exception data by default.
 """
 
 from __future__ import annotations
@@ -50,8 +50,8 @@ def test_sentry_hook_invoked_per_kept_record() -> None:
     assert calls[1][2]["code"] == 500
 
 
-def test_sentry_hook_receives_raw_exc_info() -> None:
-    """The hook must receive the raw exception, not a rendered string."""
+def test_sentry_hook_receives_exception_presence_by_default() -> None:
+    """The default hook boundary must not expose raw traceback objects."""
     captured: list[Any] = []
     err = RuntimeError("boom")
 
@@ -67,7 +67,7 @@ def test_sentry_hook_receives_raw_exc_info() -> None:
         _runtime.shutdown()
 
     assert len(captured) == 1
-    assert captured[0] is err, "hook must receive the raw BaseException instance"
+    assert captured[0] is True
 
 
 def test_sentry_hook_not_invoked_for_dropped_records() -> None:
@@ -146,7 +146,9 @@ def test_sentry_hook_with_real_sentry_processor() -> None:
     mock_sentry.new_scope.return_value = cm
 
     err = RuntimeError("production failure")
-    processor = SentryProcessor(event_level=40, require_redaction=False)
+    processor = SentryProcessor(
+        event_level=40, require_redaction=False, capture_raw_exceptions=True
+    )
 
     _runtime.configure(service="svc", target="memory", level="DEBUG", sentry_processor=processor)
     try:
@@ -271,7 +273,7 @@ def test_real_sentry_processor_never_receives_unredacted_extras() -> None:
 
 
 @pytest.mark.parametrize("event_level", [40, 50])
-def test_raw_exception_is_only_used_for_sentry_capture(event_level: int) -> None:
+def test_sanitized_exception_is_used_for_sentry_capture(event_level: int) -> None:
     from structguru.integrations import sentry as sentry_mod
     from structguru.integrations.sentry import SentryProcessor
 
@@ -293,7 +295,9 @@ def test_raw_exception_is_only_used_for_sentry_capture(event_level: int) -> None
     assert data["exception"] == "ValueError: [REDACTED]"
     assert "exc_info" not in data
     if event_level == 40:
-        mock_sentry.capture_exception.assert_called_once_with(error)
+        mock_sentry.capture_exception.assert_not_called()
+        event = mock_sentry.capture_event.call_args.args[0]
+        assert event["exception"]["values"][0]["value"] == "ValueError: [REDACTED]"
         extras = scope.set_extra.call_args.args[1]
         assert extras["exception"] == "ValueError: [REDACTED]"
         assert "exc_info" not in extras
@@ -355,3 +359,18 @@ def test_event_field_does_not_replace_sentry_message() -> None:
     rendered = json.loads(lines[0])
     assert rendered["message"] == "actual message"
     assert rendered["event"] == "custom field"
+
+
+def test_raw_capture_opt_in_attribute_failure_cannot_break_logging() -> None:
+    class BrokenHook:
+        @property
+        def capture_raw_exceptions(self) -> bool:
+            raise ValueError("hook attribute failed")
+
+        def __call__(self, *args: Any) -> None:
+            pytest.fail("a failing opt-in lookup must skip the hook")
+
+    _runtime.configure(target="memory", sentry_processor=BrokenHook())
+    structguru.logger.error("survives hook failure", exc_info=ValueError("example"))
+    [line] = _drain_all()
+    assert json.loads(line)["message"] == "survives hook failure"

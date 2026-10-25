@@ -14,6 +14,7 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from typing import Any
@@ -50,7 +51,7 @@ _SENTRY_LEVEL_ALIASES = {
 
 
 class SentryProcessor:
-    """Forward events to Sentry as breadcrumbs and/or captured exceptions.
+    """Forward events to Sentry as breadcrumbs and sanitized exception events.
 
     When *require_redaction* is ``True`` (the default), this processor refuses
     to upload the event dict as Sentry extras unless the redaction marker is
@@ -71,6 +72,11 @@ class SentryProcessor:
         to ``False`` to match ``logging.LoggingIntegration`` semantics —
         plain ``logger.error(...)`` calls only become Sentry *events* when
         they include an exception.
+    capture_raw_exceptions:
+        If ``True``, let Sentry inspect the original exception, including
+        messages, chains, source context and locals according to SDK settings.
+        Defaults to ``False``: capture only the sanitized exception rendered
+        by structguru, without asking the SDK to inspect traceback frames.
     require_redaction:
         If ``True`` (default), ``scope.set_extra("structlog_event", ...)`` is
         only called when ``REDACTED_MARKER_KEY``
@@ -92,7 +98,9 @@ class SentryProcessor:
         breadcrumb_level: int = logging.INFO,
         capture_messages: bool = False,
         require_redaction: bool = True,
+        capture_raw_exceptions: bool = False,
     ) -> None:
+        self.capture_raw_exceptions = capture_raw_exceptions
         self._event_level = event_level
         self._tag_keys = tag_keys or frozenset()
         self._breadcrumb_level = breadcrumb_level
@@ -118,8 +126,7 @@ class SentryProcessor:
         method_name = method_name.lower()
         level = _METHOD_TO_LEVEL.get(method_name, logging.INFO)
         sentry_level = _SENTRY_LEVEL_ALIASES.get(method_name, method_name)
-        # Raw exceptions are reserved for capture_exception. The SDK serializes
-        # arbitrary objects in breadcrumbs/extras, which would bypass redaction.
+        # Never let the SDK serialize a raw exception in breadcrumbs or extras.
         payload = {
             k: v for k, v in event_dict.items() if k not in ("exc_info", REDACTED_MARKER_KEY)
         }
@@ -147,9 +154,20 @@ class SentryProcessor:
 
             exc_info = event_dict.get("exc_info")
             if exc_info:
-                exc = _resolve_exception(exc_info)
-                if exc is not None:
-                    _sentry_sdk.capture_exception(exc)
+                if self.capture_raw_exceptions:
+                    exc = _resolve_exception(exc_info)
+                    if exc is not None:
+                        _sentry_sdk.capture_exception(exc)
+                elif not self._require_redaction or event_dict.get(REDACTED_MARKER_KEY):
+                    sanitized = payload.get("exception", "Exception details unavailable")
+                    value = sanitized if isinstance(sanitized, str) else json.dumps(sanitized)
+                    _sentry_sdk.capture_event(
+                        {
+                            "level": sentry_level,
+                            "message": str(payload.get("event", "")),
+                            "exception": {"values": [{"type": "LoggedException", "value": value}]},
+                        }
+                    )
             elif self._capture_messages:
                 _sentry_sdk.capture_message(
                     str(event_dict.get("event", "")),

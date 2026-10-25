@@ -10,6 +10,9 @@ All notable changes to this project are documented here. The format is based on
 
 - Protect callable-dispatch fork snapshots with reader lifetimes and deferred
   `Arc` reclamation during concurrent publication on free-threaded Python.
+- Sentry exception capture now uses sanitized events by default, without raw
+  traceback inspection. `capture_raw_exceptions=True` explicitly opts into the
+  previous SDK exception-capture behavior and its redaction bypass.
 - Unix log and sidecar opens reject symlinks and non-regular files; log
   directories must still be trusted. Active native files require read access.
 
