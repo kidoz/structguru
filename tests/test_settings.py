@@ -365,3 +365,15 @@ def test_atexit_handlers_registered_before_explicit_configure_still_log() -> Non
     assert result.returncode == 0, result.stderr
     messages = [json.loads(line)["message"] for line in result.stdout.splitlines()]
     assert messages == ["hello", "bye from atexit"]
+
+
+@pytest.mark.parametrize("value", [2**63, 2**100])
+def test_level_rejects_native_overflow_consistently(value: int) -> None:
+    for operation in (
+        lambda: Settings(level=value),
+        lambda: configure(level=value),
+        lambda: set_level(value),
+        lambda: logger.add(lambda line: None, level=value),
+    ):
+        with pytest.raises(ValueError, match="level must"):
+            operation()

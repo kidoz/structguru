@@ -27,7 +27,7 @@ from typing import Any, Protocol, TypedDict, Unpack, cast
 from structguru._levels import METHOD_LEVELS
 from structguru._native_dispatch import CallableDispatcherProtocol, new_dispatcher
 from structguru._native_env import autoconfigure_from_env
-from structguru.settings import Settings, SettingsChanges, _level_number
+from structguru.settings import _MAX_LEVELNO, Settings, SettingsChanges, _level_number
 
 # Outcome codes of the writer's fused ``log`` entry points (``Outcome`` in the
 # extension): accepted, dropped by a full queue, rejected by a closed writer.
@@ -251,8 +251,6 @@ _stream_error_count = 0
 # shutdown() is abandoned with a warning instead of blocking the process.
 # The same bound applies to the native writer's drain.
 _CALLABLE_STALL_TIMEOUT = 10.0
-# Largest level number handed to the callable dispatcher (a signed 64-bit int).
-_MAX_LEVELNO = 2**63 - 1
 _drop_lock = threading.Lock()
 _lifecycle_rejected = 0
 

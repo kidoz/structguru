@@ -117,7 +117,7 @@ logger.remove(alert_id)  # remove one sink
 logger.remove()  # remove every sink added through this logger
 ```
 
-- `level` takes a name or a non-negative integer; anything else raises
+- `level` takes a name or an integer between `0` and `2**63 - 1`; anything else raises
   `ValueError`. Without it, the sink receives every level.
 - Ids are process-wide: any `Logger` can remove a sink another one added.
   Removing an id that names no active sink raises `ValueError`; a non-integer

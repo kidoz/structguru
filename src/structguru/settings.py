@@ -11,15 +11,18 @@ from typing import Any, TypedDict, Unpack
 from structguru._levels import LEVELS as _LEVELS
 from structguru._native_env import native_options_from_env
 
+# Largest numeric threshold accepted by the signed 64-bit native interface.
+_MAX_LEVELNO = 2**63 - 1
+
 
 def _level_number(level: str | int) -> int:
-    if isinstance(level, int) and not isinstance(level, bool) and level >= 0:
+    if isinstance(level, int) and not isinstance(level, bool) and 0 <= level <= _MAX_LEVELNO:
         return level
     if isinstance(level, str) and level.upper() in _LEVELS:
         return _LEVELS[level.upper()]
     msg = (
         f"level must be a known name ({', '.join(_LEVELS)}) "
-        f"or a non-negative integer, got {level!r}"
+        f"or an integer between 0 and {_MAX_LEVELNO}, got {level!r}"
     )
     raise ValueError(msg)
 

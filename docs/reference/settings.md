@@ -31,7 +31,7 @@ described in [Resolution order](configuration.md#resolution-order).
 
 | Field | Type | Default | Environment | Description |
 |---|---|---|---|---|
-| `level` | `str \| int` | `"INFO"` | `STRUCTGURU_LEVEL` | Minimum level: a [level name](record-format.md#levels) (case-insensitive, stored upper-case) or a non-negative integer. |
+| `level` | `str \| int` | `"INFO"` | `STRUCTGURU_LEVEL` | Minimum level: a [level name](record-format.md#levels) (case-insensitive, stored upper-case) or an integer between `0` and `2**63 - 1`. |
 | `sample_rate` | `float` (0.0 to 1.0) | `1.0` | `STRUCTGURU_SAMPLE_RATE` | Fraction of records kept by probabilistic sampling. `1.0` disables sampling. |
 | `sample_max_level` | `str \| None` | `None` | none | Highest level name that is sampled; more severe records always pass. `None` samples every level. `NOTSET` is rejected. Stored upper-case. |
 | `rate_limit_max` | `int \| None` (>= 1) | `None` | `STRUCTGURU_RATE_LIMIT` | Maximum records per formatted message within `rate_limit_period`. `None` disables rate limiting. |
@@ -82,7 +82,7 @@ The structured schema is listed on [Exceptions](exceptions.md).
 
 | Rule | Error |
 |---|---|
-| `level` is a known name or an integer >= 0; `bool` is rejected. | `ValueError` |
+| `level` is a known name or an integer between `0` and `2**63 - 1`; `bool` is rejected. | `ValueError` |
 | `service` and `pattern_replacement` are `str`; `file_path` is `str` or `None`. | `ValueError` |
 | `target` is `"stdout"`, `"null"`, or `"memory"`; `overflow` is `"block"` or `"drop"`; `format` is `"json"` or `"console"` (case-sensitive). | `ValueError` |
 | `otel`, `allow_backtracking_patterns`, `structured_exceptions`, `exception_include_locals`, `exception_carets`, and `also_stdout` are `bool`; `colors` is `bool` or `None`. | `ValueError` |

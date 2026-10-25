@@ -54,8 +54,8 @@ set_level("DEBUG")
 
 `set_level()` and `update(level=...)` keep queued records and rate-limit state.
 Levels accept case-insensitive names (`"debug"`, `"WARNING"`, `"NOTSET"`) or
-non-negative integer thresholds (`10`). Unknown names, booleans, and negative
-integers raise `ValueError`.
+integer thresholds from `0` to `2**63 - 1` (`10`). Unknown names, booleans, and
+out-of-range integers raise `ValueError`.
 
 ## Switch between JSON and console output
 

@@ -98,7 +98,7 @@ options, not buffered records, counters, stdlib bridge state, or `logger.add()` 
 Those registered sinks survive reconfiguration. Streams and callbacks retain their identity.
 
 Levels accept case-insensitive names (including `NOTSET`) or non-negative integer
-thresholds. Unknown names, booleans and negative integers raise `ValueError`.
+thresholds up to `2**63 - 1`. Unknown names, booleans and out-of-range integers raise `ValueError`.
 
 ### Environment configuration
 
@@ -214,7 +214,7 @@ Handler ids are process-wide: any `Logger` can remove a sink that another one ad
 Removing an id that names no active sink raises `ValueError` (a non-integer raises
 `TypeError`), as in loguru; `remove()` without an id removes the sinks added through
 that logger and its `bind()`/`opt()` children. `level` accepts a name or a non-negative
-integer and raises `ValueError` for anything else, like `configure(level=...)`.
+integer up to `2**63 - 1` and raises `ValueError` for anything else, like `configure(level=...)`.
 A `logging.Handler` passed to `add()` keeps its own level and formatter: its formatter
 wraps the rendered line, only `level` gates what it receives, and `remove()` closes it.
 

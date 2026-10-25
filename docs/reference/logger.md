@@ -93,7 +93,7 @@ Other values raise `TypeError`.
 
 | Rule | Behavior |
 |---|---|
-| `level` | A level name or a non-negative integer; `None` delivers all levels. Anything else raises `ValueError`, before any file is opened. Applies to every sink type. |
+| `level` | A level name or an integer between `0` and `2**63 - 1`; `None` delivers all levels. Anything else raises `ValueError`, before any file is opened. Applies to every sink type. |
 | Handler IDs | Process-wide: any logger can remove a sink another logger added. |
 | `remove(handler_id)` | An ID that names no active sink raises `ValueError`; a non-integer raises `TypeError`. Outside sink callbacks, waits until deliveries already selected for the sink have finished; inside a callback, those deliveries finish as the dispatch thread drains. |
 | `remove()` | Removes the sinks added through this logger and the loggers derived from it with `bind()` or `opt()`. |

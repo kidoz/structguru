@@ -124,7 +124,7 @@ ANSI sequence and followed by the reset sequence `ESC[0m`:
 The level table is defined once, in the native core. Level names are
 case-insensitive everywhere. `configure(level=...)`, `update(level=...)`,
 `set_level()`, and `logger.add(level=...)` accept a name from this table or a
-non-negative integer; `sample_max_level` and `logger.catch(level=...)` accept
+integer between `0` and `2**63 - 1`; `sample_max_level` and `logger.catch(level=...)` accept
 names except `NOTSET`; the stdlib bridge's `level` and `suppress_level`
 accept names only.
 
