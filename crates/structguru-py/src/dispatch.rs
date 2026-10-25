@@ -18,7 +18,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ffi::CString;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -762,6 +762,7 @@ impl DispatchChannel {
 
 /// Registry and accounting guarded by the dispatcher lock.
 struct Registry {
+    retired_snapshots: Vec<Arc<Snapshot>>,
     configured: Vec<Sink>,
     /// Token order is insertion order: tokens only ever increase.
     runtime: BTreeMap<i64, Sink>,
@@ -857,7 +858,7 @@ struct Snapshot {
 /// final decref too: Python destructors may reenter any dispatcher method.
 struct RegistryGuard<'a> {
     registry: Option<MutexGuard<'a, Registry>>,
-    retired: Vec<Snapshot>,
+    retired: Vec<Arc<Snapshot>>,
 }
 
 impl Deref for RegistryGuard<'_> {
@@ -896,6 +897,7 @@ struct DispatcherInner {
     errors: AtomicU64,
     sequencer: Arc<Sequencer>,
     snapshot: AtomicPtr<Snapshot>,
+    snapshot_readers: AtomicUsize,
 }
 
 impl DispatcherInner {
@@ -908,7 +910,7 @@ impl DispatcherInner {
 
     /// Replace the fork snapshot with the registry's current registrations.
     fn publish(&self, py: Python<'_>, registry: &mut RegistryGuard<'_>) {
-        let snapshot = Box::new(Snapshot {
+        let snapshot = Arc::new(Snapshot {
             configured: registry
                 .configured
                 .iter()
@@ -925,11 +927,20 @@ impl DispatcherInner {
         });
         let previous = self
             .snapshot
-            .swap(Box::into_raw(snapshot), Ordering::AcqRel);
+            .swap(Arc::into_raw(snapshot).cast_mut(), Ordering::SeqCst);
         if !previous.is_null() {
-            // SAFETY: only `publish` stores into `snapshot`, always a pointer
-            // from `Box::into_raw`, and the swap made this one unreachable.
-            registry.retired.push(*unsafe { Box::from_raw(previous) });
+            // SAFETY: publication owns one strong reference from into_raw.
+            // Defer its release until all readers have acquired their own Arc.
+            registry
+                .retired_snapshots
+                .push(unsafe { Arc::from_raw(previous) });
+        }
+        // SeqCst orders each reader's entry before its pointer load and this
+        // check after the swap. A reader can therefore never see a reclaimed
+        // pointer. Drop Python references only after releasing the registry.
+        if self.snapshot_readers.load(Ordering::SeqCst) == 0 {
+            let retired = std::mem::take(&mut registry.retired_snapshots);
+            registry.retired.extend(retired);
         }
     }
 
@@ -1122,7 +1133,7 @@ impl Drop for DispatcherInner {
         let snapshot = self.snapshot.swap(std::ptr::null_mut(), Ordering::AcqRel);
         if !snapshot.is_null() {
             // SAFETY: see `publish`; nothing else can observe the pointer now.
-            drop(unsafe { Box::from_raw(snapshot) });
+            drop(unsafe { Arc::from_raw(snapshot) });
         }
     }
 }
@@ -1147,6 +1158,7 @@ impl CallableDispatcher {
         counters: (u64, u64),
     ) -> Self {
         let registry = Registry {
+            retired_snapshots: Vec::new(),
             configured,
             runtime: runtime.into_iter().map(|sink| (sink.token, sink)).collect(),
             next_token,
@@ -1170,6 +1182,7 @@ impl CallableDispatcher {
             errors: AtomicU64::new(errors),
             sequencer: Arc::default(),
             snapshot: AtomicPtr::new(std::ptr::null_mut()),
+            snapshot_readers: AtomicUsize::new(0),
         });
         inner.publish(py, &mut inner.lock_registry());
         Self { inner }
@@ -1575,9 +1588,20 @@ impl CallableDispatcher {
         // The surviving thread may have forked from inside a callback; the
         // child does not continue that delivery.
         CALLBACK_DEPTH.with(|depth| depth.set(0));
-        // SAFETY: `publish` runs at construction, so the pointer is never null,
-        // and the child has no other thread that could replace it.
-        let snapshot = unsafe { &*self.inner.snapshot.load(Ordering::Acquire) };
+        // Announce before loading the pointer so publication defers releasing
+        // its Arc until this reader has incremented the strong count. This
+        // never acquires a mutex, including when another thread held the
+        // registry at fork. An inherited reader count may defer reclamation
+        // in the old dispatcher, which the child replaces rather than reuses.
+        self.inner.snapshot_readers.fetch_add(1, Ordering::SeqCst);
+        let pointer = self.inner.snapshot.load(Ordering::SeqCst);
+        // SAFETY: construction publishes a non-null Arc, and the reader count
+        // protects its lifetime until this reader owns a strong reference.
+        let snapshot = unsafe {
+            Arc::increment_strong_count(pointer);
+            Arc::from_raw(pointer)
+        };
+        self.inner.snapshot_readers.fetch_sub(1, Ordering::SeqCst);
         let child = Self::from_parts(
             py,
             snapshot

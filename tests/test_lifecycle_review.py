@@ -349,3 +349,41 @@ def test_child_publishes_runtime_before_running_deferred_sink_finalizers() -> No
         [sys.executable, "-c", script], capture_output=True, text=True, timeout=15
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_concurrent_fork_child_and_snapshot_publication() -> None:
+    # A segfault or deadlock must stay bounded and isolated from pytest.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+            import threading
+            from concurrent.futures import ThreadPoolExecutor
+            from structguru._native_dispatch import CallableSinkDispatcher
+            dispatcher = CallableSinkDispatcher()
+            start = threading.Barrier(4)
+            def publish(index):
+                start.wait()
+                for i in range(2000):
+                    token = dispatcher.add(lambda line: None, enabled=False)
+                    if i % 2:
+                        dispatcher.sync([], maxsize=4)
+                    dispatcher.remove(token, stall_timeout=1)
+            def clone(index):
+                start.wait()
+                for _ in range(2000):
+                    child = dispatcher.fork_child(enabled=False)
+                    assert child.metrics()["callable_maxsize"] >= 0
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                tasks = (publish, clone, publish, clone)
+                futures = [pool.submit(task, i) for i, task in enumerate(tasks)]
+                for future in futures:
+                    future.result()
+        """),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr

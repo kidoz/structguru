@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Security
 
+- Protect callable-dispatch fork snapshots with reader lifetimes and deferred
+  `Arc` reclamation during concurrent publication on free-threaded Python.
 - Celery context headers redact bytes and Enum sensitive keys and apply active
   patterns to exported text before truncation or broker publication.
 - Key redaction now recognizes bounded UTF-8 bytes keys and Enum member names
