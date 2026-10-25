@@ -27,6 +27,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Requests logging preserves one-shot query parameters and uses the actual
+  prepared URL after sending or a non-consuming marker on early failure.
 - Fork recovery closes inherited sidecar descriptors before rebuilding writers,
   including when a parent exited while holding the lock.
 - File writers inspect shared trailing bytes under the sidecar lock so partial

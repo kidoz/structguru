@@ -27,6 +27,8 @@ would any session, or subclass `StructguruRequestsSession` directly.
 - The logged `http_url` is the URL requests actually sends, including `params=`
   and session-level `params`, with credentials and query values removed: a bare
   `?` shows that parameters were present.
+- Logging does not consume generator parameters. Before request preparation
+  succeeds, failure logs use a conservative query-presence marker.
 - Responses with a 4xx or 5xx status, and calls that raise (including
   `KeyboardInterrupt` and `SystemExit`), are logged as
   `Outbound HTTP Request Failed` at `ERROR`. The exception then propagates to

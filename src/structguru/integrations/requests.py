@@ -40,7 +40,7 @@ class StructguruRequestsSession(requests.Session):
         start_time = time.perf_counter()
         # params is the first positional argument after url in Session.request.
         params = kwargs["params"] if "params" in kwargs else (args[0] if args else None)
-        logged_url = self._effective_url(url, params)
+        logged_url: str | bytes = self._effective_url(url, params)
 
         # Mirror requests' case-insensitive merge for failures that happen
         # before a prepared response exists. Positional headers follow params
@@ -93,23 +93,16 @@ class StructguruRequestsSession(requests.Session):
             else:
                 _logger.info("Outbound HTTP Request Completed", **extra)
 
-    def _effective_url(self, url: str | bytes, params: Any) -> str | bytes:
-        """Return *url* with the merged request and session params applied.
+    def _effective_url(self, url: str | bytes, params: Any) -> str:
+        """Mark possible query parameters without consuming caller-owned data.
 
-        Parameters are merged later, while requests prepares the request, so
-        without this the logged URL would lack the ``?`` marker. On any
-        preparation failure the original URL is returned; requests reports
-        the error itself.
+        Responses and transport exceptions supply the actual prepared URL.
+        Before preparation succeeds, a conservative marker is sufficient.
         """
-        try:
-            merged = requests.sessions.merge_setting(params, self.params)
-            if not merged:
-                return url
-            prepared = requests.PreparedRequest()
-            prepared.prepare_url(url, merged)
-        except Exception:  # noqa: BLE001 - diagnostics must not mask request failures
-            return url
-        return prepared.url or url
+        logged = sanitize_url(url)
+        if (params is not None or self.params) and not logged.endswith("?"):
+            return f"{logged}?" if logged != "<unparsable-url>" else logged
+        return logged
 
 
 def get_logging_session() -> StructguruRequestsSession:

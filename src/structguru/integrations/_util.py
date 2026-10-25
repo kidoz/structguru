@@ -68,7 +68,7 @@ def sanitize_url(raw: object) -> str:
     except Exception:  # noqa: BLE001 - diagnostics must not mask request failures
         return "<unparsable-url>"
     # Preserve a bare '?' so operators can see parameters were present.
-    return f"{sanitized}?" if parts.query else sanitized
+    return f"{sanitized}?" if "?" in text.partition("#")[0] else sanitized
 
 
 def coerce_request_id(raw: object, *, max_len: int = REQUEST_ID_MAX_LEN) -> str:

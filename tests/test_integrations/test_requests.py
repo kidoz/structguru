@@ -265,3 +265,38 @@ def test_requests_redirect_failure_uses_exception_prepared_request(
     assert record["http_url"] == "https://final.example/after?"
     assert record["request_id"] == "redirect-id"
     assert "SECRET" not in buf.getvalue()
+
+
+@pytest.mark.parametrize("positional", [False, True])
+def test_one_shot_params_reach_the_prepared_request(
+    httpserver: HTTPServer, positional: bool
+) -> None:
+    buf = io.StringIO()
+    configure(stream=buf)
+    httpserver.expect_request("/path", query_string="a=1&b=2").respond_with_json({})
+    params = ((key, value) for key, value in [("a", "1"), ("b", "2")])
+    session = get_logging_session()
+    url = httpserver.url_for("/path")
+    response = (
+        session.request("GET", url, params) if positional else session.get(url, params=params)
+    )
+    assert response.status_code == 200
+    assert response.request.url == f"{url}?a=1&b=2"
+    assert _records(buf)[0]["http_url"] == f"{url}?"
+    httpserver.check_assertions()
+
+
+def test_early_failure_does_not_consume_params(monkeypatch: pytest.MonkeyPatch) -> None:
+    import requests
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise requests.RequestException("before preparation")
+
+    monkeypatch.setattr(requests.Session, "request", fail)
+    buf = io.StringIO()
+    configure(stream=buf)
+    params = iter([("a", "1")])
+    with pytest.raises(requests.RequestException):
+        get_logging_session().get("https://host/path", params=params)
+    assert list(params) == [("a", "1")]
+    assert _records(buf)[0]["http_url"] == "https://host/path?"
