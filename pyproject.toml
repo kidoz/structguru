@@ -55,7 +55,7 @@ dev = [
 ]
 test = [
     "pytest>=9.1.1",
-    "pytest-asyncio>=1.4.0",
+    "pytest-asyncio>=1.4.1",
     "pytest-cov>=7.1.0",
     "pytest-httpserver>=1.2.0",
     # structlog + orjson are kept as test-only deps for the golden parity suite
@@ -64,16 +64,16 @@ test = [
     "orjson>=3.13.0",
     # fastapi drives the full-stack example smoke test (examples/full_stack_fastapi);
     # celery/sqlalchemy/httpx it also needs come from the integration extras.
-    "fastapi>=0.143.2",
+    "fastapi>=0.162.0",
 ]
 lint = [
     "mypy>=2.4.0",
-    "ruff>=0.17.0",
+    "ruff>=0.17.3",
 ]
 docs = [
     "mkdocs>=1.6.1",
-    "mkdocs-material>=9.7.7",
-    "mkdocstrings[python]>=1.0.7",
+    "mkdocs-material>=9.8.0",
+    "mkdocstrings[python]>=1.0.8",
 ]
 bench = [
     "pytest-benchmark>=5.3.0",
