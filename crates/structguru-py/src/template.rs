@@ -1,13 +1,14 @@
-//! Template metadata analysis using CPython's authoritative brace parser.
+//! Template metadata analysis and guarded scalar formatting.
 //!
-//! The Python LRU still owns caching and warnings. These functions hold no
-//! cross-call Python state; exceptional field strings use the original Python
-//! path splitter to retain subclass and lone-surrogate behavior.
+//! CPython remains the authoritative full brace parser. The Python LRU owns
+//! caching and warnings; native code holds no cross-call Python state.
+//! Exceptional field strings use the original Python path splitter to retain
+//! subclass and lone-surrogate behavior.
 
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::frozenset::PyFrozenSetBuilder;
-use pyo3::types::{PyFrozenSet, PyString, PyTuple};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyFrozenSet, PyInt, PyString, PyTuple};
 
 type FieldPath<'py> = (Bound<'py, PyString>, Vec<Bound<'py, PyString>>);
 type TemplateInfo<'py> = (Bound<'py, PyFrozenSet>, Bound<'py, PyFrozenSet>, bool, bool);
@@ -156,4 +157,126 @@ pub(crate) fn _analyze_template<'py>(
         }
         Err(error) => Err(error),
     }
+}
+
+fn is_scalar(value: &Bound<'_, PyAny>) -> bool {
+    value.is_exact_instance_of::<PyString>()
+        || value.is_exact_instance_of::<PyInt>()
+        || value.is_exact_instance_of::<PyFloat>()
+        || value.is_exact_instance_of::<PyBool>()
+        || value.is_none()
+}
+
+fn push_scalar(output: &mut String, value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if let Ok(text) = value.cast_exact::<PyString>() {
+        let Ok(text) = text.to_str() else {
+            return Ok(false);
+        };
+        output.push_str(text);
+    } else if value.is_exact_instance_of::<PyBool>() {
+        output.push_str(if value.is_truthy()? { "True" } else { "False" });
+    } else if value.is_none() {
+        output.push_str("None");
+    } else if value.is_exact_instance_of::<PyInt>() || value.is_exact_instance_of::<PyFloat>() {
+        let rendered = value.str()?;
+        let Ok(rendered) = rendered.to_str() else {
+            return Ok(false);
+        };
+        output.push_str(rendered);
+    } else {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// Format the scalar-only subset without reimplementing CPython's full brace
+/// grammar. Any other shape returns `None` for the authoritative Python path.
+#[pyfunction]
+pub(crate) fn _format_simple<'py>(
+    message: &Bound<'py, PyString>,
+    args: &Bound<'py, PyTuple>,
+    kwargs: &Bound<'py, PyDict>,
+    sensitive: &Bound<'py, PyAny>,
+) -> PyResult<Option<(Bound<'py, PyString>, Bound<'py, PyFrozenSet>)>> {
+    if !message.is_exact_instance_of::<PyString>() || !args.iter().all(|value| is_scalar(&value)) {
+        return Ok(None);
+    }
+    let Ok(text) = message.to_str() else {
+        return Ok(None);
+    };
+    let py = message.py();
+    let bytes = text.as_bytes();
+    let mut output = String::with_capacity(text.len());
+    let mut consumed = PyFrozenSetBuilder::new(py)?;
+    let mut offset = 0;
+    let mut automatic_index = 0;
+    let mut automatic = false;
+    let mut manual = false;
+    while offset < bytes.len() {
+        let Some(relative) = bytes[offset..]
+            .iter()
+            .position(|byte| matches!(byte, b'{' | b'}'))
+        else {
+            output.push_str(&text[offset..]);
+            break;
+        };
+        let brace = offset + relative;
+        output.push_str(&text[offset..brace]);
+        if bytes.get(brace + 1) == Some(&bytes[brace]) {
+            output.push(char::from(bytes[brace]));
+            offset = brace + 2;
+            continue;
+        }
+        if bytes[brace] == b'}' {
+            return Ok(None);
+        }
+        let Some(relative_end) = bytes[brace + 1..].iter().position(|byte| *byte == b'}') else {
+            return Ok(None);
+        };
+        let end = brace + 1 + relative_end;
+        let field = &text[brace + 1..end];
+        if field.contains(['!', ':', '.', '[', ']', '{']) || !field.is_ascii() {
+            return Ok(None);
+        }
+        let value = if field.is_empty() {
+            if manual {
+                return Ok(None);
+            }
+            automatic = true;
+            let index = automatic_index;
+            automatic_index += 1;
+            let Ok(value) = args.get_item(index) else {
+                return Ok(None);
+            };
+            value
+        } else if field.bytes().all(|byte| byte.is_ascii_digit()) {
+            if automatic {
+                return Ok(None);
+            }
+            manual = true;
+            let Ok(index) = field.parse::<usize>() else {
+                return Ok(None);
+            };
+            let Ok(value) = args.get_item(index) else {
+                return Ok(None);
+            };
+            value
+        } else {
+            consumed.add(field)?;
+            if sensitive.contains(field.to_ascii_lowercase().as_str())? {
+                output.push_str("[REDACTED]");
+                offset = end + 1;
+                continue;
+            }
+            let Some(value) = kwargs.get_item(field)? else {
+                return Ok(None);
+            };
+            value
+        };
+        if !push_scalar(&mut output, &value)? {
+            return Ok(None);
+        }
+        offset = end + 1;
+    }
+    Ok(Some((PyString::new(py, &output), consumed.finalize())))
 }

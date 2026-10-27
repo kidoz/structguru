@@ -342,6 +342,17 @@ def _safe_format(
     ):
         return msg, _NO_KEYS
 
+    # Match the keys the renderer uses: the defaults unless configured.
+    keys = runtime.settings.sensitive_keys if runtime is not None else None
+    sensitive = DEFAULT_SENSITIVE_KEYS if keys is None else _sensitive_names(keys)
+    try:
+        formatted = _template_native._format_simple(msg, args, kwargs, sensitive)
+        if formatted is not None:
+            return cast("tuple[str, frozenset[str]]", formatted)
+    except Exception as exc:  # noqa: BLE001 - scalar conversion must not break logging
+        _warn_format_failure(_template_key(msg), type(exc).__name__)
+        return msg, _NO_KEYS
+
     template = (
         _extract_format_keys(msg) if len(msg) <= _MAX_CACHED_TEMPLATE else _parse_template(msg)
     )
@@ -351,15 +362,8 @@ def _safe_format(
         return msg, _NO_KEYS
 
     consumed, names, names_default_key, has_path = template
-    # Match the keys the renderer uses: the defaults unless configured.
-    keys = runtime.settings.sensitive_keys if runtime is not None else None
     try:
-        if keys is None:
-            sensitive = DEFAULT_SENSITIVE_KEYS
-            redact = names_default_key
-        else:
-            sensitive = _sensitive_names(keys)
-            redact = not names.isdisjoint(sensitive)
+        redact = names_default_key if keys is None else not names.isdisjoint(sensitive)
         if not redact:
             text = msg.format(*args, **kwargs)
             if not sensitive or not _may_expose_nested_secret(

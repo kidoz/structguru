@@ -89,6 +89,7 @@ fn rust_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(exception::_traceback_line, module)?)?;
     module.add_function(wrap_pyfunction!(template::_template_field_path, module)?)?;
     module.add_function(wrap_pyfunction!(template::_analyze_template, module)?)?;
+    module.add_function(wrap_pyfunction!(template::_format_simple, module)?)?;
     module.add_class::<dispatch::CallableDispatcher>()?;
     module.add_class::<dispatch::DispatchChannel>()?;
     module.add_class::<submission::SubmissionLease>()?;

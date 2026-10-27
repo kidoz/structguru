@@ -93,3 +93,45 @@ def test_native_analysis_preserves_the_bounded_python_cache() -> None:
         assert info.misses == 1100
     finally:
         core._extract_format_keys.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("message", "args", "kwargs", "expected", "consumed"),
+    [
+        ("Hello {}", ("world",), {}, "Hello world", set()),
+        ("{0} {1} {0}", ("a", "b"), {}, "a b a", set()),
+        ("{{{name}}}", (), {"name": "Ada"}, "{Ada}", {"name"}),
+        (
+            "{name} {number} {ratio} {flag} {nothing}",
+            (),
+            {"name": "Ada", "number": 42, "ratio": 1.0, "flag": True, "nothing": None},
+            "Ada 42 1.0 True None",
+            {"name", "number", "ratio", "flag", "nothing"},
+        ),
+    ],
+)
+def test_native_simple_format_matches_python_semantics(
+    message: str,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    expected: str,
+    consumed: set[str],
+) -> None:
+    assert core._safe_format(message, args, kwargs) == (expected, consumed)
+
+
+def test_native_simple_format_redacts_before_lookup_and_skips_python_analysis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Unreadable:
+        def __str__(self) -> str:
+            pytest.fail("a sensitive scalar placeholder must not read its value")
+
+    def fail_analysis(_message: str) -> Any:
+        pytest.fail("the simple native path must not invoke Python template analysis")
+
+    monkeypatch.setattr(core, "_extract_format_keys", fail_analysis)
+    assert core._safe_format("{password}", (), {"password": Unreadable()}) == (
+        "[REDACTED]",
+        {"password"},
+    )
