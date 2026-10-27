@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- Add runnable context-propagation and sink-testing examples, with documentation
+  code-fence validation and subprocess smoke tests.
+
 ### Fixed
 
 - Correct stale versions, missing imports, and non-runnable configuration and
