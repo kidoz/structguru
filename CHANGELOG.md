@@ -18,6 +18,8 @@ All notable changes to this project are documented here. The format is based on
 - Move ordinary facade and stdlib submission, simple scalar brace formatting,
   and submission leases into Rust while retaining Python fallbacks for complex
   formatting, exceptions, enrichment, and lifecycle-sensitive destinations.
+- Avoid allocating a native consumed-key set for templates that require the
+  complex Python formatting fallback.
 
 ### Fixed
 

@@ -207,7 +207,7 @@ pub(crate) fn _format_simple<'py>(
     let py = message.py();
     let bytes = text.as_bytes();
     let mut output = String::with_capacity(text.len());
-    let mut consumed = PyFrozenSetBuilder::new(py)?;
+    let mut consumed = None;
     let mut offset = 0;
     let mut automatic_index = 0;
     let mut automatic = false;
@@ -262,7 +262,10 @@ pub(crate) fn _format_simple<'py>(
             };
             value
         } else {
-            consumed.add(field)?;
+            if consumed.is_none() {
+                consumed = Some(PyFrozenSetBuilder::new(py)?);
+            }
+            consumed.as_mut().expect("initialized above").add(field)?;
             if sensitive.contains(field.to_ascii_lowercase().as_str())? {
                 output.push_str("[REDACTED]");
                 offset = end + 1;
@@ -278,5 +281,9 @@ pub(crate) fn _format_simple<'py>(
         }
         offset = end + 1;
     }
-    Ok(Some((PyString::new(py, &output), consumed.finalize())))
+    let consumed = match consumed {
+        Some(consumed) => consumed.finalize(),
+        None => PyFrozenSetBuilder::new(py)?.finalize(),
+    };
+    Ok(Some((PyString::new(py, &output), consumed)))
 }
