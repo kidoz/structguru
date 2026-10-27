@@ -10,6 +10,8 @@ All notable changes to this project are documented here. The format is based on
 
 - Add runnable context-propagation and sink-testing examples, with documentation
   code-fence validation and subprocess smoke tests.
+- Add a FastAPI example launched through Granian's Python API, with structured
+  server and request logs and one request summary per request.
 
 ### Fixed
 

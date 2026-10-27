@@ -136,7 +136,11 @@ if __name__ == "__main__":
     ).serve()
 ```
 
-Start this launcher with the same environment variables.
+Start this launcher with the same environment variables. For a complete version
+that configures logging in both the launcher and workers, see the runnable
+[Granian + FastAPI example](https://github.com/kidoz/structguru/blob/main/examples/granian_fastapi/main.py).
+Its separate `app.py` and `main.py` support `HOST`, `PORT`, and
+`WEB_CONCURRENCY` and use one structured request summary per request.
 
 ## Log at DEBUG
 
