@@ -24,13 +24,16 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import sys
 import threading
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from structguru import _runtime
+from structguru._contextvars import _ctx
 from structguru._levels import method_for_level_number
 from structguru.config import _to_logging_level
-from structguru.core import Logger, _set_stdlib_bridge_active
+from structguru.core import Logger, _safe_format, _set_stdlib_bridge_active
 from structguru.integrations._stdlib_env import (
     optional_bool_from_env,
     stdlib_bridge_config_from_env,
@@ -146,21 +149,78 @@ class StructguruHandler(logging.Handler):
         if record.name == "structguru" or record.name.startswith("structguru."):
             return
         try:
+            result = (
+                None
+                if (
+                    record.exc_info
+                    or record.stack_info
+                    or type(_runtime._callable_dispatcher) is not _runtime._NATIVE_DISPATCHER_TYPE
+                )
+                else _runtime.submit_stdlib(
+                    record,
+                    _runtime.current_runtime,
+                    _safe_format,
+                    _ctx.get,
+                    sys._getframe,
+                    _runtime._callable_dispatcher,
+                    _STANDARD_RECORD_ATTRS,
+                )
+            )
+            if isinstance(result, int):
+                if result:
+                    _runtime._note_enqueue_outcome(result)
+                return
+            if result is not None:
+                (
+                    state,
+                    name,
+                    method,
+                    message,
+                    extras,
+                    controls,
+                    created,
+                    levelno,
+                    has_stack,
+                ) = result
+                if state is None:
+                    return
+                target = _logger_for(name)
+                if has_stack:
+                    target._log_slow(
+                        state,
+                        method,
+                        "{}",
+                        (message,),
+                        controls,
+                        levelno=levelno,
+                        created=created,
+                        _bound_fields=extras or None,
+                    )
+                else:
+                    target._log_slow(
+                        state,
+                        method,
+                        message,
+                        (),
+                        controls,
+                        levelno=levelno,
+                        created=created,
+                        _bound_fields=extras or None,
+                    )
+                return
+
+            # An unusual non-string logger name retains the original failure path.
             target = _logger_for(record.name)
             extras = _record_extras(record)
             if extras and target._bound:
                 extras = {**target._bound, **extras}
-            controls: dict[str, Any] = {}
+            controls = {}
             if record.exc_info:
                 controls["exc_info"] = record.exc_info
             method = method_for_level_number(record.levelno)
             if method == "trace":
-                method = "debug"  # what Logger.trace() logs as
-            # ``_log`` rather than the level method: only it takes the record's
-            # own number and creation time.
+                method = "debug"
             if record.stack_info:
-                # A positional placeholder preserves the already-formatted text,
-                # even when stack_info introduces keyword arguments to _log().
                 target._log(
                     method,
                     "{}",

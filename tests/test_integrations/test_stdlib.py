@@ -100,6 +100,23 @@ def test_bridge_forwards_without_logger_clones(
     assert record.__dict__ == before
 
 
+def test_plain_bridge_record_bypasses_logger_facade(
+    native_memory: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_log(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("a plain stdlib record must submit directly through the native pipeline")
+
+    monkeypatch.setattr(Logger, "_log", fail_log)
+    record = logging.LogRecord("native.direct", 25, "", 1, "literal {value}", (), None)
+    record.value = "metadata"
+    StructguruHandler().handle(record)
+    [rendered] = _records()
+    assert rendered["logger"] == "native.direct"
+    assert rendered["level"] == "INFO"
+    assert rendered["message"] == "literal {value}"
+    assert rendered["value"] == "metadata"
+
+
 def test_bridge_retains_record_read_order_around_get_message(native_memory: None) -> None:
     _runtime.configure(target="memory", level=30)
 

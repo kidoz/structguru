@@ -13,15 +13,19 @@ system and explains the choices that shape that path.
 caller thread
   logger.info("order {id} accepted", id=42, user="u1")
    |
-   |  Python facade
-   |   1. read the runtime snapshot ............. logging disabled -> return
-   |   2. compare the level with the threshold .. below it -> return
-   |   3. brace-format the message; placeholders consume their keywords
-   |   4. sampling and rate limiting ............ dropped -> return (counted)
-   |   5. logger name; exception text or dict; stack text if requested
-   |   6. only if configured: OpenTelemetry ids, metric_processor
+   |  Python facade: read one runtime snapshot
+   |   logging disabled -> return
    |
-   |  one native call, using the RuntimeConfig compiled by configure()
+   |  native ordinary-record path
+   |   1. compare the level with the threshold .. below it -> return
+   |   2. brace-format; placeholders consume their keywords
+   |   3. sampling and rate limiting ............ dropped -> return (counted)
+   |   4. resolve the logger name
+   |
+   |  or Python slow path, when the record needs it
+   |   exception text or dict; stack text; OpenTelemetry ids; metric_processor
+   |
+   |  native writer call, using the RuntimeConfig compiled by configure()
    |   merge bound fields, keywords, and context -> convert values
    |   -> redact -> timestamp -> render JSON or console -> enqueue
    |
@@ -35,41 +39,31 @@ caller thread
 
 ## On the caller's thread
 
-The Python steps run in order of increasing cost, and each runs only if the
-record survived the step before it.
-
 The runtime snapshot is read once, when the call begins (see
 [One snapshot per call](#one-snapshot-per-call)). When logging is disabled,
 after `shutdown()` or when import-time configuration was switched off and
 `configure()` has not run yet, the call returns here.
 
-The level check comes before any formatting. A debug call below the threshold
-costs a dictionary lookup and a comparison.
-
-Message formatting follows `str.format` rules. Keywords that a placeholder
-names are consumed by the message; the remaining keywords become fields. A
-placeholder that names a sensitive key is filled with `[REDACTED]` at this
-stage, because the formatted message leaves Python as plain text and the
-renderer can no longer tell which part of it came from which argument (see
-[Redaction design](redaction.md)).
-
-Sampling and rate limiting run next, on the formatted message. They come after
+The level check comes before any formatting. Sampling and rate limiting follow
 formatting because the rate limiter groups records by their formatted message,
-and before everything else so that a record they drop costs no field merge,
-no traceback formatting, and no rendering.
+and precede field conversion, traceback formatting, and rendering.
 
-Then Python collects what only the interpreter can see: the caller's module
-name for the `logger` field, the exception, and the stack for `stack_info`.
-Exceptions are formatted with CPython's own `traceback` module, so the text is
-what `traceback.format_exception` prints, or built into a structured
-dictionary when `structured_exceptions=True`. The Rust renderer only
-serializes what Python hands it.
+Message formatting follows `str.format` rules. Simple named and positional
+fields with exact scalar values are rendered natively; complex grammar,
+containers, and custom conversions use CPython's parser and the Python
+redacting formatter. Keywords that a placeholder names are consumed by the
+message; the remaining keywords become fields. A placeholder that names a
+sensitive key is filled with `[REDACTED]` before its value is looked up,
+because the renderer can no longer tell which part of the formatted text came
+from which argument (see [Redaction design](redaction.md)).
 
-Finally, the hooks. OpenTelemetry trace injection and `metric_processor` need
-the merged fields as a Python mapping, so when either one (or a Sentry
-processor) is configured, the fields are merged first by the same native merge
-the renderer uses, enriched, and handed over whole. Without hooks, no Python
-dictionary of merged fields is ever built.
+Records that need exception, stack, or enrichment work take a Python slow path
+with the same runtime snapshot. Exceptions are formatted with CPython's own
+`traceback` module, or built into a structured dictionary when
+`structured_exceptions=True`. OpenTelemetry trace injection and
+`metric_processor` receive the merged fields as a Python mapping, merged by
+the same native merge the renderer uses. Without hooks, no Python dictionary
+of merged fields is ever built.
 
 ## The native call
 
@@ -101,12 +95,13 @@ The call then:
 
 In the common production shape (no stream sink, no Sentry processor, and no
 callable sink registered) the rendered line goes from the renderer straight
-into the queue and never becomes a Python string. When one of those
-destinations exists, the same call also returns the line, and for Sentry the
-redacted JSON record, to Python. A runtime submission lease spans that native
-capture and all three secondary handoffs, closing the interval in which the
-writer has accepted a record but `flush()` cannot yet see its other
-destinations.
+into the queue and never becomes a Python string. If a callable sink is
+registered while the record is being prepared, Rust delivers that same line
+without formatting the record again. Stream and Sentry paths return the line,
+and for Sentry the redacted JSON record, to Python. One native submission
+lease implementation covers both plain and Python-assisted paths, closing the
+interval in which the writer has accepted a record but `flush()` cannot yet
+see its other destinations.
 
 The [record format reference](../reference/record-format.md) lists the fields
 and value conversions exactly.
@@ -236,11 +231,13 @@ anywhere.
 ## Standard-library records take the same path
 
 The [standard-library bridge](../how-to/capture-stdlib-logging.md) does not
-have a renderer of its own. It re-emits each `logging.LogRecord` through the
-facade, passing the record's own level number and creation time. Level
-thresholds, sampling, and routing to callable sinks use that number, and the
-`timestamp` field uses that time, so a bridged record receives the same
-formatting, redaction, queueing, and lifecycle guarantees as a native one.
+have a renderer of its own. Ordinary `LogRecord` instances extract their extra
+fields and submit directly through the native path; records needing Python
+exception, stack, or enrichment work carry their prepared values into the same
+facade slow path without calling `getMessage()` again. Level thresholds,
+sampling, and callable routing use the record's own number, and `timestamp`
+uses its creation time, so bridged records receive the same formatting,
+redaction, queueing, and lifecycle guarantees as native ones.
 
 ## Related pages
 

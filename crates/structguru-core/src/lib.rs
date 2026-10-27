@@ -56,6 +56,19 @@ pub fn level_number(method: &str) -> Option<u8> {
         .map(|(_, number)| *number)
 }
 
+/// Map a numeric stdlib level to the canonical method at or below it.
+pub fn method_for_level_number(levelno: i64) -> &'static str {
+    match levelno {
+        50.. => "critical",
+        40.. => "error",
+        30.. => "warning",
+        20.. => "info",
+        10.. => "debug",
+        5.. => "trace",
+        _ => "debug",
+    }
+}
+
 /// Normalize a structguru/loguru-style level name to the canonical field value.
 ///
 /// Unknown levels follow the current Python processor contract: uppercase the
@@ -102,6 +115,18 @@ mod tests {
         assert_eq!(level_number("exception"), Some(40));
         assert_eq!(level_number("fatal"), Some(50));
         assert_eq!(level_number("notice"), None);
+    }
+
+    #[test]
+    fn numeric_levels_select_their_stdlib_method_band() {
+        assert_eq!(method_for_level_number(-1), "debug");
+        assert_eq!(method_for_level_number(5), "trace");
+        assert_eq!(method_for_level_number(10), "debug");
+        assert_eq!(method_for_level_number(25), "info");
+        assert_eq!(method_for_level_number(35), "warning");
+        assert_eq!(method_for_level_number(45), "error");
+        assert_eq!(method_for_level_number(50), "critical");
+        assert_eq!(method_for_level_number(i64::MAX), "critical");
     }
 
     #[test]

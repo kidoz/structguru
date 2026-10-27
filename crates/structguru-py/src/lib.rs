@@ -7,6 +7,7 @@ mod dispatch;
 mod exception;
 mod filter;
 mod local_repr;
+mod pipeline;
 mod rendering;
 mod submission;
 mod template;
@@ -90,6 +91,8 @@ fn rust_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(template::_template_field_path, module)?)?;
     module.add_function(wrap_pyfunction!(template::_analyze_template, module)?)?;
     module.add_function(wrap_pyfunction!(template::_format_simple, module)?)?;
+    module.add_function(wrap_pyfunction!(pipeline::submit_plain, module)?)?;
+    module.add_function(wrap_pyfunction!(pipeline::submit_stdlib, module)?)?;
     module.add_class::<dispatch::CallableDispatcher>()?;
     module.add_class::<dispatch::DispatchChannel>()?;
     module.add_class::<submission::SubmissionLease>()?;

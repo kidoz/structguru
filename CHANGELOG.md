@@ -13,6 +13,12 @@ All notable changes to this project are documented here. The format is based on
 - Add a FastAPI example launched through Granian's Python API, with structured
   server and request logs and one request summary per request.
 
+### Changed
+
+- Move ordinary facade and stdlib submission, simple scalar brace formatting,
+  and submission leases into Rust while retaining Python fallbacks for complex
+  formatting, exceptions, enrichment, and lifecycle-sensitive destinations.
+
 ### Fixed
 
 - Correct stale versions, missing imports, and non-runnable configuration and

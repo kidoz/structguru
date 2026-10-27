@@ -69,6 +69,11 @@ impl NativeFilter {
         Ok(self.pipeline.allow(&string_to_cow(key), level))
     }
 
+    pub(crate) fn allow_level(&self, key: &Bound<'_, PyString>, level: i64) -> bool {
+        let level = u32::try_from(level.max(0)).unwrap_or(u32::MAX);
+        self.pipeline.allow(&string_to_cow(key), level)
+    }
+
     /// Whether any filter stage is configured.
     fn is_empty(&self) -> bool {
         self.pipeline.is_empty()

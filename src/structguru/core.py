@@ -894,30 +894,67 @@ class Logger:
         *,
         _bound_fields: dict[str, Any] | None = None,
     ) -> None:
-        """Internal dispatch — native Rust path (the only path since v1.0).
+        """Submit one record natively, falling back to Python capture and hooks."""
+        # One coherent snapshot follows the record through every processing stage.
+        runtime = _runtime.current_runtime()
+        if runtime is None:
+            return
+        outcome = None
+        if (
+            type(runtime.writer) is _runtime._NATIVE_WRITER_TYPE
+            and type(_runtime._callable_dispatcher) is _runtime._NATIVE_DISPATCHER_TYPE
+        ):
+            outcome = _runtime.submit_plain(
+                runtime,
+                runtime.writer,
+                runtime.config,
+                runtime.record_filter,
+                runtime.level_threshold,
+                runtime.enrich,
+                runtime.fused,
+                _safe_format,
+                self.name,
+                self._bound if _bound_fields is None else _bound_fields,
+                self._opt_exc_info,
+                self._opt_stack_info,
+                method,
+                message,
+                args,
+                kwargs,
+                _ctx.get,
+                sys._getframe,
+                _runtime._callable_dispatcher,
+                levelno,
+                created,
+            )
+        if outcome is not None:
+            if outcome:
+                _runtime._note_enqueue_outcome(outcome)
+            return
+        self._log_slow(
+            runtime, method, message, args, kwargs, levelno, created, _bound_fields=_bound_fields
+        )
 
-        Python keeps brace formatting, exception and stack capture, and hooks.
-        The Rust writer merges fields, redacts, renders, and enqueues in one
-        call. Ordinary records also resolve the caller's module in that call;
-        records requiring Python capture or hooks use the facade's lookup.
+    def _log_slow(
+        self,
+        runtime: _runtime._RuntimeState,
+        method: str,
+        message: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        levelno: int | None = None,
+        created: float | None = None,
+        *,
+        _bound_fields: dict[str, Any] | None = None,
+    ) -> None:
+        """Handle exception, stack, enrichment, and secondary-destination paths.
 
         The stdlib bridge passes a record's own ``levelno``, which the level
         threshold, sampling, and callable-sink routing use instead of
         *method*'s number, and its ``created`` time (Unix seconds) for the
-        ``timestamp`` field.
-
-        ``_bound_fields`` supplies an already assembled per-record mapping for
-        the stdlib bridge without cloning its cached facade. Like ``bind()``
-        fields, these values never participate in brace formatting.
+        ``timestamp`` field. ``_bound_fields`` supplies an already assembled
+        per-record mapping without cloning its cached facade.
         """
-        # One coherent snapshot follows the record through every processing stage.
-        # Reconfigure/disable may retire its writer, but cannot invalidate this
-        # Python object or expose a partially updated configuration.
-        runtime = _runtime.current_runtime()
-        if runtime is None:
-            return
-
-        # Cheap disabled path: level-filter before any formatting.
         level_number = METHOD_LEVELS.get(method, 20) if levelno is None else levelno
         if level_number < runtime.level_threshold:
             return
@@ -926,45 +963,12 @@ class Logger:
         # Read before placeholders consume kwargs: "{exc_info}" must not drop it.
         exc_info = kwargs.get("exc_info", self._opt_exc_info)
         formatted_msg, consumed_keys = _safe_format(message, args, kwargs, runtime)
-
-        # Strip kwargs that were consumed by brace-formatting so they don't
-        # leak into the structured log fields (matches loguru behaviour).
         for key in consumed_keys:
             kwargs.pop(key, None)
 
-        # Pre-render filter (sampling/rate-limit): decide before building fields.
-        # Keys on the formatted message, matching the rate-limiter's grouping.
         record_filter = runtime.record_filter
         if record_filter is not None and not record_filter.allow(formatted_msg, level_number):
             return
-
-        # No Python enrichment or capture: Rust owns the remaining preparation
-        # and submission. Active callable sinks go directly to leased capture;
-        # Rust rechecks for sinks registered after this probe.
-        if (
-            runtime.fused
-            and not runtime.enrich
-            and not exc_info
-            and not stack_info
-            and _runtime._callable_dispatcher.idle()
-            and type(runtime.writer) is _runtime._NATIVE_WRITER_TYPE
-        ):
-            outcome = runtime.writer.log_plain(
-                runtime.config,
-                self.name,
-                method,
-                formatted_msg,
-                self._bound if _bound_fields is None else _bound_fields,
-                kwargs,
-                _ctx.get(),
-                sys._getframe,
-                _runtime._callable_dispatcher,
-                created,
-            )
-            if outcome is not None:
-                if outcome:
-                    _runtime._note_enqueue_outcome(outcome)
-                return
 
         name = self.name if self.name is not None else _caller_module_name()
         # Exception and stack capture are Python-owned (frame walking). The
@@ -986,8 +990,6 @@ class Logger:
         contextvars = _ctx.get()
         field_names: tuple[str, ...] = ()
         if runtime.enrich:
-            # A Python hook needs the merged mapping: build it once with the
-            # renderer's merge semantics, enrich it, then hand it over whole.
             fields = _runtime.merge_fields(bound, kwargs, contextvars)
             if runtime.otel:
                 add_otel_context(None, method, fields)

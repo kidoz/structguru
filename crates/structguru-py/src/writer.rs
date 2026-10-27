@@ -64,7 +64,9 @@ impl NativeStringWriter {
 }
 
 /// Match the facade's caller lookup without keeping any frame beyond this call.
-fn caller_module_name<'py>(getframe: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyString>> {
+pub(crate) fn caller_module_name<'py>(
+    getframe: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyString>> {
     let py = getframe.py();
     let mut frame = getframe.call0()?;
     while !frame.is_none() {
@@ -73,7 +75,7 @@ fn caller_module_name<'py>(getframe: &Bound<'py, PyAny>) -> PyResult<Bound<'py, 
         let name = globals
             .get_item(pyo3::intern!(py, "__name__"))?
             .unwrap_or_else(|| PyString::new(py, "").into_any());
-        if !name.eq("structguru.core")? {
+        if !name.eq("structguru.core")? && !name.eq("structguru._runtime")? {
             return Ok(name.cast_into::<PyString>()?);
         }
         frame = frame.getattr(pyo3::intern!(py, "f_back"))?;
@@ -333,13 +335,11 @@ impl NativeStringWriter {
 
     /// Ordinary facade records: find the caller, merge, render, and enqueue
     /// without returning a Python string. The facade has already filtered.
-    ///
-    /// `None` requests the existing capture path when callable sinks are active.
-    /// Its Python submission leases still cover acceptance-to-dispatch.
-    /// Otherwise return the writer outcome.
+    /// If callable sinks became active after its idle probe, deliver the same
+    /// rendered line natively rather than formatting the record again.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (config, logger, level, message, bound, kwargs, contextvars, getframe, dispatcher, created=None))]
-    fn log_plain(
+    #[pyo3(signature = (config, logger, level, message, bound, kwargs, contextvars, getframe, dispatcher, created=None, levelno=None))]
+    pub(crate) fn log_plain(
         &self,
         py: Python<'_>,
         config: &Bound<'_, RuntimeConfig>,
@@ -352,10 +352,8 @@ impl NativeStringWriter {
         getframe: &Bound<'_, PyAny>,
         dispatcher: &CallableDispatcher,
         created: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Option<u8>> {
-        if !dispatcher.idle() {
-            return Ok(None);
-        }
+        levelno: Option<i64>,
+    ) -> PyResult<u8> {
         let _submission = dispatcher.begin_submission();
         let caller;
         let logger = match logger {
@@ -379,7 +377,22 @@ impl NativeStringWriter {
             false,
             created,
         )?;
-        Ok(Some(self.enqueue_owned(py, line, config.blocking).code()))
+        let outcome = if !dispatcher.idle() {
+            let outcome = self.enqueue_owned(py, line.clone(), config.blocking);
+            if outcome != Outcome::Closed {
+                dispatcher.enqueue(
+                    py,
+                    line,
+                    levelno
+                        .unwrap_or_else(|| i64::from(structguru_core::method_level_number(level))),
+                    if config.blocking { "block" } else { "drop" },
+                )?;
+            }
+            outcome
+        } else {
+            self.enqueue_owned(py, line, config.blocking)
+        };
+        Ok(outcome.code())
     }
 
     /// Like [`log`](Self::log), returning the rendered line as well.

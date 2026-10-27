@@ -82,7 +82,8 @@ class _NativeWriter(Protocol):
         getframe: Any,
         dispatcher: CallableDispatcherProtocol,
         created: float | None = None,
-    ) -> int | None: ...
+        levelno: int | None = None,
+    ) -> int: ...
 
     def log(
         self,
@@ -126,6 +127,10 @@ class _NativeWriter(Protocol):
 
 class _RustModule(Protocol):
     def report_unraisable(self, error: BaseException) -> None: ...
+
+    def submit_plain(self, *args: Any, **kwargs: Any) -> int | None: ...
+
+    def submit_stdlib(self, *args: Any, **kwargs: Any) -> Any: ...
 
     def RuntimeConfig(
         self,
@@ -243,6 +248,7 @@ _lifecycle_generation = 0
 
 
 _callable_dispatcher: CallableDispatcherProtocol = new_dispatcher()
+_NATIVE_DISPATCHER_TYPE = type(_callable_dispatcher)
 # Synchronous stream sink: when set (via configure(stream_sink=...)), rendered
 # lines are written to this stream synchronously on the caller's thread IN
 # ADDITION to the Rust writer, so logger output is available on the configured
@@ -459,6 +465,18 @@ def merge_fields(
     """
     assert _RUST is not None
     return _RUST.merge_fields(bound, kwargs, contextvars)
+
+
+def submit_plain(*args: Any, **kwargs: Any) -> int | None:
+    """Submit an ordinary record natively, or return ``None`` for the slow path."""
+    assert _RUST is not None
+    return _RUST.submit_plain(*args, **kwargs)
+
+
+def submit_stdlib(*args: Any, **kwargs: Any) -> Any:
+    """Submit a stdlib record natively or return its prepared slow-path data."""
+    assert _RUST is not None
+    return _RUST.submit_stdlib(*args, **kwargs)
 
 
 def build_exception_field(

@@ -49,6 +49,31 @@ def test_callable_delivery_skips_speculative_plain_submission(
             log.remove(token)
 
 
+def test_plain_submission_delivers_sink_registered_during_message_conversion() -> None:
+    received: list[str] = []
+    tokens: list[int] = []
+    calls: list[str] = []
+    log = structguru.Logger(name="dispatch.race")
+    _runtime.configure(target="memory")
+
+    class Message:
+        def __str__(self) -> str:
+            calls.append("converted")
+            tokens.append(log.add(received.append))
+            return "race"
+
+    try:
+        log.info(Message())
+        _runtime.flush()
+        [line] = _runtime.drain_messages()
+        assert calls == ["converted"]
+        assert received == [line]
+        assert json.loads(line)["message"] == "race"
+    finally:
+        for token in tokens:
+            log.remove(token)
+
+
 @pytest.mark.parametrize("transition", ["remove", "configure", "sync", "disable"])
 @pytest.mark.parametrize("cached", [False, True])
 def test_callback_destructor_can_reenter_dispatcher(transition: str, cached: bool) -> None:
