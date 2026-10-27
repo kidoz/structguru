@@ -83,7 +83,8 @@ def test_slow_warning():
 `logger.add()` leaves the active configuration alone, so this works alongside
 whatever the application configured. `configure(callable_sinks=[lines.append])`
 works the same way but replaces the configuration. Each line ends with a
-newline.
+newline. The runnable [sinks-and-testing example](https://github.com/kidoz/structguru/blob/main/examples/sinks_and_testing/main.py)
+combines both capture styles, redaction assertions, `flush()`, and cleanup.
 
 ## Test code that uses the stdlib bridge
 

@@ -651,6 +651,8 @@ The [documentation](docs/index.md) follows [Diátaxis](https://diataxis.fr/):
 - **[Explanation](docs/explanation/index.md)** — Architecture, delivery guarantees, context propagation, and redaction design.
 - **[Full-stack Example](examples/full_stack_fastapi/main.py)** — FastAPI + Celery + SQLAlchemy in action.
 - **[Existing-loggers Example](examples/stdlib_existing_loggers/main.py)** — Configure the stdlib policy and bridge replacement from code or environment.
+- **[Context-propagation Example](examples/context_propagation/main.py)** — Carry request fields through async tasks and a thread pool.
+- **[Sinks and Testing Example](examples/sinks_and_testing/main.py)** — Capture, redact, and assert on rendered records with deterministic cleanup.
 
 ## Development
 

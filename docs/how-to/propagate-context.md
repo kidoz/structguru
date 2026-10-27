@@ -122,7 +122,9 @@ with logger.contextualize(request_id="req-1"):
 
 Use a fresh `copy_context()` for each submission; a `Context` object cannot be
 entered by two threads at once. `ctx.run()` runs the work in that copy, so it
-neither sees a worker's leftover fields nor leaves its own behind.
+neither sees a worker's leftover fields nor leaves its own behind. The runnable
+[context-propagation example](https://github.com/kidoz/structguru/blob/main/examples/context_propagation/main.py)
+demonstrates this pattern together with asyncio tasks and cleanup assertions.
 
 Alternatively, pass the values and bind them in the worker, clearing first and
 on exit:
