@@ -1,7 +1,7 @@
 # Reference
 
-Technical descriptions of the structguru 1.4 public API, its options, and its
-output. Signatures and docstrings are generated from the source code with
+Technical descriptions of the current structguru public API, its options, and
+its output. Signatures and docstrings are generated from the source code with
 mkdocstrings. For step-by-step instructions, see the
 [how-to guides](../how-to/index.md); for background, see the
 [explanation](../explanation/index.md) pages.

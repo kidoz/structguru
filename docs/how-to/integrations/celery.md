@@ -3,10 +3,10 @@
 Call `setup_celery_logging()` to bind `task_id` and `task_name` to every record
 logged inside a task, and to carry selected context fields, such as
 `request_id`, from the code that sends a task to the worker that runs it.
-Install the `celery` extra:
+Install the `celery` extra and the driver for your broker (`redis` in this example):
 
 ```bash
-pip install "structguru[celery]"
+pip install "structguru[celery]" redis
 ```
 
 ## Connect the signals

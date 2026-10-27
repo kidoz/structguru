@@ -128,6 +128,8 @@ The stdlib bridge retains its separate `STRUCTGURU_STDLIB_*` options and explici
 ### Log levels
 
 ```python
+from structguru import logger
+
 logger.debug("Debug message")
 logger.info("Info message")
 logger.warning("Warning message")
@@ -146,6 +148,8 @@ logger.fatal("Alias for critical")
 Arguments used in `str.format` placeholders are consumed by formatting (matching loguru behaviour). Extra kwargs that are **not** in any placeholder are forwarded as structured fields:
 
 ```python
+from structguru import logger
+
 logger.info("User {user_id} logged in", user_id=42, ip="10.0.0.1")
 # message: "User 42 logged in"
 # ip: "10.0.0.1"  (extra kwarg kept as structured field)
@@ -168,6 +172,8 @@ message whose `str()` raises, is logged raw or as a placeholder with a one-shot
 ### Bound context
 
 ```python
+from structguru import logger
+
 log = logger.bind(request_id="abc-123", user="alice")
 log.info("Processing request")  # includes request_id and user
 log.info("Request complete")  # same context carried through
@@ -176,6 +182,8 @@ log.info("Request complete")  # same context carried through
 ### Request-scoped context
 
 ```python
+from structguru import logger
+
 with logger.contextualize(request_id="abc-123"):
     logger.info("Handling request")  # includes request_id
     do_work()  # any logging inside also gets request_id
@@ -185,6 +193,8 @@ with logger.contextualize(request_id="abc-123"):
 ### Exception logging
 
 ```python
+from structguru import logger
+
 try:
     risky_operation()
 except Exception:
@@ -197,8 +207,10 @@ logger.opt(exception=True).error("Something went wrong")
 ### Sink management
 
 ```python
+from structguru import logger
+
 # Add a file sink
-handler_id = logger.add("/var/log/app.log", level="ERROR")
+handler_id = logger.add("app.log", level="ERROR")
 
 # Add a callable sink
 logger.add(lambda msg: send_to_monitoring(msg), level="CRITICAL")
@@ -245,7 +257,7 @@ been written:
 ```python
 import structguru
 
-logger.info("checkpoint")
+structguru.logger.info("checkpoint")
 structguru.flush()  # returns once the line has reached its sink
 ```
 
@@ -255,6 +267,8 @@ structguru.flush()  # returns once the line has reached its sink
 (colored, human-readable development output).
 
 ```python
+from structguru import update
+
 # JSON (production)
 update(service="myapp", format="json")
 # → {"logger":"...","level":"INFO","severity":6,"timestamp":"...","service":"myapp","message":"..."}
@@ -299,6 +313,8 @@ backtrack limit, it is redacted entirely (fail-closed) rather than emitted
 unchecked.
 
 ```python
+from structguru import update
+
 update(
     sensitive_patterns=[r"(?<=password=)\S+"],
     allow_backtracking_patterns=True,
@@ -349,6 +365,8 @@ traceback about five times faster and matches what CPython prints under
 `PYTHONNODEBUGRANGES=1`:
 
 ```python
+from structguru import update
+
 update(exception_carets=False)
 ```
 
@@ -471,6 +489,8 @@ Calls begun while logging is disabled are no-ops and are not counted. See the [l
 ### ASGI (FastAPI / Starlette)
 
 ```python
+from fastapi import FastAPI
+
 from structguru.integrations.asgi import StructguruMiddleware
 
 app = FastAPI()
@@ -496,6 +516,8 @@ setup_celery_logging(propagate_context=True, context_keys=["request_id"])
 ### Flask
 
 ```python
+from flask import Flask
+
 from structguru.integrations.flask import setup_flask_logging
 
 app = Flask(__name__)
@@ -524,6 +546,10 @@ setup_query_logging(engine, slow_threshold_ms=100, log_all=False)
 ### gRPC
 
 ```python
+from concurrent import futures
+
+import grpc
+
 from structguru.integrations.grpc import StructguruInterceptor
 
 server = grpc.server(

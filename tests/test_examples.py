@@ -57,3 +57,4 @@ def test_full_stack_fastapi_example_serves_a_request() -> None:
     )
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "EXAMPLE_OK" in result.stdout, result.stdout
+    assert "Background task complete for user 1" in result.stdout, result.stdout

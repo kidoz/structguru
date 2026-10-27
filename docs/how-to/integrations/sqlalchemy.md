@@ -14,7 +14,7 @@ from sqlalchemy import create_engine
 
 from structguru.integrations.sqlalchemy import setup_query_logging
 
-engine = create_engine("postgresql+psycopg://app@db/app")
+engine = create_engine("sqlite:///:memory:")
 setup_query_logging(engine, slow_threshold_ms=100.0)
 ```
 

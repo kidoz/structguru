@@ -1,4 +1,8 @@
-"""Full-stack FastAPI + Celery + SQLAlchemy example with structguru."""
+"""Full-stack FastAPI + Celery + SQLAlchemy example with structguru.
+
+Install with ``pip install "structguru[celery,sqlalchemy]" fastapi uvicorn``,
+then run with ``python examples/full_stack_fastapi/main.py``.
+"""
 
 from __future__ import annotations
 
@@ -34,8 +38,9 @@ SessionLocal = sessionmaker(bind=engine)
 # Add SQLAlchemy logging
 setup_query_logging(engine, slow_threshold_ms=10)
 
-# 3. Celery setup
+# 3. Celery setup (eager tasks keep the demo self-contained)
 celery_app = Celery("tasks", broker="memory://")
+celery_app.conf.update(task_always_eager=True)
 setup_celery_logging(propagate_context=True, context_keys=["request_id"])
 
 

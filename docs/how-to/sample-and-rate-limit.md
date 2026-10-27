@@ -54,8 +54,9 @@ period in seconds; `sample_max_level` has no environment variable. See
 ## Check what was dropped
 
 ```python
-from structguru import writer_metrics
+from structguru import configure, writer_metrics
 
+configure(sample_rate=0.5)
 metrics = writer_metrics()
 print(metrics["sampled"], metrics["rate_limited"])
 ```

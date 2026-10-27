@@ -19,7 +19,7 @@ import sentry_sdk
 from structguru import configure
 from structguru.integrations.sentry import SentryProcessor
 
-sentry_sdk.init(dsn="https://<key>@<org>.ingest.sentry.io/<project>")
+sentry_sdk.init(dsn="https://examplePublicKey@o0.ingest.sentry.io/0")
 
 configure(
     service="checkout",
@@ -95,7 +95,7 @@ import sentry_sdk
 from sentry_sdk.integrations.logging import LoggingIntegration
 
 sentry_sdk.init(
-    dsn="https://<key>@<org>.ingest.sentry.io/<project>",
+    dsn="https://examplePublicKey@o0.ingest.sentry.io/0",
     integrations=[LoggingIntegration(level=None, event_level=None)],
 )
 ```
