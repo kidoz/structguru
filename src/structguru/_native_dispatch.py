@@ -15,8 +15,16 @@ from contextlib import contextmanager
 from typing import Any, Protocol, cast
 
 
+class SubmissionLeaseProtocol(Protocol):
+    """A native submission lease that can be closed idempotently."""
+
+    def close(self) -> None: ...
+
+
 class CallableDispatcherProtocol(Protocol):
     """Methods of the native ``CallableDispatcher`` used by the runtime."""
+
+    def _begin_submission(self) -> SubmissionLeaseProtocol: ...
 
     def add(
         self,

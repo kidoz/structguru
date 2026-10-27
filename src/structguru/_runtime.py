@@ -16,7 +16,6 @@ import os
 import select
 import sys
 import threading
-import time
 import traceback
 import warnings
 from collections.abc import Callable
@@ -25,7 +24,11 @@ from types import TracebackType
 from typing import Any, Protocol, TypedDict, Unpack, cast
 
 from structguru._levels import METHOD_LEVELS
-from structguru._native_dispatch import CallableDispatcherProtocol, new_dispatcher
+from structguru._native_dispatch import (
+    CallableDispatcherProtocol,
+    SubmissionLeaseProtocol,
+    new_dispatcher,
+)
 from structguru._native_env import autoconfigure_from_env
 from structguru.settings import _MAX_LEVELNO, Settings, SettingsChanges, _level_number
 
@@ -254,12 +257,6 @@ _CALLABLE_STALL_TIMEOUT = 10.0
 _drop_lock = threading.Lock()
 _lifecycle_rejected = 0
 
-_submission_lock = threading.Lock()
-_submission_condition = threading.Condition(_submission_lock)
-_submission_next = 0
-_submission_active: set[int] = set()
-_submission_local = threading.local()
-
 
 def _ensure_process() -> None:
     if _runtime_pid != os.getpid():
@@ -296,53 +293,18 @@ def _close_retired_writer(writer: _NativeWriter) -> None:
         _untrack_writer(writer)
 
 
-def _begin_submission() -> int:
-    global _submission_next
-    with _submission_condition:
-        lease_id = _submission_next
-        _submission_next += 1
-        _submission_active.add(lease_id)
-    active = getattr(_submission_local, "active", None)
-    if active is None:
-        active = _submission_local.active = set()
-    active.add(lease_id)
-    return lease_id
+def _begin_submission() -> SubmissionLeaseProtocol:
+    return _callable_dispatcher._begin_submission()
 
 
-def _end_submission(lease_id: int) -> None:
-    active = getattr(_submission_local, "active", None)
-    if active is not None:
-        active.discard(lease_id)
-    with _submission_condition:
-        if lease_id in _submission_active:
-            _submission_active.discard(lease_id)
-            _submission_condition.notify_all()
+def _end_submission(lease: SubmissionLeaseProtocol) -> None:
+    lease.close()
 
 
 def _wait_for_submissions(timeout: float) -> int:
     dispatcher = _callable_dispatcher
-    native_target = dispatcher._submission_barrier()
-    with _submission_condition:
-        target = _submission_next
-        own: set[int] = getattr(_submission_local, "active", set())
-
-        def pending() -> list[int]:
-            return [item for item in _submission_active if item < target and item not in own]
-
-        remaining = pending()
-        previous = len(remaining)
-        deadline = time.monotonic() + timeout
-        while remaining:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                break
-            _submission_condition.wait(left)
-            remaining = pending()
-            if len(remaining) < previous:
-                previous = len(remaining)
-                deadline = time.monotonic() + timeout
-        stalled = len(remaining)
-    return stalled + dispatcher._wait_submissions(native_target, timeout)
+    target = dispatcher._submission_barrier()
+    return dispatcher._wait_submissions(target, timeout)
 
 
 def current_runtime() -> _RuntimeState | None:
@@ -997,25 +959,15 @@ def _before_fork() -> None:
 def _after_in_child() -> None:
     """Respawn the writer in the child: its worker thread did not survive fork."""
     global _runtime, _state_lock, _drop_lock, _lifecycle_rejected, _callable_dispatcher
-    global _lifecycle_generation, _submission_lock, _submission_condition
-    global _submission_next, _submission_active, _submission_local
-    global _runtime_pid, _retiring_writers
+    global _lifecycle_generation, _runtime_pid, _retiring_writers
     if _runtime_pid == os.getpid():
         return
     state = _runtime
-    # The forking thread resumes inside any submission it already owns.
-    # Other threads' leases disappear, but these must still block child flushers.
-    surviving_leases = set(getattr(_submission_local, "active", ()))
     # No other Python thread survives fork. Replace inherited synchronization
     # objects before touching state that may have been locked by a vanished thread.
+    # The native dispatcher preserves only this thread's surviving leases.
     _state_lock = threading.Lock()
     _drop_lock = threading.Lock()
-    _submission_lock = threading.Lock()
-    _submission_condition = threading.Condition(_submission_lock)
-    _submission_next = max(surviving_leases, default=-1) + 1
-    _submission_active = surviving_leases.copy()
-    _submission_local = threading.local()
-    _submission_local.active = surviving_leases
     _lifecycle_rejected = 0
     for retiring in _retiring_writers:
         retiring.abandon()

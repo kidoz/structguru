@@ -888,7 +888,7 @@ struct DispatcherInner {
     fork_finalizers: Mutex<Vec<Py<PyAny>>>,
     fail_spawn: AtomicBool,
     replacement_gate: AtomicU8,
-    submissions: crate::submission::Submissions,
+    submissions: Arc<crate::submission::Submissions>,
     registry: Mutex<Registry>,
     /// Set while a generation is active; read lock-free on the hot path.
     active: AtomicBool,
@@ -1156,6 +1156,7 @@ impl CallableDispatcher {
         next_token: i64,
         maxsize: usize,
         counters: (u64, u64),
+        submissions: Arc<crate::submission::Submissions>,
     ) -> Self {
         let registry = Registry {
             retired_snapshots: Vec::new(),
@@ -1175,7 +1176,7 @@ impl CallableDispatcher {
             fork_finalizers: Mutex::new(Vec::new()),
             fail_spawn: AtomicBool::new(false),
             replacement_gate: AtomicU8::new(0),
-            submissions: crate::submission::Submissions::default(),
+            submissions,
             registry: Mutex::new(registry),
             active: AtomicBool::new(false),
             dropped: AtomicU64::new(dropped),
@@ -1187,16 +1188,18 @@ impl CallableDispatcher {
         inner.publish(py, &mut inner.lock_registry());
         Self { inner }
     }
-}
 
-impl CallableDispatcher {
-    pub(crate) fn begin_submission(&self) -> crate::submission::Submission<'_> {
+    pub(crate) fn begin_submission(&self) -> crate::submission::Submission {
         self.inner.submissions.begin()
     }
 }
 
 #[pymethods]
 impl CallableDispatcher {
+    fn _begin_submission(&self) -> crate::submission::SubmissionLease {
+        crate::submission::SubmissionLease::new(self.begin_submission())
+    }
+
     fn _submission_barrier(&self) -> u64 {
         self.inner.submissions.barrier()
     }
@@ -1224,7 +1227,7 @@ impl CallableDispatcher {
 
     #[new]
     fn new(py: Python<'_>) -> Self {
-        Self::from_parts(py, Vec::new(), Vec::new(), 1, 1024, (0, 0))
+        Self::from_parts(py, Vec::new(), Vec::new(), 1, 1024, (0, 0), Arc::default())
     }
 
     /// Register a runtime sink, starting dispatch when logging is enabled.
@@ -1483,7 +1486,13 @@ impl CallableDispatcher {
     /// raw stdlib delivery, bypass callable delivery. They still reach the
     /// native writer, but cannot recursively feed or block their own worker.
     #[pyo3(signature = (line, level, *, overflow))]
-    fn enqueue(&self, py: Python<'_>, line: String, level: i64, overflow: &str) -> PyResult<bool> {
+    pub(crate) fn enqueue(
+        &self,
+        py: Python<'_>,
+        line: String,
+        level: i64,
+        overflow: &str,
+    ) -> PyResult<bool> {
         if in_callback() {
             return Ok(true);
         }
@@ -1602,6 +1611,7 @@ impl CallableDispatcher {
             Arc::from_raw(pointer)
         };
         self.inner.snapshot_readers.fetch_sub(1, Ordering::SeqCst);
+        self.inner.submissions.fork_child();
         let child = Self::from_parts(
             py,
             snapshot
@@ -1616,6 +1626,7 @@ impl CallableDispatcher {
                 self.inner.dropped.load(Ordering::Acquire),
                 self.inner.errors.load(Ordering::Acquire),
             ),
+            Arc::clone(&self.inner.submissions),
         );
         {
             let mut registry = child.inner.lock_registry();
