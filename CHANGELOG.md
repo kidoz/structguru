@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Raise Rust dependency version requirements to the latest stable releases;
+  the lockfile already resolves to these versions.
+
 ## [1.7.1] - 2026-10-27
 
 ### Added
