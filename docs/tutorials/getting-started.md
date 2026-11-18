@@ -30,7 +30,7 @@ python -c "import structguru; print(structguru.__version__)"
 You should see the version number:
 
 ```text
-1.7.1
+1.7.2
 ```
 
 ## Write your first log line
