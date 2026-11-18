@@ -15,6 +15,7 @@ import pytest
 
 import structguru
 from structguru import _runtime
+from structguru.redaction import REDACTED_MARKER_KEY
 
 pytestmark = pytest.mark.skipif(
     not _runtime.is_available(),
@@ -170,7 +171,6 @@ def test_non_callable_sentry_processor_raises() -> None:
 def test_sentry_hook_injects_redaction_marker_when_redaction_configured() -> None:
     """When sensitive_keys are set, the hook injects REDACTED_MARKER_KEY so
     SentryProcessor's require_redaction guard recognizes native redaction."""
-    from structguru.redaction import REDACTED_MARKER_KEY
 
     captured: list[dict[str, Any]] = []
 
@@ -359,6 +359,19 @@ def test_event_field_does_not_replace_sentry_message() -> None:
     rendered = json.loads(lines[0])
     assert rendered["message"] == "actual message"
     assert rendered["event"] == "custom field"
+
+
+def test_sentry_event_matches_rendered_fields_and_stack() -> None:
+    hook = MagicMock()
+    _runtime.configure(target="memory", sentry_processor=hook, sensitive_patterns=["internal"])
+    structguru.logger.info("job", stack_info="internal frame", internal_id=7)
+    [line] = _drain_all()
+    expected = json.loads(line)
+    expected["event"] = expected.pop("message")
+    expected[REDACTED_MARKER_KEY] = True
+    assert expected["stack"] == "[REDACTED] frame"
+    assert expected["[REDACTED]_id"] == 7
+    assert hook.call_args.args[2] == expected
 
 
 def test_raw_capture_opt_in_attribute_failure_cannot_break_logging() -> None:

@@ -982,7 +982,6 @@ class Logger:
         # structlog's merge_contextvars setdefault semantics; the writer merges.
         bound = self._bound if _bound_fields is None else _bound_fields
         contextvars = _ctx.get()
-        field_names: tuple[str, ...] = ()
         if runtime.enrich:
             fields = _runtime.merge_fields(bound, kwargs, contextvars)
             if runtime.otel:
@@ -990,7 +989,6 @@ class Logger:
             if exception is not None:
                 fields["exception"] = exception
             _runtime.notify_metrics(method, formatted_msg, fields, runtime)
-            field_names = tuple(fields)
             bound, kwargs, contextvars, exception = fields, _NO_FIELDS, _NO_FIELDS, None
         _runtime.render_and_enqueue(
             runtime,
@@ -1004,7 +1002,6 @@ class Logger:
             stack,
             created,
             level_number,
-            field_names,
             exc_info,
         )
 

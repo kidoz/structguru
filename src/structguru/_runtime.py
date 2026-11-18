@@ -413,7 +413,6 @@ def notify_metrics(
 def notify_sentry(
     method: str,
     redacted_line: str,
-    field_names: tuple[str, ...],
     exc_info: Any = None,
     runtime: _RuntimeState | None = None,
 ) -> None:
@@ -433,12 +432,11 @@ def notify_sentry(
         rendered = json.loads(redacted_line)
     except (json.JSONDecodeError, TypeError):
         return
-    event_dict: dict[str, Any] = {"event": rendered.get("message", "")}
-    for key in (*field_names, "service", "logger", "level", "severity", "timestamp"):
-        # "event" is the hook's message slot. A user field by that name renders
-        # natively as a field but must not replace the message exported here.
-        if key != "event" and key in rendered:
-            event_dict[key] = rendered[key]
+    # Reuse the sanitized record, including renderer-added and renamed keys.
+    # Only the exception control below may supply exc_info to a processor.
+    event_dict: dict[str, Any] = rendered
+    event_dict["event"] = event_dict.pop("message", "")
+    event_dict.pop("exc_info", None)
     from structguru.redaction import REDACTED_MARKER_KEY
 
     event_dict[REDACTED_MARKER_KEY] = True
@@ -1082,7 +1080,6 @@ def render_and_enqueue(
     stack: str | None,
     created: float | None = None,
     levelno: int | None = None,
-    field_names: tuple[str, ...] = (),
     exc_info: Any = None,
 ) -> None:
     """Merge, render, and submit one record to every configured destination.
@@ -1160,7 +1157,6 @@ def render_and_enqueue(
             notify_sentry(
                 level,
                 sentry_line,
-                field_names,
                 exc_info=exc_info,
                 runtime=runtime,
             )

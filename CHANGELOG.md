@@ -23,6 +23,7 @@ All notable changes to this project are documented here. The format is based on
 
 - Preserve Flask request IDs, summaries, and enclosing context during nested requests.
 - Contain and count sink failures during synchronous stdlib root delivery.
+- Forward rendered stack information and pattern-redacted field names to Sentry.
 
 ## [1.7.1] - 2026-10-27
 

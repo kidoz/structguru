@@ -41,7 +41,7 @@ are suppressed.
 | Key | Value |
 |---|---|
 | `event` | The redacted message. |
-| each field of the record | The redacted value, including `exception` text or object and OpenTelemetry fields. A field named `event` does not replace the message. |
+| each field of the record | The redacted value, including `stack`, `exception`, and OpenTelemetry fields. Pattern-redacted keys retain their rendered names. A field named `event` does not replace the message. |
 | `service`, `logger`, `level`, `severity`, `timestamp` | As rendered. |
 | `exc_info` | A boolean exception-presence marker; original exception information only when the hook explicitly sets `capture_raw_exceptions=True`. |
 | `_structguru_redacted` | `True` (`REDACTED_MARKER_KEY`). |
