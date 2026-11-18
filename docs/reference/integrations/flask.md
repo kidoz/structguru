@@ -24,8 +24,11 @@ setup_flask_logging(app, request_id_header="X-Request-ID")
 |---|---|---|
 | `before_request` | First application-level hook, also ahead of hooks registered earlier | Clears the context and binds the context fields. |
 | `after_request` | Registered at setup | Sets the response header; wraps a streamed body. |
-| `teardown_request` | Runs after every other application-level teardown hook | Logs a summary if none was logged; clears the context. |
+| `teardown_request` | Runs after every other application-level teardown hook | Logs any pending non-streamed summary and restores the enclosing context. |
 | `request_finished` signal | Connected for this application (Flask 2.3+, or earlier with blinker) | Logs the summary of a non-streamed response. |
+
+Nested requests have separate IDs and summaries. When an inner request ends,
+the outer request resumes with its bound fields.
 
 Context bound by later `before_request` hooks is kept for the rest of the
 request. A `before_request` hook that ends the request early (a `401`, a

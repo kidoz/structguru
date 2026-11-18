@@ -18,7 +18,12 @@ from typing import Any
 
 from structguru._contextvars import bind_contextvars, clear_contextvars, get_contextvars
 from structguru.core import Logger
-from structguru.integrations._util import ContextBoundIterator, StreamState, coerce_request_id
+from structguru.integrations._util import (
+    ContextBoundIterator,
+    StreamState,
+    coerce_request_id,
+    replace_contextvars,
+)
 
 
 def setup_flask_logging(
@@ -46,8 +51,8 @@ def setup_flask_logging(
     The binding hook runs before every other application ``before_request``
     hook, including ones registered earlier, so a hook that ends the request
     early (an authentication 401) still gets a request ID, a response header,
-    and a summary line, and context those hooks bind is kept. The context is
-    cleared after every other application ``teardown_request`` hook has run.
+    and a summary line, and context those hooks bind is kept. The enclosing context is
+    restored after every other application ``teardown_request`` hook has run.
 
     A streamed response body (a generator, with or without
     ``flask.stream_with_context``) is produced with the request context
@@ -67,13 +72,11 @@ def setup_flask_logging(
     log = Logger(name=logger_name)
 
     def _bind_request_context() -> None:
-        from flask import g, request
-
-        clear_contextvars()
+        from flask import request
 
         request_id = coerce_request_id(request.headers.get(request_id_header, ""))
-        g.structguru_summary = _Summary(time.perf_counter())
-        g.structguru_request_id = request_id
+        request.environ["structguru.summary"] = _Summary(request_id, get_contextvars())
+        clear_contextvars()
 
         bind_contextvars(
             request_id=request_id,
@@ -101,9 +104,9 @@ def setup_flask_logging(
                 _log_summary(log, summary.start_time, status_code, None)
 
     def _on_request_finished(sender: Any, response: Any, **extra: Any) -> None:
-        from flask import g
+        from flask import request
 
-        summary: _Summary | None = getattr(g, "structguru_summary", None)
+        summary: _Summary | None = request.environ.get("structguru.summary")
         if summary is not None:
             _finalize(summary, response.status_code)
 
@@ -120,14 +123,14 @@ def setup_flask_logging(
 
     @app.after_request  # type: ignore[untyped-decorator]
     def _log_response(response: Any) -> Any:
-        from flask import g
+        from flask import request
         from werkzeug.wsgi import ClosingIterator
 
-        request_id = getattr(g, "structguru_request_id", None)
-        if request_id:
-            response.headers[request_id_header] = request_id
-        summary: _Summary | None = getattr(g, "structguru_summary", None)
-        if summary is None or summary.finished:
+        summary: _Summary | None = request.environ.get("structguru.summary")
+        if summary is None:
+            return response
+        response.headers[request_id_header] = summary.request_id
+        if summary.finished:
             return response
         # When a later after_request hook fails, Flask processes a 500 response
         # instead and runs this hook again: the new response supersedes this
@@ -161,11 +164,14 @@ def setup_flask_logging(
         return response
 
     def _clear_context(exc: BaseException | None = None) -> None:
-        from flask import g
+        from flask import request
 
+        # Flask can tear down a preserved or streamed request more than once.
+        summary: _Summary | None = request.environ.pop("structguru.summary", None)
+        if summary is None:
+            return
         try:
-            summary: _Summary | None = getattr(g, "structguru_summary", None)
-            if summary is not None and not summary.finished and not summary.logged:
+            if not summary.finished and not summary.logged:
                 # No response was finalized: the exception propagated past
                 # Flask (PROPAGATE_EXCEPTIONS, testing, debug) and the server
                 # answers, or finalizing the error response failed too.
@@ -173,7 +179,7 @@ def setup_flask_logging(
                 if log_request:
                     _log_summary(log, summary.start_time, 500 if exc is not None else None, exc)
         finally:
-            clear_contextvars()
+            replace_contextvars(summary.outer_context)
 
     # Teardown hooks run in reverse registration order: at the front of the
     # list, the clearing hook runs after every other application teardown hook,
@@ -185,18 +191,14 @@ def setup_flask_logging(
 
 
 class _Summary:
-    """Per-request summary state: exactly one summary line per request.
+    """State owned by one request until its final response and teardown."""
 
-    Parameters
-    ----------
-    start_time:
-        ``time.perf_counter()`` value taken when the request started.
-    """
+    __slots__ = ("finished", "logged", "outer_context", "request_id", "start_time", "stream")
 
-    __slots__ = ("finished", "logged", "start_time", "stream")
-
-    def __init__(self, start_time: float) -> None:
-        self.start_time = start_time
+    def __init__(self, request_id: str, outer_context: dict[str, Any]) -> None:
+        self.start_time = time.perf_counter()
+        self.request_id = request_id
+        self.outer_context = outer_context
         #: The current response's streamed body, which logs its own summary.
         self.stream: StreamState | None = None
         #: Flask finalized a response (``request_finished`` or its fallback).

@@ -19,6 +19,10 @@ All notable changes to this project are documented here. The format is based on
   with escaped representations.
 - Apply the worker's Celery context key selection to incoming task headers.
 
+### Fixed
+
+- Preserve Flask request IDs, summaries, and enclosing context during nested requests.
+
 ## [1.7.1] - 2026-10-27
 
 ### Added

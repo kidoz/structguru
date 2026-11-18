@@ -146,6 +146,38 @@ def _records(buf: io.StringIO) -> list[dict[str, object]]:
     return [json.loads(line) for line in buf.getvalue().splitlines() if line.strip()]
 
 
+@pytest.mark.parametrize("inner_fails", [False, True])
+def test_nested_requests_restore_context_and_summarize_each_request(inner_fails: bool) -> None:
+    from structguru._contextvars import bound_contextvars
+
+    buf = io.StringIO()
+    configure(service="test", stream=buf)
+    app = _build_app()
+
+    @app.route("/outer")
+    def outer() -> str:
+        with bound_contextvars(user_id=17):
+            before = get_contextvars()
+            client = app.test_client()
+            if inner_fails:
+                with pytest.raises(RuntimeError, match="boom"):
+                    client.get("/boom", headers={"X-Request-ID": "inner"})
+            else:
+                response = client.get("/ping", headers={"X-Request-ID": "inner"})
+                assert response.headers["X-Request-ID"] == "inner"
+            assert get_contextvars() == before
+        return "done"
+
+    with bound_contextvars(caller="retained"):
+        response = app.test_client().get("/outer", headers={"X-Request-ID": "outer"})
+        assert get_contextvars() == {"caller": "retained"}
+    assert response.headers["X-Request-ID"] == "outer"
+    inner, outer_summary = _records(buf)
+    assert (inner["request_id"], inner["status_code"]) == ("inner", 500 if inner_fails else 200)
+    assert (outer_summary["request_id"], outer_summary["path"]) == ("outer", "/outer")
+    assert "user_id" not in inner and "caller" not in outer_summary
+
+
 def _fake_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     from types import SimpleNamespace
 
