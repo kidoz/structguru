@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         # PyYAML has no cp315 wheel and its sdist build crashes the runners, so
@@ -58,7 +58,7 @@ jobs:
 
   lowest:
     name: lowest direct dependencies
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       UV_NO_SYNC: "1"
     steps:
@@ -112,7 +112,7 @@ jobs:
           --ignore=tests/test_integrations
 
   docs:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
@@ -127,7 +127,7 @@ jobs:
         run: uv run --no-sync mkdocs build --strict
 
   rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -152,7 +152,7 @@ jobs:
   # for release day to learn about a vulnerable dependency is too late — run the
   # same audit on every pull request.
   supply-chain:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
@@ -170,7 +170,7 @@ jobs:
         run: cargo deny --locked check advisories bans licenses sources
 
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -183,7 +183,7 @@ jobs:
         run: cargo check --workspace
 
   bench:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
@@ -199,7 +199,7 @@ jobs:
         run: make install && make bench
 
   bench-free-threaded:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version: ["3.14t", "3.15t"]

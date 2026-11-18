@@ -29,7 +29,7 @@ permissions:
 jobs:
   metadata:
     name: Validate release metadata
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -71,7 +71,7 @@ jobs:
   release-python:
     name: release gate Python ${{ matrix.python-version }}
     needs: metadata
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         # PyYAML has no cp315 wheel and its sdist build crashes the runners, so
@@ -108,7 +108,7 @@ jobs:
   release-lowest:
     name: release gate lowest direct dependencies
     needs: metadata
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       UV_NO_SYNC: "1"
     steps:
@@ -164,7 +164,7 @@ jobs:
   release-free-threaded:
     name: release gate free-threaded Python ${{ matrix.python-version }}
     needs: metadata
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version: ["3.14t", "3.15t"]
@@ -194,7 +194,7 @@ jobs:
   release-rust:
     name: release gate Rust
     needs: metadata
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -216,7 +216,7 @@ jobs:
   release-msrv:
     name: release gate Rust 1.89 MSRV
     needs: metadata
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -231,7 +231,7 @@ jobs:
   supply-chain:
     name: dependency audit and SBOMs
     needs: metadata
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -266,10 +266,10 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { runner: ubuntu-latest,     os: linux,    target: x86_64,  manylinux: auto }
+          - { runner: ubuntu-24.04,     os: linux,    target: x86_64,  manylinux: auto }
           - { runner: ubuntu-24.04-arm,  os: linux,    target: aarch64, manylinux: auto }
-          - { runner: ubuntu-latest,     os: musllinux, target: x86_64,  manylinux: musllinux_1_2 }
-          - { runner: ubuntu-latest,     os: musllinux, target: aarch64, manylinux: musllinux_1_2 }
+          - { runner: ubuntu-24.04,     os: musllinux, target: x86_64,  manylinux: musllinux_1_2 }
+          - { runner: ubuntu-24.04,     os: musllinux, target: aarch64, manylinux: musllinux_1_2 }
           - { runner: macos-15,          os: macos,    target: aarch64, manylinux: auto }
           - { runner: macos-15-intel,    os: macos,    target: x86_64,  manylinux: auto }
           - { runner: windows-latest,    os: windows,  target: x64,     manylinux: auto }
@@ -292,7 +292,7 @@ jobs:
   audit-wheels:
     name: audit abi3 wheels from locked environment
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
@@ -317,13 +317,13 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { runner: ubuntu-latest,    os: linux,     target: x86_64 }
+          - { runner: ubuntu-24.04,    os: linux,     target: x86_64 }
           - { runner: ubuntu-24.04-arm, os: linux,     target: aarch64 }
           - { runner: macos-15,         os: macos,     target: aarch64 }
           - { runner: macos-15-intel,   os: macos,     target: x86_64 }
           - { runner: windows-latest,   os: windows,   target: x64 }
-          - { runner: ubuntu-latest,    os: musllinux, target: x86_64,  container-platform: linux/amd64 }
-          - { runner: ubuntu-latest,    os: musllinux, target: aarch64, container-platform: linux/arm64 }
+          - { runner: ubuntu-24.04,    os: musllinux, target: x86_64,  container-platform: linux/amd64 }
+          - { runner: ubuntu-24.04,    os: musllinux, target: aarch64, container-platform: linux/arm64 }
     env:
       ALPINE_IMAGE: alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f
     steps:
@@ -377,8 +377,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { runner: ubuntu-latest,  os: linux,   target: x86_64,  manylinux: auto, ft-python: "3.14t", ft-linux-interpreter: "/opt/python/cp314-cp314t/bin/python" }
-          - { runner: ubuntu-latest,  os: linux,   target: x86_64,  manylinux: auto, ft-python: "3.15t", ft-linux-interpreter: "/opt/python/cp315-cp315t/bin/python" }
+          - { runner: ubuntu-24.04,  os: linux,   target: x86_64,  manylinux: auto, ft-python: "3.14t", ft-linux-interpreter: "/opt/python/cp314-cp314t/bin/python" }
+          - { runner: ubuntu-24.04,  os: linux,   target: x86_64,  manylinux: auto, ft-python: "3.15t", ft-linux-interpreter: "/opt/python/cp315-cp315t/bin/python" }
           - { runner: macos-15,       os: macos,   target: aarch64, manylinux: auto, ft-python: "3.14t" }
           - { runner: macos-15,       os: macos,   target: aarch64, manylinux: auto, ft-python: "3.15t" }
           - { runner: windows-latest, os: windows, target: x64,     manylinux: auto, ft-python: "3.14t" }
@@ -417,7 +417,7 @@ jobs:
 
   sdist:
     needs: metadata
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -446,7 +446,7 @@ jobs:
     name: Publish to PyPI
     needs: [release-python, release-lowest, release-free-threaded, release-rust, release-msrv, build, audit-wheels, runtime-smoke, build-free-threaded, sdist, supply-chain]
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: pypi
     permissions:
       id-token: write # OIDC for Trusted Publishing
@@ -475,7 +475,7 @@ jobs:
     # publish must be excluded explicitly or this job still creates the release.
     needs: [publish, supply-chain]
     if: startsWith(github.ref, 'refs/tags/v') && needs.publish.result == 'success' && needs.supply-chain.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write # create the release and upload its assets
     steps:
