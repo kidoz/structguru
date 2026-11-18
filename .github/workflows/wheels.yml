@@ -270,7 +270,7 @@ jobs:
           - { runner: ubuntu-24.04-arm,  os: linux,    target: aarch64, manylinux: auto }
           - { runner: ubuntu-latest,     os: musllinux, target: x86_64,  manylinux: musllinux_1_2 }
           - { runner: ubuntu-latest,     os: musllinux, target: aarch64, manylinux: musllinux_1_2 }
-          - { runner: macos-14,          os: macos,    target: aarch64, manylinux: auto }
+          - { runner: macos-15,          os: macos,    target: aarch64, manylinux: auto }
           - { runner: macos-15-intel,    os: macos,    target: x86_64,  manylinux: auto }
           - { runner: windows-latest,    os: windows,  target: x64,     manylinux: auto }
     steps:
@@ -319,7 +319,7 @@ jobs:
         platform:
           - { runner: ubuntu-latest,    os: linux,     target: x86_64 }
           - { runner: ubuntu-24.04-arm, os: linux,     target: aarch64 }
-          - { runner: macos-14,         os: macos,     target: aarch64 }
+          - { runner: macos-15,         os: macos,     target: aarch64 }
           - { runner: macos-15-intel,   os: macos,     target: x86_64 }
           - { runner: windows-latest,   os: windows,   target: x64 }
           - { runner: ubuntu-latest,    os: musllinux, target: x86_64,  container-platform: linux/amd64 }
@@ -379,8 +379,8 @@ jobs:
         platform:
           - { runner: ubuntu-latest,  os: linux,   target: x86_64,  manylinux: auto, ft-python: "3.14t", ft-linux-interpreter: "/opt/python/cp314-cp314t/bin/python" }
           - { runner: ubuntu-latest,  os: linux,   target: x86_64,  manylinux: auto, ft-python: "3.15t", ft-linux-interpreter: "/opt/python/cp315-cp315t/bin/python" }
-          - { runner: macos-14,       os: macos,   target: aarch64, manylinux: auto, ft-python: "3.14t" }
-          - { runner: macos-14,       os: macos,   target: aarch64, manylinux: auto, ft-python: "3.15t" }
+          - { runner: macos-15,       os: macos,   target: aarch64, manylinux: auto, ft-python: "3.14t" }
+          - { runner: macos-15,       os: macos,   target: aarch64, manylinux: auto, ft-python: "3.15t" }
           - { runner: windows-latest, os: windows, target: x64,     manylinux: auto, ft-python: "3.14t" }
           - { runner: windows-latest, os: windows, target: x64,     manylinux: auto, ft-python: "3.15t" }
     steps:
