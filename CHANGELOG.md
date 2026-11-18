@@ -10,6 +10,8 @@ All notable changes to this project are documented here. The format is based on
 
 - Raise Rust dependency version requirements to the latest stable releases and
   refresh the lockfile.
+- Raise the Python dependency version requirements and the maturin build
+  requirement to the latest stable releases and refresh the lockfile.
 
 ## [1.7.1] - 2026-10-27
 
