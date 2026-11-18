@@ -259,6 +259,28 @@ class _RedactingFormatter(string.Formatter):
         super().__init__()
         self._sensitive = sensitive
 
+    if sys.version_info < (3, 14):
+        # Older string.Formatter versions only auto-number a completely empty
+        # field. str.format also numbers the implicit root of "{[key]}".
+        _auto_index: int | None = 0
+
+        def parse(
+            self, format_string: str
+        ) -> Iterator[tuple[str, str | None, str | None, str | None]]:
+            for literal, field_name, spec, conversion in super().parse(format_string):
+                if field_name is not None:
+                    root, _ = _field_path(field_name)
+                    if not root:
+                        if self._auto_index is None:
+                            raise ValueError("cannot mix automatic and manual field numbering")
+                        field_name = str(self._auto_index) + field_name
+                        self._auto_index += 1
+                    elif root.isdecimal():
+                        if self._auto_index:
+                            raise ValueError("cannot mix automatic and manual field numbering")
+                        self._auto_index = None
+                yield literal, field_name, spec, conversion
+
     def get_field(self, field_name: str, args: Sequence[Any], kwargs: Mapping[str, Any]) -> Any:
         root, path = _field_path(field_name)
         if any(name.lower() in self._sensitive for name in (root, *path)):
@@ -281,35 +303,6 @@ class _RedactingFormatter(string.Formatter):
                     return rendered.encode("ascii", "backslashreplace").decode("ascii")
                 return rendered
         return super().convert_field(value, conversion)
-
-
-def _may_expose_nested_secret(
-    text: str,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    consumed: frozenset[str],
-    has_path: bool,
-    sensitive: frozenset[str],
-) -> bool:
-    """True when plain formatting may have exposed a value under a sensitive key.
-
-    Only a non-scalar argument, or an object reached by attribute or index,
-    can carry a nested key, and its text then names that key. Scalar-only
-    calls cost one type lookup per argument; the text is scanned only after.
-    """
-    if not has_path:
-        for value in args:
-            if type(value) not in _SCALAR_TYPES:
-                break
-        else:
-            for name in consumed:
-                if type(kwargs.get(name)) not in _SCALAR_TYPES:
-                    break
-            else:
-                return False
-    # A case-insensitive regex alternation is several times slower than this.
-    lowered = text.lower()
-    return any(key in lowered for key in sensitive)
 
 
 def _safe_format(
@@ -364,15 +357,16 @@ def _safe_format(
     consumed, names, names_default_key, has_path = template
     try:
         redact = names_default_key if keys is None else not names.isdisjoint(sensitive)
-        if not redact:
-            text = msg.format(*args, **kwargs)
-            if not sensitive or not _may_expose_nested_secret(
-                text, args, kwargs, consumed, has_path, sensitive
-            ):
-                return text, consumed
-        # The pure-Python formatter is several times slower than str.format,
-        # so it only re-renders a template whose plain text could hold a secret.
-        return _RedactingFormatter(sensitive).vformat(msg, args, kwargs), consumed
+        # Container keys can be escaped or aliased in repr. Choose the structural
+        # formatter before rendering any argument, using only its type and path.
+        if sensitive and (
+            redact
+            or has_path
+            or any(type(value) not in _SCALAR_TYPES for value in args)
+            or any(type(kwargs.get(name)) not in _SCALAR_TYPES for name in consumed)
+        ):
+            return _RedactingFormatter(sensitive).vformat(msg, args, kwargs), consumed
+        return msg.format(*args, **kwargs), consumed
     except Exception as exc:  # noqa: BLE001 - user __format__/__str__ may raise anything
         # Template/arg mismatch or a failing argument conversion from user
         # code (missing key, bad attribute, raising __format__, etc.).

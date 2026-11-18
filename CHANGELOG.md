@@ -13,6 +13,11 @@ All notable changes to this project are documented here. The format is based on
 - Raise the Python dependency version requirements and the maturin build
   requirement to the latest stable releases and refresh the lockfile.
 
+### Security
+
+- Check container keys before interpolating message placeholders, including keys
+  with escaped representations.
+
 ## [1.7.1] - 2026-10-27
 
 ### Added

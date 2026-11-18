@@ -1224,6 +1224,16 @@ class TestPlaceholderRedaction:
         expected = f"{{'user': 'alice'}} {wide} alice 3"
         assert _memory_records()[-1]["message"] == expected
 
+    def test_implicit_positional_paths_keep_automatic_numbering(self) -> None:
+        _runtime.configure(target="memory")
+        Logger().info("{[name]} {:{[width]}}", {"name": "ok"}, 7, {"width": 3})
+        assert _memory_records()[-1]["message"] == "ok   7"
+
+    def test_ascii_conversion_checks_original_container_keys(self) -> None:
+        _runtime.configure(target="memory", sensitive_keys=["clé"])
+        Logger().info("{data!a}", data={"clé": "private", "status": "ok"})
+        assert _memory_records()[-1]["message"] == r"{'cl\xe9': [REDACTED], 'status': 'ok'}"
+
     def test_container_redaction_follows_configured_keys(self) -> None:
         _runtime.configure(target="memory", sensitive_keys=["PIN"])
         Logger().info("{}", {"pin": "CANARY", "password": "shown"})

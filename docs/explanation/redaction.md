@@ -197,9 +197,9 @@ redaction:
   namespace, renders with the values under sensitive keys redacted, as
   exception locals do.
 
-The redacting formatter is several times slower than `str.format`, so it runs
-only when a template names a sensitive key or when the plainly formatted text
-could contain one. The protection has limits. An object with its own
+The formatter checks container keys before interpolating their values. This
+also covers keys that an ASCII conversion or a bytes representation escapes.
+Scalar placeholders keep their fast path. An object with its own
 `__str__` or `__format__` is formatted by its own code, and a plain string
 interpolated under a harmless name, such as `"{v}"` with
 `v="password=hunter2"`, is just text. Only `sensitive_patterns` see either of
