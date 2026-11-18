@@ -17,6 +17,7 @@ All notable changes to this project are documented here. The format is based on
 
 - Check container keys before interpolating message placeholders, including keys
   with escaped representations.
+- Apply the worker's Celery context key selection to incoming task headers.
 
 ## [1.7.1] - 2026-10-27
 

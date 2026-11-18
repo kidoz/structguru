@@ -16,7 +16,7 @@ setup_celery_logging(propagate_context=True, context_keys=["request_id"])
 | Parameter | Type | Default | Meaning |
 |---|---|---|---|
 | `propagate_context` | `bool` | `True` | Export the producer's context into a task header and bind it in the worker. |
-| `context_keys` | `Sequence[str] \| None` | `None` | Keys to propagate. `None` propagates every context key. A single `str` is treated as one key. |
+| `context_keys` | `Sequence[str] \| None` | `None` | Keys a producer exports and a worker accepts from incoming headers. `None` propagates every context key. A single `str` is treated as one key. |
 
 ## Setup rules
 

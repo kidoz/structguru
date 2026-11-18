@@ -304,7 +304,13 @@ def setup_celery_logging(
                     if isinstance(headers, dict):
                         ctx = headers.get(_HEADER_KEY)
                 if isinstance(ctx, dict):
-                    bind_contextvars(**{k: v for k, v in ctx.items() if isinstance(k, str)})
+                    bind_contextvars(
+                        **{
+                            k: v
+                            for k, v in ctx.items()
+                            if isinstance(k, str) and (selected_keys is None or k in selected_keys)
+                        }
+                    )
 
             # A producer may itself be a task. Its propagated identity must never
             # replace the consumer's identity; correlation fields still propagate.

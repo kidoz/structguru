@@ -109,8 +109,8 @@ def test_real_eager_tasks_restore_parent_and_caller_context(propagate: bool, fai
             before = get_contextvars()
             assert before.get('request_id') == ('caller-request' if {propagate} else None)
             try:
-                    child.apply(throw=True, headers={{
-                        'structguru_context': {{'request_id': 'child-request'}}}})
+                header = {{'request_id': 'child-request', 'private': 'omit'}}
+                child.apply(throw=True, headers={{'structguru_context': header}})
             except ValueError:
                 assert {fail}
             assert observed[-1]['task_id'] != before['task_id']
@@ -571,6 +571,21 @@ def test_worker_ignores_non_string_keys_in_propagated_context() -> None:
     assert result is None
     assert get_contextvars() == {"request_id": "r", "task_id": "t1", "task_name": "worker"}
     signals.task_postrun.send(sender=None)
+
+
+@pytest.mark.parametrize("keys", [[], ["request_id"]])
+def test_worker_applies_local_selection_to_remote_headers(keys: list[str]) -> None:
+    signals = _dispatch_signals(context_keys=keys)
+    header = {"request_id": "remote", "producer_only": "omit", "task_id": "producer"}
+    task = SimpleNamespace(name="worker", request={"structguru_context": header})
+    try:
+        signals.task_prerun.send(sender=None, task=task, task_id="worker-id")
+        expected = {"task_id": "worker-id", "task_name": "worker"}
+        if keys:
+            expected["request_id"] = "remote"
+        assert get_contextvars() == expected
+    finally:
+        signals.task_postrun.send(sender=None)
 
 
 def test_failed_setup_import_does_not_latch() -> None:
