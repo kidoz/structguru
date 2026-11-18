@@ -8,8 +8,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
-- Raise Rust dependency version requirements to the latest stable releases;
-  the lockfile already resolves to these versions.
+- Raise Rust dependency version requirements to the latest stable releases and
+  refresh the lockfile.
 
 ## [1.7.1] - 2026-10-27
 
