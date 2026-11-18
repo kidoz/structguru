@@ -22,6 +22,7 @@ All notable changes to this project are documented here. The format is based on
 ### Fixed
 
 - Preserve Flask request IDs, summaries, and enclosing context during nested requests.
+- Contain and count sink failures during synchronous stdlib root delivery.
 
 ## [1.7.1] - 2026-10-27
 

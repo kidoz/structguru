@@ -41,7 +41,7 @@ registered.
 | Key | Type | Meaning |
 |---|---|---|
 | `callable_dropped` | `int` | Deliveries discarded because the dispatch queue was full (`overflow="drop"`). |
-| `callable_errors` | `int` | Sink calls that raised. |
+| `callable_errors` | `int` | Sink calls that raised, including synchronous delivery through the stdlib root relay. |
 | `callable_depth` | `int` | Deliveries currently in the dispatch queue. |
 | `callable_maxsize` | `int` | Dispatch queue capacity (`Settings.callable_queue_maxsize`). |
 

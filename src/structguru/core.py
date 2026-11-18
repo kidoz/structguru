@@ -78,11 +78,7 @@ class _CallableHandler(logging.Handler):
         self._fn = fn
 
     def emit(self, record: logging.LogRecord) -> None:
-        try:
-            msg = self.format(record)
-            self._fn(msg)
-        except Exception:
-            self.handleError(record)
+        self._fn(self.format(record))
 
 
 class _SecureFileHandler(logging.FileHandler):
@@ -416,7 +412,11 @@ class _RootRelay(logging.Handler):
             self._active += 1
         try:
             with callback_scope():
-                return bool(self._sink.handle(record))
+                try:
+                    return bool(self._sink.handle(record))
+                except BaseException as exc:
+                    _runtime._callable_dispatcher.note_raw_error(exc)
+                    return False
         finally:
             with self._condition:
                 self._active -= 1

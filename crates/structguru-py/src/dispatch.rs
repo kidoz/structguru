@@ -1560,6 +1560,12 @@ impl CallableDispatcher {
         Ok(false)
     }
 
+    /// Account for a synchronous root-relay failure inside its callback scope.
+    fn note_raw_error(&self, py: Python<'_>, error: Bound<'_, pyo3::exceptions::PyBaseException>) {
+        self.inner
+            .note_error(py, &PyErr::from_value(error.into_any()));
+    }
+
     /// Return callable dispatch queue, drop, and error metrics.
     fn metrics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let registry = self.inner.lock_registry();

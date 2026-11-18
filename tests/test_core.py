@@ -1298,6 +1298,29 @@ class TestRemoveById:
         Logger().remove(kept_elsewhere)
 
 
+@pytest.mark.parametrize("as_handler", [True, False])
+def test_raw_sink_failure_is_counted_and_later_handlers_receive_record(as_handler: bool) -> None:
+    class BrokenHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            raise OSError("unavailable")
+
+    def broken_callback(message: str) -> None:
+        raise OSError("unavailable")
+
+    _runtime.configure(target="null")
+    owner = Logger()
+    received: list[str] = []
+    owner.add(BrokenHandler() if as_handler else broken_callback)
+    owner.add(received.append)
+    try:
+        with pytest.warns(UserWarning, match="callable sink raised 1 time"):
+            logging.getLogger("third.party").warning("delivery")
+        assert received == ["delivery"]
+        assert (_runtime.writer_metrics() or {})["callable_errors"] == 1
+    finally:
+        owner.remove()
+
+
 def test_add_leaves_a_user_handler_unmodified() -> None:
     _runtime.configure(target="null")
     buffer = io.StringIO()
